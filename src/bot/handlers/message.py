@@ -150,6 +150,50 @@ def _format_error_message(error_str: str) -> str:
         )
 
 
+def _generate_thinking_summary(all_progress_lines: list[str]) -> str:
+    """Generate a one-line summary from progress lines."""
+    tool_count = sum(1 for l in all_progress_lines if "Using tools:" in l)
+    complete_count = sum(1 for l in all_progress_lines if "completed" in l)
+    error_count = sum(1 for l in all_progress_lines if "failed" in l or "Error" in l)
+
+    parts = []
+    if tool_count:
+        parts.append(f"{tool_count} tools called")
+    if complete_count:
+        parts.append(f"{complete_count} completed")
+    if error_count:
+        parts.append(f"{error_count} errors")
+
+    summary = "Thinking done"
+    if parts:
+        summary += " -- " + ", ".join(parts)
+    return summary
+
+
+def _cache_thinking_data(
+    context: ContextTypes.DEFAULT_TYPE,
+    message_id: int,
+    lines: list[str],
+    summary: str,
+    max_cache: int = 5,
+) -> None:
+    """Cache thinking process into context.user_data, keep latest max_cache entries."""
+    cache_key = f"thinking:{message_id}"
+    context.user_data[cache_key] = {
+        "lines": list(lines),
+        "summary": summary,
+    }
+
+    # Clean old cache: only keep latest max_cache entries
+    thinking_keys = sorted(
+        [k for k in context.user_data if k.startswith("thinking:")],
+        key=lambda k: int(k.split(":")[1]),
+    )
+    while len(thinking_keys) > max_cache:
+        oldest = thinking_keys.pop(0)
+        context.user_data.pop(oldest, None)
+
+
 async def handle_text_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -223,6 +267,8 @@ async def handle_text_message(
 
         # Enhanced stream updates handler with accumulated progress tracking
         progress_lines: list[str] = []
+        all_progress_lines: list[str] = []  # 完整思考过程（不受溢出 clear 影响）
+        frozen_messages: list = []  # 被冻结的旧进度消息
         last_progress_text = ""
 
         async def stream_handler(update_obj):
@@ -233,11 +279,15 @@ async def handle_text_message(
                     return
 
                 progress_lines.append(progress_text)
+                # Only collect non-content updates as thinking process
+                if not (update_obj.type == "assistant" and update_obj.content and not update_obj.tool_calls):
+                    all_progress_lines.append(progress_text)
                 full_text = "\n".join(progress_lines)
 
                 # If accumulated text exceeds Telegram limit, freeze current
                 # message and start a new one
                 if len(full_text) > 3800:
+                    frozen_messages.append(progress_msg)
                     progress_lines.clear()
                     progress_lines.append(progress_text)
                     full_text = progress_text
@@ -337,10 +387,48 @@ async def handle_text_message(
             logger.info("Claude task cancelled by user", user_id=user_id)
             if task_registry:
                 await task_registry.remove(user_id)
-            try:
-                await progress_msg.edit_text("Task cancelled.", reply_markup=None)
-            except Exception:
-                pass
+            # Preserve thinking process with cancelled label
+            if all_progress_lines:
+                summary_text = "[Cancelled] " + _generate_thinking_summary(
+                    all_progress_lines
+                )
+                thinking_keyboard = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "View thinking process",
+                                callback_data=f"thinking:expand:{progress_msg.message_id}",
+                            )
+                        ]
+                    ]
+                )
+                try:
+                    await progress_msg.edit_text(
+                        summary_text,
+                        parse_mode="Markdown",
+                        reply_markup=thinking_keyboard,
+                    )
+                    _cache_thinking_data(
+                        context,
+                        progress_msg.message_id,
+                        all_progress_lines,
+                        summary_text,
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    await progress_msg.edit_text(
+                        "Task cancelled.", reply_markup=None
+                    )
+                except Exception:
+                    pass
+            # Clean up frozen messages
+            for frozen_msg in frozen_messages:
+                try:
+                    await frozen_msg.delete()
+                except Exception:
+                    pass
             return
         except ClaudeToolValidationError as e:
             # Tool validation error with detailed instructions
@@ -369,8 +457,46 @@ async def handle_text_message(
         if task_registry:
             await task_registry.remove(user_id)
 
-        # Delete progress message
-        await progress_msg.delete()
+        # Collapse progress message into summary with expand button
+        if all_progress_lines:
+            summary_text = _generate_thinking_summary(all_progress_lines)
+            thinking_keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "View thinking process",
+                            callback_data=f"thinking:expand:{progress_msg.message_id}",
+                        )
+                    ]
+                ]
+            )
+            try:
+                await progress_msg.edit_text(
+                    summary_text,
+                    parse_mode="Markdown",
+                    reply_markup=thinking_keyboard,
+                )
+                _cache_thinking_data(
+                    context, progress_msg.message_id, all_progress_lines, summary_text
+                )
+            except Exception as e:
+                logger.warning("Failed to edit progress to summary", error=str(e))
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+        else:
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
+
+        # Delete frozen progress messages (from overflow)
+        for frozen_msg in frozen_messages:
+            try:
+                await frozen_msg.delete()
+            except Exception:
+                pass
 
         # Send formatted responses (may be multiple messages)
         for i, message in enumerate(formatted_messages):
@@ -455,11 +581,41 @@ async def handle_text_message(
         logger.info("Text message processed successfully", user_id=user_id)
 
     except Exception as e:
-        # Clean up progress message if it exists
+        # Clean up progress message: collapse to summary if possible
         try:
-            await progress_msg.delete()
+            if all_progress_lines:
+                summary_text = "[Error] " + _generate_thinking_summary(
+                    all_progress_lines
+                )
+                thinking_keyboard = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "View thinking process",
+                                callback_data=f"thinking:expand:{progress_msg.message_id}",
+                            )
+                        ]
+                    ]
+                )
+                await progress_msg.edit_text(
+                    summary_text,
+                    parse_mode="Markdown",
+                    reply_markup=thinking_keyboard,
+                )
+                _cache_thinking_data(
+                    context, progress_msg.message_id, all_progress_lines, summary_text
+                )
+            else:
+                await progress_msg.delete()
         except:
             pass
+
+        # Clean up frozen messages
+        for frozen_msg in frozen_messages:
+            try:
+                await frozen_msg.delete()
+            except:
+                pass
 
         error_msg = f"❌ **Error processing message**\n\n{str(e)}"
         await update.message.reply_text(error_msg, parse_mode="Markdown")
