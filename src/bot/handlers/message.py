@@ -26,6 +26,60 @@ def _escape_md(text: str) -> str:
     return text
 
 
+def _extract_tool_summary(tool_name: str, tool_input: dict) -> str:
+    """Extract a concise summary of what a tool is doing from its input."""
+    if not tool_input:
+        return tool_name
+
+    if tool_name == "Bash" and "command" in tool_input:
+        cmd = tool_input["command"].strip()
+        # Show first line, truncate long commands
+        first_line = cmd.split("\n")[0]
+        if len(first_line) > 80:
+            first_line = first_line[:77] + "..."
+        return f"Bash: `{first_line}`"
+
+    if tool_name in ("Read", "ReadFile") and "file_path" in tool_input:
+        return f"Read: `{tool_input['file_path']}`"
+
+    if tool_name == "Write" and "file_path" in tool_input:
+        return f"Write: `{tool_input['file_path']}`"
+
+    if tool_name == "Edit" and "file_path" in tool_input:
+        return f"Edit: `{tool_input['file_path']}`"
+
+    if tool_name == "MultiEdit" and "file_path" in tool_input:
+        return f"MultiEdit: `{tool_input['file_path']}`"
+
+    if tool_name in ("Glob", "Grep") and "pattern" in tool_input:
+        pattern = tool_input["pattern"]
+        if len(pattern) > 60:
+            pattern = pattern[:57] + "..."
+        return f"{tool_name}: `{pattern}`"
+
+    if tool_name == "WebFetch" and "url" in tool_input:
+        url = tool_input["url"]
+        if len(url) > 60:
+            url = url[:57] + "..."
+        return f"WebFetch: `{url}`"
+
+    if tool_name == "Task" and "description" in tool_input:
+        desc = tool_input["description"]
+        if len(desc) > 60:
+            desc = desc[:57] + "..."
+        return f"Task: {desc}"
+
+    # Generic: show tool name with first key hint
+    for key in ("path", "file_path", "query", "command", "name"):
+        if key in tool_input:
+            val = str(tool_input[key])
+            if len(val) > 60:
+                val = val[:57] + "..."
+            return f"{tool_name}: `{val}`"
+
+    return tool_name
+
+
 async def _format_progress_update(update_obj) -> Optional[str]:
     """Format progress updates with enhanced context and visual indicators."""
     if update_obj.type == "tool_result":
@@ -73,11 +127,14 @@ async def _format_progress_update(update_obj) -> Optional[str]:
         return f"❌ *Error*\n\n{safe_error}"
 
     elif update_obj.type == "assistant" and update_obj.tool_calls:
-        # Show when tools are being called
-        tool_names = update_obj.get_tool_names()
-        if tool_names:
-            tools_text = ", ".join(_escape_md(name) for name in tool_names)
-            return f"🔧 *Using tools:* {tools_text}"
+        # Show when tools are being called with operation details
+        summaries = []
+        for tc in update_obj.tool_calls:
+            name = tc.get("name", "unknown")
+            inp = tc.get("input", {})
+            summaries.append(_escape_md(_extract_tool_summary(name, inp)))
+        if summaries:
+            return "\n".join(f"🔧 {s}" for s in summaries)
 
     elif update_obj.type == "assistant" and update_obj.content:
         # Regular content updates with preview
@@ -152,9 +209,15 @@ def _format_error_message(error_str: str) -> str:
 
 def _generate_thinking_summary(all_progress_lines: list[str]) -> str:
     """Generate a one-line summary from progress lines."""
-    tool_count = sum(1 for l in all_progress_lines if "Using tools:" in l)
-    complete_count = sum(1 for l in all_progress_lines if "completed" in l)
-    error_count = sum(1 for l in all_progress_lines if "failed" in l or "Error" in l)
+    # Match both old format "Using tools:" and new format "🔧 ToolName:"
+    tool_count = sum(
+        1 for line in all_progress_lines
+        if "Using tools:" in line or (line.startswith("🔧") and ":" in line)
+    )
+    complete_count = sum(1 for line in all_progress_lines if "completed" in line)
+    error_count = sum(
+        1 for line in all_progress_lines if "failed" in line or "Error" in line
+    )
 
     parts = []
     if tool_count:

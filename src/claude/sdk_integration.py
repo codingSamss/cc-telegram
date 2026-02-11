@@ -398,15 +398,38 @@ class ClaudeSDKManager:
                 if content and isinstance(content, list):
                     # Extract text from TextBlock objects
                     text_parts = []
+                    tool_calls = []
                     for block in content:
                         if hasattr(block, "text"):
                             text_parts.append(block.text)
+                        elif isinstance(block, ToolUseBlock):
+                            tool_calls.append(
+                                {
+                                    "name": getattr(
+                                        block, "name",
+                                        getattr(block, "tool_name", "unknown"),
+                                    ),
+                                    "input": getattr(
+                                        block, "input",
+                                        getattr(block, "tool_input", {}),
+                                    ),
+                                }
+                            )
+
                     if text_parts:
                         update = StreamUpdate(
                             type="assistant",
                             content="\n".join(text_parts),
                         )
                         await stream_callback(update)
+
+                    if tool_calls:
+                        update = StreamUpdate(
+                            type="assistant",
+                            tool_calls=tool_calls,
+                        )
+                        await stream_callback(update)
+
                 elif content:
                     # Fallback for non-list content
                     update = StreamUpdate(
@@ -414,9 +437,6 @@ class ClaudeSDKManager:
                         content=str(content),
                     )
                     await stream_callback(update)
-
-                # Check for tool calls (if available in the message structure)
-                # Note: This depends on the actual claude-agent-sdk message structure
 
             elif isinstance(message, UserMessage):
                 content = getattr(message, "content", "")
