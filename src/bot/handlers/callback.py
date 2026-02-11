@@ -65,7 +65,6 @@ async def handle_callback_query(
             "git": handle_git_callback,
             "export": handle_export_callback,
             "permission": handle_permission_callback,
-            "thinking": handle_thinking_callback,
             "resume": handle_resume_callback,
         }
 
@@ -1250,91 +1249,6 @@ async def handle_permission_callback(
         request_id=request_id,
         decision=decision,
     )
-
-
-async def handle_thinking_callback(
-    query, param: str, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle thinking expand/collapse callbacks."""
-    if not param or ":" not in param:
-        await query.edit_message_text("Invalid thinking callback data.")
-        return
-
-    action, message_id = param.split(":", 1)
-    cache_key = f"thinking:{message_id}"
-    cached = context.user_data.get(cache_key)
-
-    if not cached:
-        await query.edit_message_text(
-            "Thinking process cache has expired and cannot be expanded."
-        )
-        return
-
-    if action == "expand":
-        full_text = "\n".join(cached["lines"])
-
-        # Truncate if exceeds Telegram limit
-        if len(full_text) > 3800:
-            full_text = _truncate_thinking(cached["lines"], max_chars=3800)
-
-        collapse_keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "Collapse",
-                        callback_data=f"thinking:collapse:{message_id}",
-                    )
-                ]
-            ]
-        )
-        try:
-            await query.edit_message_text(
-                full_text,
-                parse_mode="Markdown",
-                reply_markup=collapse_keyboard,
-            )
-        except Exception as e:
-            logger.warning("Failed to expand thinking", error=str(e))
-            await query.edit_message_text(
-                "Failed to expand thinking process. Content may be too long."
-            )
-
-    elif action == "collapse":
-        expand_keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "View thinking process",
-                        callback_data=f"thinking:expand:{message_id}",
-                    )
-                ]
-            ]
-        )
-        await query.edit_message_text(
-            cached["summary"],
-            parse_mode="Markdown",
-            reply_markup=expand_keyboard,
-        )
-
-    else:
-        await query.edit_message_text("Unknown thinking action.")
-
-
-def _truncate_thinking(lines: list[str], max_chars: int = 3800) -> str:
-    """Keep recent progress lines from the end, total length under max_chars."""
-    result = []
-    total = 0
-    for line in reversed(lines):
-        if total + len(line) + 1 > max_chars - 50:
-            break
-        result.insert(0, line)
-        total += len(line) + 1
-
-    skipped = len(lines) - len(result)
-    if skipped > 0:
-        result.insert(0, f"... ({skipped} earlier entries omitted)")
-
-    return "\n".join(result)
 
 
 def _format_file_size(size: int) -> str:
