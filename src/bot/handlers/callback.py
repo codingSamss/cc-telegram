@@ -18,7 +18,6 @@ async def handle_callback_query(
 ) -> None:
     """Route callback queries to appropriate handlers."""
     query = update.callback_query
-    await query.answer()  # Acknowledge the callback
 
     user_id = query.from_user.id
     data = query.data
@@ -31,6 +30,21 @@ async def handle_callback_query(
             action, param = data.split(":", 1)
         else:
             action, param = data, None
+
+        # Handle cancel callback before the generic answer() call,
+        # because cancel needs its own answer text.
+        if action == "cancel" and param == "task":
+            from ...claude.task_registry import TaskRegistry
+
+            task_registry: TaskRegistry = context.bot_data.get("task_registry")
+            if task_registry and await task_registry.cancel(user_id):
+                await query.answer("Task cancellation requested.")
+            else:
+                await query.answer("No active task to cancel.")
+            return
+
+        # Acknowledge the callback for all other actions
+        await query.answer()
 
         # Route to appropriate handler
         handlers = {

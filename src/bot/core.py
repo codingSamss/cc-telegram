@@ -21,6 +21,7 @@ from telegram.ext import (
     filters,
 )
 
+from ..claude.task_registry import TaskRegistry
 from ..config.settings import Settings
 from ..exceptions import ClaudeCodeTelegramError
 from .features.registry import FeatureRegistry
@@ -72,6 +73,9 @@ class ClaudeCodeBot:
         # Add feature registry to dependencies
         self.deps["features"] = self.feature_registry
 
+        # Initialize task registry for cancel support
+        self.deps["task_registry"] = TaskRegistry()
+
         # Set bot commands for menu
         await self._set_bot_commands()
 
@@ -102,6 +106,7 @@ class ClaudeCodeBot:
             BotCommand("export", "Export current session"),
             BotCommand("actions", "Show quick actions"),
             BotCommand("git", "Git repository commands"),
+            BotCommand("cancel", "Cancel the current running task"),
         ]
 
         await self.app.bot.set_my_commands(commands)
@@ -126,6 +131,7 @@ class ClaudeCodeBot:
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),
+            ("cancel", command.cancel_task),
         ]
 
         for cmd, handler in handlers:

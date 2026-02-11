@@ -982,6 +982,26 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.error("Error in git_command", error=str(e), user_id=user_id)
 
 
+async def cancel_task(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /cancel command - cancel the active Claude task."""
+    user_id = update.effective_user.id
+
+    from ...claude.task_registry import TaskRegistry
+
+    task_registry: TaskRegistry = context.bot_data.get("task_registry")
+    if not task_registry:
+        await update.message.reply_text("Task registry not available.")
+        return
+
+    cancelled = await task_registry.cancel(user_id)
+    if cancelled:
+        await update.message.reply_text("Task cancellation requested.")
+    else:
+        await update.message.reply_text("No active task to cancel.")
+
+
 def _format_file_size(size: int) -> str:
     """Format file size in human-readable format."""
     for unit in ["B", "KB", "MB", "GB"]:

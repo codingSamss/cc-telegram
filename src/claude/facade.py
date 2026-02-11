@@ -3,6 +3,7 @@
 Provides simple interface for bot handlers.
 """
 
+import asyncio
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -179,6 +180,8 @@ class ClaudeIntegration:
                     stream_callback=stream_handler,
                     permission_callback=permission_callback,
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as resume_error:
                 # If resume failed (e.g., session expired on Claude's side),
                 # retry as a fresh session
@@ -272,6 +275,9 @@ class ClaudeIntegration:
 
             return response
 
+        except asyncio.CancelledError:
+            logger.info("Claude command cancelled by user", user_id=user_id)
+            raise
         except Exception as e:
             logger.error(
                 "Claude command failed",
@@ -307,6 +313,9 @@ class ClaudeIntegration:
                 self._sdk_failed_count = 0
                 return response
 
+            except asyncio.CancelledError:
+                logger.info("SDK execution cancelled by user")
+                raise
             except Exception as e:
                 error_str = str(e)
                 # Check if this is a JSON decode error that indicates SDK issues
@@ -494,16 +503,26 @@ class ClaudeIntegration:
         session_id: str,
         send_buttons_callback: PermissionRequestCallback,
     ) -> Callable:
-        """Build a can_use_tool callback for the SDK using PermissionManager."""
+        """Build a can_use_tool callback for the SDK using PermissionManager.
+
+        Tools in the allowed_tools whitelist are auto-approved.
+        All other tools are routed to Telegram for user approval.
+        """
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
         permission_manager: PermissionManager = self.permission_manager
+        allowed_tools = self.config.claude_allowed_tools or []
 
         async def can_use_tool(
             tool_name: str,
             tool_input: dict,
             context: Any,
         ) -> Any:
+            # Auto-approve tools in the whitelist
+            if tool_name in allowed_tools:
+                return PermissionResultAllow()
+
+            # All other tools go through Telegram approval
             allowed = await permission_manager.request_permission(
                 tool_name=tool_name,
                 tool_input=tool_input,

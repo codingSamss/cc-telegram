@@ -367,6 +367,9 @@ class ClaudeSDKManager:
                         )
                         # Continue processing even if callback fails
 
+        except asyncio.CancelledError:
+            logger.info("Query streaming cancelled by user")
+            raise
         except Exception as e:
             # Handle both ExceptionGroups and regular exceptions
             if type(e).__name__ == "ExceptionGroup" or hasattr(e, "exceptions"):

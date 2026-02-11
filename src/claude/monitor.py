@@ -38,29 +38,19 @@ class ToolMonitor:
         working_directory: Path,
         user_id: int,
     ) -> Tuple[bool, Optional[str]]:
-        """Validate tool call before execution."""
+        """Validate tool call for security concerns.
+
+        Note: Tool authorization (allowed/denied) is handled pre-execution
+        by the SDK's can_use_tool callback. This method only performs
+        post-execution security auditing (disallowed tools, dangerous
+        commands, path traversal, etc.).
+        """
         logger.debug(
             "Validating tool call",
             tool_name=tool_name,
             working_directory=str(working_directory),
             user_id=user_id,
         )
-
-        # Check if tool is allowed
-        if (
-            hasattr(self.config, "claude_allowed_tools")
-            and self.config.claude_allowed_tools
-        ):
-            if tool_name not in self.config.claude_allowed_tools:
-                violation = {
-                    "type": "disallowed_tool",
-                    "tool_name": tool_name,
-                    "user_id": user_id,
-                    "working_directory": str(working_directory),
-                }
-                self.security_violations.append(violation)
-                logger.warning("Tool not allowed", **violation)
-                return False, f"Tool not allowed: {tool_name}"
 
         # Check if tool is explicitly disallowed
         if (

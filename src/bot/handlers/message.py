@@ -4,8 +4,10 @@ import asyncio
 from typing import Any, Callable, Optional
 
 import structlog
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+
+from ...claude.task_registry import TaskRegistry
 
 from ...claude.exceptions import ClaudeToolValidationError
 from ...config.settings import Settings
@@ -14,6 +16,14 @@ from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
 
 logger = structlog.get_logger()
+
+
+
+def _escape_md(text: str) -> str:
+    """Escape special characters for Telegram legacy Markdown."""
+    for ch in ("_", "*", "`", "["):
+        text = text.replace(ch, f"\\{ch}")
+    return text
 
 
 async def _format_progress_update(update_obj) -> Optional[str]:
@@ -25,18 +35,22 @@ async def _format_progress_update(update_obj) -> Optional[str]:
             # Try to extract tool name from context if available
             tool_name = update_obj.metadata.get("tool_name", "Tool")
 
+        safe_tool_name = _escape_md(tool_name)
+
         if update_obj.is_error():
-            return f"❌ **{tool_name} failed**\n\n_{update_obj.get_error_message()}_"
+            safe_error = _escape_md(update_obj.get_error_message())
+            return f"❌ *{safe_tool_name} failed*\n\n{safe_error}"
         else:
             execution_time = ""
             if update_obj.metadata and update_obj.metadata.get("execution_time_ms"):
                 time_ms = update_obj.metadata["execution_time_ms"]
                 execution_time = f" ({time_ms}ms)"
-            return f"✅ **{tool_name} completed**{execution_time}"
+            return f"✅ *{safe_tool_name} completed*{execution_time}"
 
     elif update_obj.type == "progress":
         # Handle progress updates
-        progress_text = f"🔄 **{update_obj.content or 'Working...'}**"
+        safe_content = _escape_md(update_obj.content or "Working...")
+        progress_text = f"🔄 *{safe_content}*"
 
         percentage = update_obj.get_progress_percentage()
         if percentage is not None:
@@ -55,14 +69,15 @@ async def _format_progress_update(update_obj) -> Optional[str]:
 
     elif update_obj.type == "error":
         # Handle error messages
-        return f"❌ **Error**\n\n_{update_obj.get_error_message()}_"
+        safe_error = _escape_md(update_obj.get_error_message())
+        return f"❌ *Error*\n\n{safe_error}"
 
     elif update_obj.type == "assistant" and update_obj.tool_calls:
         # Show when tools are being called
         tool_names = update_obj.get_tool_names()
         if tool_names:
-            tools_text = ", ".join(tool_names)
-            return f"🔧 **Using tools:** {tools_text}"
+            tools_text = ", ".join(_escape_md(name) for name in tool_names)
+            return f"🔧 *Using tools:* {tools_text}"
 
     elif update_obj.type == "assistant" and update_obj.content:
         # Regular content updates with preview
@@ -71,14 +86,15 @@ async def _format_progress_update(update_obj) -> Optional[str]:
             if len(update_obj.content) > 150
             else update_obj.content
         )
-        return f"🤖 **Claude is working...**\n\n_{content_preview}_"
+        safe_preview = _escape_md(content_preview)
+        return f"🤖 *Claude is working...*\n\n{safe_preview}"
 
     elif update_obj.type == "system":
         # System initialization or other system messages
         if update_obj.metadata and update_obj.metadata.get("subtype") == "init":
             tools_count = len(update_obj.metadata.get("tools", []))
-            model = update_obj.metadata.get("model", "Claude")
-            return f"🚀 **Starting {model}** with {tools_count} tools available"
+            model = _escape_md(update_obj.metadata.get("model", "Claude"))
+            return f"🚀 *Starting {model}* with {tools_count} tools available"
 
     return None
 
@@ -162,13 +178,25 @@ async def handle_text_message(
                 await update.message.reply_text(f"⏱️ {limit_message}")
                 return
 
+        # Check if user already has an active task
+        task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
+        if task_registry and await task_registry.is_busy(user_id):
+            await update.message.reply_text(
+                "A task is already running. Use /cancel to cancel it."
+            )
+            return
+
         # Send typing indicator
         await update.message.chat.send_action("typing")
 
-        # Create progress message
+        # Create progress message with Cancel button
+        cancel_keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Cancel", callback_data="cancel:task")]]
+        )
         progress_msg = await update.message.reply_text(
             "🤔 Processing your request...",
             reply_to_message_id=update.message.message_id,
+            reply_markup=cancel_keyboard,
         )
 
         # Get Claude integration and storage from context
@@ -193,12 +221,37 @@ async def handle_text_message(
         session_id = context.user_data.get("claude_session_id")
         force_new_session = context.user_data.pop("force_new_session", False)
 
-        # Enhanced stream updates handler with progress tracking
+        # Enhanced stream updates handler with accumulated progress tracking
+        progress_lines: list[str] = []
+        last_progress_text = ""
+
         async def stream_handler(update_obj):
+            nonlocal last_progress_text
             try:
                 progress_text = await _format_progress_update(update_obj)
-                if progress_text:
-                    await progress_msg.edit_text(progress_text, parse_mode="Markdown")
+                if not progress_text:
+                    return
+
+                progress_lines.append(progress_text)
+
+                # Build accumulated message
+                full_text = "\n".join(progress_lines)
+
+                # Telegram message limit is 4096 chars; trim oldest lines if needed
+                while len(full_text) > 3800 and len(progress_lines) > 1:
+                    progress_lines.pop(0)
+                    full_text = "\n".join(progress_lines)
+
+                # Skip edit if content hasn't changed
+                if full_text == last_progress_text:
+                    return
+
+                last_progress_text = full_text
+                await progress_msg.edit_text(
+                    full_text,
+                    parse_mode="Markdown",
+                    reply_markup=cancel_keyboard,
+                )
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
@@ -208,9 +261,9 @@ async def handle_text_message(
             bot=context.bot, chat_id=update.effective_chat.id, settings=settings_obj
         )
 
-        # Run Claude command
-        try:
-            claude_response = await claude_integration.run_command(
+        # Run Claude command as cancellable task
+        async def _run_claude():
+            return await claude_integration.run_command(
                 prompt=message_text,
                 working_directory=current_dir,
                 user_id=user_id,
@@ -219,6 +272,25 @@ async def handle_text_message(
                 force_new_session=force_new_session,
                 permission_handler=permission_handler,
             )
+
+        task = asyncio.create_task(_run_claude())
+
+        # Register task for cancel support
+        if task_registry:
+            await task_registry.register(
+                user_id,
+                task,
+                prompt_summary=message_text,
+                progress_message_id=progress_msg.message_id,
+                chat_id=update.effective_chat.id,
+            )
+
+        try:
+            claude_response = await task
+
+            # Mark task as completed
+            if task_registry:
+                await task_registry.complete(user_id)
 
             # Update session ID
             context.user_data["claude_session_id"] = claude_response.session_id
@@ -249,6 +321,15 @@ async def handle_text_message(
                 claude_response.content
             )
 
+        except asyncio.CancelledError:
+            logger.info("Claude task cancelled by user", user_id=user_id)
+            if task_registry:
+                await task_registry.remove(user_id)
+            try:
+                await progress_msg.edit_text("Task cancelled.", reply_markup=None)
+            except Exception:
+                pass
+            return
         except ClaudeToolValidationError as e:
             # Tool validation error with detailed instructions
             logger.error(
@@ -263,12 +344,18 @@ async def handle_text_message(
             formatted_messages = [FormattedMessage(str(e), parse_mode="Markdown")]
         except Exception as e:
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
+            if task_registry:
+                await task_registry.fail(user_id)
             # Format error and create FormattedMessage
             from ..utils.formatting import FormattedMessage
 
             formatted_messages = [
                 FormattedMessage(_format_error_message(str(e)), parse_mode="Markdown")
             ]
+
+        # Clean up task registry
+        if task_registry:
+            await task_registry.remove(user_id)
 
         # Delete progress message
         await progress_msg.delete()
