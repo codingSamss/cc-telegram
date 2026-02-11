@@ -50,6 +50,7 @@ def find_claude_cli(claude_cli_path: Optional[str] = None) -> Optional[str]:
 
     # First check if a specific path was provided via config or env
     if claude_cli_path:
+        claude_cli_path = os.path.abspath(claude_cli_path)
         if os.path.exists(claude_cli_path) and os.access(claude_cli_path, os.X_OK):
             return claude_cli_path
 
@@ -158,6 +159,7 @@ class ClaudeSDKManager:
         session_id: Optional[str] = None,
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        permission_callback: Optional[Callable] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -178,6 +180,10 @@ class ClaudeSDKManager:
                 allowed_tools=self.config.claude_allowed_tools,
                 cli_path=cli_path,
             )
+
+            # Pass permission callback if provided
+            if permission_callback:
+                options.can_use_tool = permission_callback
 
             # Pass MCP server configuration if enabled
             if self.config.enable_mcp and self.config.mcp_config_path:

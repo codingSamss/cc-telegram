@@ -1,7 +1,7 @@
 """Message handlers for non-command inputs."""
 
 import asyncio
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import structlog
 from telegram import Update
@@ -191,6 +191,7 @@ async def handle_text_message(
 
         # Get existing session ID
         session_id = context.user_data.get("claude_session_id")
+        force_new_session = context.user_data.pop("force_new_session", False)
 
         # Enhanced stream updates handler with progress tracking
         async def stream_handler(update_obj):
@@ -201,6 +202,12 @@ async def handle_text_message(
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
+        # Build permission handler only when SDK is active
+        settings_obj: Settings = context.bot_data["settings"]
+        permission_handler = build_permission_handler(
+            bot=context.bot, chat_id=update.effective_chat.id, settings=settings_obj
+        )
+
         # Run Claude command
         try:
             claude_response = await claude_integration.run_command(
@@ -209,6 +216,8 @@ async def handle_text_message(
                 user_id=user_id,
                 session_id=session_id,
                 on_stream=stream_handler,
+                force_new_session=force_new_session,
+                permission_handler=permission_handler,
             )
 
             # Update session ID
@@ -300,13 +309,11 @@ async def handle_text_message(
         if conversation_enhancer and claude_response:
             try:
                 # Update conversation context
-                conversation_context = conversation_enhancer.update_context(
-                    session_id=claude_response.session_id,
+                conversation_enhancer.update_context(
                     user_id=user_id,
-                    working_directory=str(current_dir),
-                    tools_used=claude_response.tools_used or [],
-                    response_content=claude_response.content,
+                    response=claude_response,
                 )
+                conversation_context = conversation_enhancer.get_or_create_context(user_id)
 
                 # Check if we should show follow-up suggestions
                 if conversation_enhancer.should_show_suggestions(
@@ -520,6 +527,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "current_directory", settings.approved_directory
         )
         session_id = context.user_data.get("claude_session_id")
+        force_new_session = context.user_data.pop("force_new_session", False)
+        permission_handler = build_permission_handler(
+            bot=context.bot, chat_id=update.effective_chat.id, settings=settings
+        )
 
         # Process with Claude
         try:
@@ -528,6 +539,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,
+                force_new_session=force_new_session,
+                permission_handler=permission_handler,
             )
 
             # Update session ID
@@ -647,6 +660,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "current_directory", settings.approved_directory
             )
             session_id = context.user_data.get("claude_session_id")
+            force_new_session = context.user_data.pop("force_new_session", False)
+            permission_handler = build_permission_handler(
+                bot=context.bot, chat_id=update.effective_chat.id, settings=settings
+            )
 
             # Process with Claude
             try:
@@ -655,6 +672,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     working_directory=current_dir,
                     user_id=user_id,
                     session_id=session_id,
+                    force_new_session=force_new_session,
+                    permission_handler=permission_handler,
                 )
 
                 # Update session ID
@@ -886,3 +905,85 @@ def _update_working_directory_from_claude_response(
                     "Invalid path in Claude response", path=match, error=str(e)
                 )
                 continue
+
+
+def _format_tool_input_summary(tool_name: str, tool_input: dict) -> str:
+    """Format a short summary of tool input for the permission prompt."""
+    if not tool_input:
+        return ""
+
+    parts = []
+    if tool_name in ("Write", "Edit", "Read") and "file_path" in tool_input:
+        parts.append(f"File: `{tool_input['file_path']}`")
+    elif tool_name == "Bash" and "command" in tool_input:
+        cmd = tool_input["command"]
+        if len(cmd) > 120:
+            cmd = cmd[:120] + "..."
+        parts.append(f"Command: `{cmd}`")
+    elif tool_name == "WebFetch" and "url" in tool_input:
+        parts.append(f"URL: `{tool_input['url']}`")
+    else:
+        # Generic: show first key-value pair
+        for key, value in list(tool_input.items())[:2]:
+            val_str = str(value)
+            if len(val_str) > 80:
+                val_str = val_str[:80] + "..."
+            parts.append(f"{key}: `{val_str}`")
+
+    return "\n".join(parts)
+
+
+def build_permission_handler(
+    bot: Any,
+    chat_id: int,
+    settings: Any,
+) -> Optional[Callable]:
+    """Build a permission button sender callback for SDK tool permission requests.
+
+    Returns None if SDK is not active. The returned callback can be passed as
+    ``permission_handler`` to ``ClaudeIntegration.run_command``.
+    """
+    if not settings.use_sdk:
+        return None
+
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    async def send_permission_buttons(
+        request_id: str,
+        tool_name: str,
+        tool_input: dict,
+        sess_id: str,
+    ) -> None:
+        input_summary = _format_tool_input_summary(tool_name, tool_input)
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Allow",
+                    callback_data=f"permission:allow:{request_id}",
+                ),
+                InlineKeyboardButton(
+                    "Allow All",
+                    callback_data=f"permission:allow_all:{request_id}",
+                ),
+                InlineKeyboardButton(
+                    "Deny",
+                    callback_data=f"permission:deny:{request_id}",
+                ),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"**Tool Permission Request**\n\n"
+                f"Claude wants to use: `{tool_name}`\n"
+                f"{input_summary}\n\n"
+                f"Allow this action?"
+            ),
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+
+    return send_permission_buttons

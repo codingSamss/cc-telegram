@@ -6,6 +6,7 @@ from telegram.ext import ContextTypes
 
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
+from .message import build_permission_handler
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 
@@ -41,6 +42,7 @@ async def handle_callback_query(
             "conversation": handle_conversation_callback,
             "git": handle_git_callback,
             "export": handle_export_callback,
+            "permission": handle_permission_callback,
         }
 
         handler = handlers.get(action)
@@ -121,8 +123,13 @@ async def handle_cd_callback(
             return
 
         # Update directory and clear session
+        old_session_id = context.user_data.get("claude_session_id")
         context.user_data["current_directory"] = new_path
         context.user_data["claude_session_id"] = None
+        if old_session_id:
+            permission_manager = context.bot_data.get("permission_manager")
+            if permission_manager:
+                permission_manager.clear_session(old_session_id)
 
         # Send confirmation with new directory info
         relative_path = new_path.relative_to(settings.approved_directory)
@@ -306,9 +313,15 @@ async def _handle_new_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
     """Handle new session action."""
     settings: Settings = context.bot_data["settings"]
 
-    # Clear session
+    # Clear session and force new session on next message
+    old_session_id = context.user_data.get("claude_session_id")
     context.user_data["claude_session_id"] = None
     context.user_data["session_started"] = True
+    context.user_data["force_new_session"] = True
+    if old_session_id:
+        permission_manager = context.bot_data.get("permission_manager")
+        if permission_manager:
+            permission_manager.clear_session(old_session_id)
 
     current_dir = context.user_data.get(
         "current_directory", settings.approved_directory
@@ -380,6 +393,10 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data["claude_session_id"] = None
     context.user_data["session_started"] = False
     context.user_data["last_message"] = None
+    if claude_session_id:
+        permission_manager = context.bot_data.get("permission_manager")
+        if permission_manager:
+            permission_manager.clear_session(claude_session_id)
 
     # Create quick action buttons
     keyboard = [
@@ -448,6 +465,9 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=claude_session_id,
+                permission_handler=build_permission_handler(
+                    bot=context.bot, chat_id=query.message.chat_id, settings=settings
+                ),
             )
         else:
             # No session in context, try to find the most recent session
@@ -461,6 +481,9 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
                 user_id=user_id,
                 working_directory=current_dir,
                 prompt=None,  # No prompt = use --continue
+                permission_handler=build_permission_handler(
+                    bot=context.bot, chat_id=query.message.chat_id, settings=settings
+                ),
             )
 
         if claude_response:
@@ -796,7 +819,12 @@ async def handle_quick_action_callback(
 
         # Run the action through Claude
         claude_response = await claude_integration.run_command(
-            prompt=action.prompt, working_directory=current_dir, user_id=user_id
+            prompt=action.prompt,
+            working_directory=current_dir,
+            user_id=user_id,
+            permission_handler=build_permission_handler(
+                bot=context.bot, chat_id=query.message.chat_id, settings=settings
+            ),
         )
 
         if claude_response:
@@ -900,8 +928,13 @@ async def handle_conversation_callback(
             conversation_enhancer.clear_context(user_id)
 
         # Clear session data
+        old_session_id = context.user_data.get("claude_session_id")
         context.user_data["claude_session_id"] = None
         context.user_data["session_started"] = False
+        if old_session_id:
+            permission_manager = context.bot_data.get("permission_manager")
+            if permission_manager:
+                permission_manager.clear_session(old_session_id)
 
         current_dir = context.user_data.get(
             "current_directory", settings.approved_directory
@@ -1145,6 +1178,54 @@ async def handle_export_callback(
             "Export failed", error=str(e), user_id=user_id, format=export_format
         )
         await query.edit_message_text(f"❌ **Export Failed**\n\n{str(e)}")
+
+
+async def handle_permission_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle tool permission button callbacks."""
+    user_id = query.from_user.id
+
+    if not param or ":" not in param:
+        await query.edit_message_text("Invalid permission callback data.")
+        return
+
+    decision, request_id = param.split(":", 1)
+
+    permission_manager = context.bot_data.get("permission_manager")
+    if not permission_manager:
+        await query.edit_message_text("Permission manager not available.")
+        return
+
+    resolved = permission_manager.resolve_permission(request_id, decision, user_id=user_id)
+
+    if not resolved:
+        await query.edit_message_text(
+            "**Permission Request Expired**\n\n"
+            "This permission request has already been handled or timed out.",
+            parse_mode="Markdown",
+        )
+        return
+
+    decision_labels = {
+        "allow": "Allowed",
+        "allow_all": "Allowed (all for session)",
+        "deny": "Denied",
+    }
+    label = decision_labels.get(decision, decision)
+
+    await query.edit_message_text(
+        f"**Permission {label}**\n\n"
+        f"Your choice has been applied.",
+        parse_mode="Markdown",
+    )
+
+    logger.info(
+        "Permission callback handled",
+        user_id=user_id,
+        request_id=request_id,
+        decision=decision,
+    )
 
 
 def _format_file_size(size: int) -> str:

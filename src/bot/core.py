@@ -53,6 +53,13 @@ class ClaudeCodeBot:
         builder.write_timeout(30)
         builder.pool_timeout(30)
 
+        # Enable concurrent update processing so that permission button
+        # callbacks can be handled while a Claude request is waiting for
+        # user approval (without this the default serial processing causes
+        # a deadlock where the callback_query update is queued behind the
+        # blocked message update).
+        builder.concurrent_updates(True)
+
         self.app = builder.build()
 
         # Initialize feature registry

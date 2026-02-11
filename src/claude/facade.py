@@ -12,6 +12,7 @@ from ..config.settings import Settings
 from .exceptions import ClaudeToolValidationError
 from .integration import ClaudeProcessManager, ClaudeResponse, StreamUpdate
 from .monitor import ToolMonitor
+from .permissions import PermissionManager, PermissionRequestCallback
 from .sdk_integration import ClaudeSDKManager
 from .session import SessionManager
 
@@ -28,9 +29,11 @@ class ClaudeIntegration:
         sdk_manager: Optional[ClaudeSDKManager] = None,
         session_manager: Optional[SessionManager] = None,
         tool_monitor: Optional[ToolMonitor] = None,
+        permission_manager: Optional["PermissionManager"] = None,
     ):
         """Initialize Claude integration facade."""
         self.config = config
+        self.permission_manager = permission_manager or PermissionManager()
 
         # Initialize both managers for fallback capability
         self.sdk_manager = (
@@ -55,6 +58,8 @@ class ClaudeIntegration:
         user_id: int,
         session_id: Optional[str] = None,
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
+        force_new_session: bool = False,
+        permission_handler: Optional[PermissionRequestCallback] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
         logger.info(
@@ -66,8 +71,8 @@ class ClaudeIntegration:
         )
 
         # If no session_id provided, try to find an existing session for this
-        # user+directory combination (auto-resume)
-        if not session_id:
+        # user+directory combination (auto-resume), unless force_new_session is set
+        if not session_id and not force_new_session:
             existing_session = await self._find_resumable_session(
                 user_id, working_directory
             )
@@ -144,6 +149,15 @@ class ClaudeIntegration:
                 except Exception as e:
                     logger.warning("Stream callback failed", error=str(e))
 
+        # Build permission callback for SDK if handler provided
+        permission_callback = None
+        if permission_handler and self.config.use_sdk:
+            permission_callback = self._build_permission_callback(
+                user_id=user_id,
+                session_id=session.session_id,
+                send_buttons_callback=permission_handler,
+            )
+
         # Execute command
         try:
             # Continue session if we have a real (non-temporary) session ID
@@ -163,6 +177,7 @@ class ClaudeIntegration:
                     session_id=claude_session_id,
                     continue_session=should_continue,
                     stream_callback=stream_handler,
+                    permission_callback=permission_callback,
                 )
             except Exception as resume_error:
                 # If resume failed (e.g., session expired on Claude's side),
@@ -188,6 +203,7 @@ class ClaudeIntegration:
                         session_id=None,
                         continue_session=False,
                         stream_callback=stream_handler,
+                        permission_callback=permission_callback,
                     )
                 else:
                     raise
@@ -272,6 +288,7 @@ class ClaudeIntegration:
         session_id: Optional[str] = None,
         continue_session: bool = False,
         stream_callback: Optional[Callable] = None,
+        permission_callback: Optional[Callable] = None,
     ) -> ClaudeResponse:
         """Execute command with SDK->subprocess fallback on JSON decode errors."""
         # Try SDK first if configured
@@ -284,6 +301,7 @@ class ClaudeIntegration:
                     session_id=session_id,
                     continue_session=continue_session,
                     stream_callback=stream_callback,
+                    permission_callback=permission_callback,
                 )
                 # Reset failure count on success
                 self._sdk_failed_count = 0
@@ -379,6 +397,7 @@ class ClaudeIntegration:
         working_directory: Path,
         prompt: Optional[str] = None,
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
+        permission_handler: Optional[PermissionRequestCallback] = None,
     ) -> Optional[ClaudeResponse]:
         """Continue the most recent session."""
         logger.info(
@@ -414,6 +433,7 @@ class ClaudeIntegration:
             user_id=user_id,
             session_id=latest_session.session_id,
             on_stream=on_stream,
+            permission_handler=permission_handler,
         )
 
     async def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -467,6 +487,38 @@ class ClaudeIntegration:
         await self.cleanup_expired_sessions()
 
         logger.info("Claude integration shutdown complete")
+
+    def _build_permission_callback(
+        self,
+        user_id: int,
+        session_id: str,
+        send_buttons_callback: PermissionRequestCallback,
+    ) -> Callable:
+        """Build a can_use_tool callback for the SDK using PermissionManager."""
+        from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+        permission_manager: PermissionManager = self.permission_manager
+
+        async def can_use_tool(
+            tool_name: str,
+            tool_input: dict,
+            context: Any,
+        ) -> Any:
+            allowed = await permission_manager.request_permission(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                session_id=session_id,
+                send_buttons_callback=send_buttons_callback,
+            )
+            if allowed:
+                return PermissionResultAllow()
+            else:
+                return PermissionResultDeny(
+                    message="User denied permission via Telegram"
+                )
+
+        return can_use_tool
 
     def _get_admin_instructions(self, blocked_tools: List[str]) -> str:
         """Generate admin instructions for enabling blocked tools."""

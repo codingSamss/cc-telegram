@@ -179,7 +179,14 @@ class ClaudeProcessManager:
         self, prompt: str, session_id: Optional[str], continue_session: bool
     ) -> List[str]:
         """Build Claude Code command with arguments."""
-        cmd = [self.config.claude_binary_path or "claude"]
+        from .sdk_integration import find_claude_cli
+
+        cli_path = (
+            find_claude_cli(self.config.claude_cli_path)
+            or self.config.claude_binary_path
+            or "claude"
+        )
+        cmd = [cli_path]
 
         if continue_session and not prompt:
             # Continue existing session without new prompt

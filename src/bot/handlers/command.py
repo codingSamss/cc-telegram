@@ -6,6 +6,7 @@ from telegram.ext import ContextTypes
 
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
+from .message import build_permission_handler
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 
@@ -126,6 +127,7 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Clear existing session data - this is the explicit way to reset context
     context.user_data["claude_session_id"] = None
     context.user_data["session_started"] = True
+    context.user_data["force_new_session"] = True
 
     cleared_info = ""
     if old_session_id:
@@ -203,6 +205,11 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=claude_session_id,
+                permission_handler=build_permission_handler(
+                    bot=context.bot,
+                    chat_id=update.effective_chat.id,
+                    settings=settings,
+                ),
             )
         else:
             # No session in context, try to find the most recent session

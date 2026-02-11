@@ -6,6 +6,7 @@ Features:
 - Usage analytics
 """
 
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -112,38 +113,33 @@ class ToolMonitor:
         # Validate shell commands
         if tool_name in ["bash", "shell", "Bash"]:
             command = tool_input.get("command", "")
+            cmd_lower = command.lower()
 
-            # Check for dangerous commands
-            dangerous_patterns = [
-                "rm -rf",
-                "sudo",
-                "chmod 777",
-                "curl",
-                "wget",
-                "nc ",
-                "netcat",
-                ">",
-                ">>",
-                "|",
-                "&",
-                ";",
-                "$(",
-                "`",
+            # Truly dangerous patterns (regex for precision)
+            dangerous_regex_patterns = [
+                (r"\brm\s+-rf\s+/", "rm -rf /"),
+                (r"\bsudo\b", "sudo"),
+                (r"\bchmod\s+777\b", "chmod 777"),
+                (r"\bnetcat\b", "netcat"),
+                (r"\bnc\s+-[elp]", "nc (reverse shell)"),
+                (r"\bmkfs\b", "mkfs"),
+                (r"\bdd\s+if=", "dd"),
+                (r":\(\)\s*\{.*\|.*&\s*\}\s*;", "fork bomb"),
             ]
 
-            for pattern in dangerous_patterns:
-                if pattern in command.lower():
+            for pattern, label in dangerous_regex_patterns:
+                if re.search(pattern, cmd_lower):
                     violation = {
                         "type": "dangerous_command",
                         "tool_name": tool_name,
                         "command": command,
-                        "pattern": pattern,
+                        "pattern": label,
                         "user_id": user_id,
                         "working_directory": str(working_directory),
                     }
                     self.security_violations.append(violation)
                     logger.warning("Dangerous command detected", **violation)
-                    return False, f"Dangerous command pattern detected: {pattern}"
+                    return False, f"Dangerous command pattern detected: {label}"
 
         # Track usage
         self.tool_usage[tool_name] += 1

@@ -18,6 +18,7 @@ from src.claude import (
     SessionManager,
     ToolMonitor,
 )
+from src.claude.permissions import PermissionManager
 from src.claude.sdk_integration import ClaudeSDKManager
 from src.config.features import FeatureFlags
 from src.config.loader import load_config
@@ -131,6 +132,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     session_storage = SQLiteSessionStorage(storage.db_manager)
     session_manager = SessionManager(config, session_storage)
     tool_monitor = ToolMonitor(config, security_validator)
+    permission_manager = PermissionManager()
 
     # Create Claude manager based on configuration
     if config.use_sdk:
@@ -149,6 +151,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         sdk_manager=sdk_manager,
         session_manager=session_manager,
         tool_monitor=tool_monitor,
+        permission_manager=permission_manager,
     )
 
     # Create bot with all dependencies
@@ -159,6 +162,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "audit_logger": audit_logger,
         "claude_integration": claude_integration,
         "storage": storage,
+        "permission_manager": permission_manager,
     }
 
     bot = ClaudeCodeBot(config, dependencies)

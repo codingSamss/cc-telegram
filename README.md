@@ -1,528 +1,203 @@
-# Claude Code Telegram Bot 🤖
+# Claude Code Telegram Bot
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+通过 Telegram Bot 远程控制本地机器上运行的 Claude Code，实现手机端下达指令、查看结果的工作流。
 
-A powerful Telegram bot that provides remote access to [Claude Code](https://claude.ai/code), enabling developers to interact with their projects from anywhere. Transform your phone into a development terminal with full Claude AI assistance, project navigation, and session persistence.
+基于 Python，使用 `python-telegram-bot` (Polling 模式) + `claude-agent-sdk`，无需 Cloudflare Tunnel、tmux 等外部依赖。启动即用。
 
-## ✨ What is this?
+## 架构概览
 
-This bot bridges Telegram and Claude Code, allowing you to:
-- 💬 **Chat with Claude** about your code projects through Telegram
-- 📁 **Navigate directories** and manage files remotely  
-- 🔄 **Maintain context** across conversations with session persistence
-- 📱 **Code on the go** from any device with Telegram
-- 🛡️ **Stay secure** with built-in authentication and sandboxing
-
-Perfect for code reviews on mobile, quick fixes while traveling, or getting AI assistance when away from your development machine.
-
-## 🚀 Quick Start
-
-### Demo
 ```
-You: cd my-project
-Bot: 📂 Changed to: my-project/
-
-You: ls  
-Bot: 📁 src/
-     📁 tests/
-     📄 README.md
-     📄 package.json
-
-You: Can you help me add error handling to src/api.py?
-Bot: 🤖 I'll help you add robust error handling to your API...
-     [Claude analyzes your code and suggests improvements]
+手机 Telegram App
+    |  HTTPS (TLS 加密)
+    v
+Telegram Bot API 服务器
+    |  Long Polling (Bot 主动拉取)
+    v
+本地 Python Bot 进程
+    |  claude-agent-sdk async query()
+    v
+Claude Code (SDK 集成 / CLI 子进程 fallback)
+    |  结果解析 + SQLite 存储
+    v
+Telegram 回复用户
 ```
 
-## ✨ Features
+Bot 使用 Long Polling 模式主动拉取消息，不需要公网 IP 或反向代理。Claude 集成采用双后端架构：SDK 为主、CLI 子进程兜底，SDK 失败时自动切换。
 
-### 🚧 Development Status
+## 前置要求
 
-This project is actively being developed. Here's the current status of features:
+- Python 3.10+ (推荐 3.11)
+- [Poetry](https://python-poetry.org/) 包管理器
+- Claude Code CLI (已登录认证)
+- Telegram 账号
 
-#### ✅ **Working Features**
-- Full Telegram bot functionality with advanced command handling
-- Directory navigation (`cd`, `ls`, `pwd`) with project switching
-- Multi-layer authentication (whitelist + optional token-based)
-- Advanced rate limiting with token bucket algorithm
-- Complete Claude integration with SDK/CLI support
-- **✨ Enhanced file upload handling with archive extraction**
-- **✨ Git integration with safe repository operations**
-- **✨ Quick actions system with context-aware buttons**
-- **✨ Session export in Markdown, HTML, and JSON formats**
-- **✨ Image/screenshot upload with smart analysis prompts**
-- **✨ Conversation enhancements with follow-up suggestions**
-- SQLite database persistence with migrations
-- Comprehensive usage and cost tracking
-- Session management with persistence
-- Audit logging and security event tracking
+## 部署步骤
 
-#### 🚀 **New Advanced Features**
-- **📦 Archive Analysis**: Upload ZIP/TAR files for comprehensive project analysis
-- **🔄 Git Operations**: View status, diffs, logs, and commit history
-- **⚡ Quick Actions**: Context-aware buttons for tests, linting, formatting, etc.
-- **📤 Session Export**: Download conversation history in multiple formats
-- **🖼️ Image Support**: Upload screenshots and diagrams for analysis
-- **💡 Smart Suggestions**: AI-powered follow-up action recommendations
-
-#### 🔄 **Planned Enhancements**
-- True streaming responses with real-time updates
-- Claude vision API integration for full image analysis
-- Custom quick actions configuration
-- Advanced Git operations (when security permits)
-- Plugin system for third-party extensions
-- Multi-language code execution
-- Webhook support for CI/CD integration
-
-### 🤖 Claude AI Integration
-- **Full Claude Code Access**: Complete integration with Claude's powerful coding assistant
-- **Session Persistence**: Maintain conversation context with automatic session resumption per project directory
-- **SDK & CLI Support**: Works with both Anthropic Python SDK and Claude CLI
-- **Error Recovery**: Intelligent error handling with helpful suggestions and retry logic
-- **Tool Support**: Access to Claude's full toolkit including file operations, code analysis, and more
-
-### 📱 Terminal-like Interface  
-- **Directory Navigation**: `cd`, `ls`, `pwd` commands just like a real terminal
-- **File Management**: Upload files, archives, and images for Claude to analyze
-- **Git Integration**: View repository status, diffs, and commit history
-- **Project Switching**: Easy navigation between different codebases with context preservation
-- **Command History**: Full session tracking with export capabilities
-
-### 🛡️ Enterprise-Grade Security
-- **Multi-Layer Authentication**: Whitelist-based and optional token authentication
-- **Directory Isolation**: Strict sandboxing to approved project directories
-- **Rate Limiting**: Token bucket algorithm with request and cost-based limits
-- **Comprehensive Audit Logging**: Complete tracking of all user actions and security events
-- **Input Validation**: Protection against injection attacks, path traversal, and zip bombs
-
-### ⚡ Developer Experience
-- **Quick Actions**: Context-aware buttons for tests, linting, formatting, and more
-- **Session Management**: Start, continue, end, export, and monitor Claude sessions
-- **Usage Analytics**: Detailed cost tracking, usage patterns, and system statistics
-- **Responsive Design**: Clean, mobile-friendly interface with inline keyboards
-- **Smart Follow-ups**: AI-powered suggestions for next actions based on context
-
-## 🛠️ Installation
-
-### Prerequisites
-
-- **Python 3.9+** - [Download here](https://www.python.org/downloads/)
-- **Poetry** - Modern Python dependency management
-- **Claude Code CLI** - [Install from here](https://claude.ai/code)
-- **Telegram Bot Token** - Get one from [@BotFather](https://t.me/botfather)
-
-### 1. Get Your Bot Token
-
-1. Message [@BotFather](https://t.me/botfather) on Telegram
-2. Send `/newbot` and follow the prompts
-3. Save your bot token (it looks like `1234567890:ABC...`)
-4. Note your bot username (e.g., `my_claude_bot`)
-
-### 2. Set Up Claude Authentication
-
-Choose one of these authentication methods:
-
-**Option 1: Use existing Claude CLI login (Recommended)**
-```bash
-# Install Claude CLI
-# Follow instructions at https://claude.ai/code
-
-# Authenticate with Claude
-claude
-
-# follow the prompts to authenticate
-
-# The bot will automatically use your CLI credentials
-```
-
-**Option 2: Use API key directly**
-```bash
-# Get your API key from https://console.anthropic.com/
-# You'll add this to your .env file in the next step
-```
-
-### 3. Install the Bot
+### Step 1: 安装系统依赖
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/claude-code-telegram.git
-cd claude-code-telegram
+# macOS
+brew install python@3.11
 
-# Install Poetry (if needed)
+# Poetry
 curl -sSL https://install.python-poetry.org | python3 -
 
-# Install dependencies
-make dev
+# Node.js (CLI fallback 模式需要)
+brew install node
 ```
 
-### 4. Configure Environment
+### Step 2: 创建 Telegram Bot
+
+1. 在 Telegram 搜索 `@BotFather`，发送 `/newbot`
+2. 按提示设置 Bot 名称，获得 **Bot Token** (格式: `1234567890:ABC-DEF...`)
+3. 记下 Bot 用户名 (不带 `@`)
+4. 获取你的 User ID: 向 `@userinfobot` 发消息，记下返回的数字
+
+### Step 3: 克隆项目并安装依赖
 
 ```bash
-# Copy the example configuration
+git clone <repo-url> ~/cc-telegram
+cd ~/cc-telegram
+poetry install
+```
+
+### Step 4: 配置环境变量
+
+```bash
 cp .env.example .env
-
-# Edit with your settings
-nano .env
 ```
 
-**Minimum required configuration:**
+编辑 `.env`，填写以下必填项:
+
 ```bash
-TELEGRAM_BOT_TOKEN=1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_BOT_USERNAME=my_claude_bot
-APPROVED_DIRECTORY=/Users/yourname/projects
-ALLOWED_USERS=123456789  # Your Telegram user ID
+# === 必填 ===
+TELEGRAM_BOT_TOKEN=<从 BotFather 获取>
+TELEGRAM_BOT_USERNAME=<Bot 用户名，不带 @>
+APPROVED_DIRECTORY=/path/to/your/projects
+
+# === 安全 ===
+ALLOWED_USERS=<你的 Telegram User ID>
+
+# === Claude 集成 ===
+USE_SDK=false
+CLAUDE_CLI_PATH=./claude-wrapper.sh
+CLAUDE_MAX_TURNS=50
+CLAUDE_TIMEOUT_SECONDS=600
 ```
 
-### 5. Run the Bot
+完整配置项参考 `.env.example`。
+
+### Step 5: 配置 claude-wrapper.sh
+
+如果使用 CLI 子进程模式 (`USE_SDK=false`)，需要创建包装脚本:
 
 ```bash
-# Start in debug mode
+cat > claude-wrapper.sh << 'EOF'
+#!/bin/bash
+# 根据需要配置代理 (不需要代理则删除以下三行)
+export http_proxy="http://127.0.0.1:7897"
+export https_proxy="http://127.0.0.1:7897"
+export no_proxy="localhost,127.0.0.1"
+exec /opt/homebrew/bin/npx -y @anthropic-ai/claude-code@latest "$@"
+EOF
+chmod +x claude-wrapper.sh
+```
+
+> 此脚本已在 `.gitignore` 中屏蔽，不会提交到仓库。根据你的环境修改代理地址和 `npx` 路径。
+
+### Step 6: 确保 Claude CLI 已认证
+
+```bash
+# 安装 Claude Code CLI
+npm install -g @anthropic-ai/claude-code
+
+# 登录认证
+claude auth login
+
+# 验证状态
+claude auth status
+```
+
+### Step 7: 启动
+
+```bash
+# 普通启动
+make run
+
+# 或 Debug 日志启动
 make run-debug
 
-# Or for production
-make run
+# 或直接运行
+poetry run python -m src.main
 ```
 
-🎉 **That's it!** Message your bot on Telegram to get started.
+启动后在 Telegram 中给 Bot 发消息即可使用。
 
-> 📋 **Detailed Setup Guide**: For comprehensive setup instructions including authentication options and troubleshooting, see [docs/setup.md](docs/setup.md)
+## 日常使用
 
-## 📱 Usage
+### Bot 命令
 
-### Basic Commands
+| 命令 | 说明 |
+|------|------|
+| `/start` | 启动 Bot |
+| `/help` | 查看帮助 |
+| `/cd <path>` | 切换工作目录 |
+| `/ls` | 列出当前目录文件 |
+| `/pwd` | 显示当前目录 |
+| `/projects` | 显示可用项目 |
+| `/new` | 清除上下文，开始新会话 |
+| `/status` | 查看 Bot 状态和用量 |
+| `/git` | 查看 Git 仓库信息 |
+| `/actions` | 显示快捷操作按钮 |
+| `/export` | 导出会话记录 |
 
-Once your bot is running, you can use these commands in Telegram:
+### 使用方式
 
-#### Navigation Commands
-```
-/ls                    # List files in current directory
-/cd myproject         # Change to project directory  
-/pwd                  # Show current directory
-/projects             # Show available projects
-```
+- 直接发送文本消息 = 向 Claude Code 下达指令
+- 发送文件 = Claude 分析文件内容 (支持代码、配置、文档)
+- 发送图片 = Claude 分析截图/图表
+- 会话按 用户+目录 维度自动保持，切换目录自动恢复对应会话
 
-#### Session Management
-```
-/new                  # Clear context and start a fresh Claude session
-/continue [message]   # Explicitly continue previous session
-/end                  # End current session and clear context
-/status               # Show session status and usage
-/export               # Export session (choose format: Markdown, HTML, JSON)
-```
+## 安全模型
 
-> **Session behavior:** Sessions are automatically maintained per project
-> directory. Switching directories with `/cd` resumes the session for that
-> project. Use `/new` or `/end` to explicitly clear context. Sessions persist
-> across bot restarts.
+5 层防御体系:
 
-#### Advanced Features
-```
-/git                  # Show git repository info (status, diff, log)
-/actions              # Show context-aware quick actions
-```
+| 层级 | 机制 | 说明 |
+|------|------|------|
+| 身份认证 | Telegram User ID 白名单 | `ALLOWED_USERS` 配置 |
+| 目录隔离 | `APPROVED_DIRECTORY` + 路径穿越防护 | 只允许访问指定目录及子目录 |
+| 输入验证 | 屏蔽 `..`、`;`、`&&`、`$()` 等 | 阻止命令注入 |
+| 限流 | Token Bucket 算法 | 可配置请求数/窗口/突发容量 |
+| 审计日志 | 全操作记录 | 安全事件自动告警 |
 
-#### Getting Help
-```
-/start                # Welcome message and setup
-/help                 # Show all available commands
-```
+> Telegram Bot 消息非端到端加密，经过 Telegram 服务器中转。不要通过 Bot 传递密码、API Key 等敏感信息。
 
-### Talking to Claude
+## 故障排查
 
-Just send any message to interact with Claude about your code:
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| `ModuleNotFoundError` | 依赖未安装 | `poetry install` |
+| `No such file: claude` | CLI 路径错误 | 检查 `.env` 中 `CLAUDE_CLI_PATH` |
+| `Can't parse entities` | 消息格式解析失败 | 检查响应中的特殊字符转义 |
+| `Authentication failed` | User ID 不在白名单 | 检查 `ALLOWED_USERS` |
+| `Rate limit exceeded` | 请求过于频繁 | 调整 `RATE_LIMIT_*` 配置 |
+| Bot 无响应 | Token 错误或进程未启动 | 检查 `TELEGRAM_BOT_TOKEN` 和进程状态 |
 
-```
-You: "Analyze this Python function for potential bugs"
-You: "Help me optimize this database query"  
-You: "Create a React component for user authentication"
-You: "Explain what this code does"
-```
-
-### File Operations
-
-**Upload files:** Simply send files to Telegram and Claude will analyze them.
-
-**Supported operations:**
-- **Single files**: Code files, configs, documents - Claude analyzes content
-- **Archives**: ZIP/TAR files - Extracts and analyzes project structure
-- **Images**: Screenshots, diagrams, UI mockups - Smart prompt generation
-- **Multiple files**: Send several files for batch analysis
-
-**Supported file types:** `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.cpp`, `.c`, `.go`, `.rs`, `.rb`, `.php`, `.swift`, `.kt`, `.scala`, `.sql`, `.json`, `.xml`, `.html`, `.css`, `.md`, `.txt`, `.yaml`, `.toml`, `.zip`, `.tar`, `.tar.gz`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, and more.
-
-### Example Workflow
-
-```
-1. You: /cd my-web-app
-   Bot: ✅ Directory Changed
-        📂 Current directory: my-web-app/
-        🆕 No existing session. Send a message to start a new one.
-
-2. You: /ls
-   Bot: 📁 src/
-        📁 components/
-        📄 package.json
-        📄 README.md
-
-3. You: "Can you help me add TypeScript to this project?"
-   Bot: 🤖 I'll help you migrate to TypeScript! Let me analyze your project structure...
-        [Claude provides detailed migration steps]
-
-4. You: /cd another-project
-   Bot: ✅ Directory Changed
-        📂 Current directory: another-project/
-        🔄 Resumed session abc12345... (3 messages)
-
-5. You: /cd my-web-app
-   Bot: ✅ Directory Changed
-        📂 Current directory: my-web-app/
-        🔄 Resumed session def67890... (1 messages)
-        [Claude still remembers the TypeScript conversation!]
-```
-
-### Advanced Features Examples
-
-#### 📦 Archive Analysis
-```
-You: [Upload project.zip]
-Bot: 📦 Analyzing archive: project.zip
-     
-     Project Structure:
-     📁 src/
-       📄 main.py (2.3KB)
-       📄 utils.py (1.1KB)
-     📁 tests/
-       📄 test_main.py (3.2KB)
-     📄 requirements.txt (245B)
-     
-     Language: Python
-     Frameworks: pytest detected
-     Entry point: src/main.py
-     
-     🤖 I've analyzed your Python project. It appears to be...
-```
-
-#### 🔄 Git Integration  
-```
-You: /git
-Bot: 📊 Git Repository Status
-     
-     🌿 Branch: feature/new-api
-     📝 Changes: 3 files modified
-     🔄 Behind main: 2 commits
-     
-     Recent commits:
-     • abc123 - Add API endpoint (2 hours ago)
-     • def456 - Update dependencies (1 day ago)
-     
-     [View Diff] [Show Log] [See Changes]
-```
-
-#### ⚡ Quick Actions
-```
-You: /actions
-Bot: 🚀 Available Quick Actions
-     
-     Based on your project context:
-     [🧪 Run Tests] [📦 Install Deps]
-     [🎨 Format Code] [🔍 Run Linter]
-     [📝 Add Docs] [🔧 Refactor]
-```
-
-#### 📤 Session Export
-```
-You: /export
-Bot: 📤 Export Session
-     
-     Choose format:
-     [📝 Markdown] [🌐 HTML] [📋 JSON]
-     
-You: [Click Markdown]
-Bot: ✅ Session exported!
-     📎 claude_session_abc123.md (15.2KB)
-     [Downloads as file in Telegram]
-```
-
-### Quick Actions
-
-The bot provides helpful buttons for common tasks:
-
-- 🧪 **Test** - Run your test suite
-- 📦 **Install** - Install dependencies 
-- 🎨 **Format** - Format your code
-- 🔍 **Find TODOs** - Locate TODO comments
-- 🔨 **Build** - Build your project
-- 📊 **Git Status** - Check git status
-
-## ⚙️ Configuration
-
-### Required Settings
+## 开发命令
 
 ```bash
-# Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN=1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_BOT_USERNAME=my_claude_bot
-
-# Security - Base directory for project access (absolute path)
-APPROVED_DIRECTORY=/Users/yourname/projects
-
-# User Access Control
-ALLOWED_USERS=123456789,987654321  # Your Telegram user ID(s)
+make dev          # 安装所有依赖 (含开发依赖)
+make install      # 仅安装生产依赖
+make run          # 启动 Bot
+make run-debug    # Debug 日志启动
+make test         # 运行测试 + 覆盖率
+make lint         # Black + isort + flake8 + mypy
+make format       # 自动格式化代码
 ```
 
-### Common Optional Settings
+## 参考链接
 
-```bash
-# Claude Settings
-USE_SDK=true                        # Use Python SDK (default) or CLI subprocess
-ANTHROPIC_API_KEY=sk-ant-api03-...  # Optional: API key for SDK (if not using CLI auth)
-CLAUDE_MAX_COST_PER_USER=10.0       # Max cost per user in USD
-CLAUDE_TIMEOUT_SECONDS=300          # Timeout for operations  
-CLAUDE_ALLOWED_TOOLS="Read,Write,Edit,Bash,Glob,Grep,LS,Task,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch"
-
-# Rate Limiting  
-RATE_LIMIT_REQUESTS=10              # Requests per window
-RATE_LIMIT_WINDOW=60                # Window in seconds
-
-# Features
-ENABLE_GIT_INTEGRATION=true
-ENABLE_FILE_UPLOADS=true
-ENABLE_QUICK_ACTIONS=true
-
-# Development
-DEBUG=false
-LOG_LEVEL=INFO
-```
-
-> 📋 **Full configuration reference:** See [`.env.example`](.env.example) for all available options with detailed descriptions.
-
-### Finding Your Telegram User ID
-
-To get your Telegram user ID for the `ALLOWED_USERS` setting:
-
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. It will reply with your user ID number
-3. Add this number to your `ALLOWED_USERS` setting
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-**Bot doesn't respond:**
-- ✅ Check your `TELEGRAM_BOT_TOKEN` is correct
-- ✅ Verify your user ID is in `ALLOWED_USERS`
-- ✅ Ensure Claude Code CLI is installed and accessible
-- ✅ Check bot logs for error messages
-
-**"Permission denied" errors:**
-- ✅ Verify `APPROVED_DIRECTORY` path exists and is readable
-- ✅ Ensure the bot process has file system permissions
-- ✅ Check that paths don't contain special characters
-
-**Claude integration not working:**
-
-*If using SDK mode (USE_SDK=true, which is default):*
-- ✅ Check CLI authentication: `claude auth status`
-- ✅ If no CLI auth, verify `ANTHROPIC_API_KEY` is set in .env
-- ✅ Ensure API key has sufficient credits
-- ✅ Check logs for "SDK initialization" messages
-
-*If using CLI mode (USE_SDK=false):*
-- ✅ Verify Claude CLI is installed: `claude --version`
-- ✅ Check CLI authentication: `claude auth status`
-- ✅ Ensure CLI has sufficient credits
-
-*General troubleshooting:*
-- ✅ Verify `CLAUDE_ALLOWED_TOOLS` includes necessary tools
-- ✅ Check `CLAUDE_TIMEOUT_SECONDS` isn't too low
-- ✅ Monitor usage with `/status` command
-
-**High usage costs:**
-- ✅ Adjust `CLAUDE_MAX_COST_PER_USER` to set spending limits
-- ✅ Monitor usage with `/status` command
-- ✅ Use shorter, more focused requests
-- ✅ End sessions when done with `/end`
-
-### Getting Help
-
-- 📖 **Documentation**: Check this README and [`.env.example`](.env.example)
-- 🐛 **Bug Reports**: [Open an issue](https://github.com/yourusername/claude-code-telegram/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/yourusername/claude-code-telegram/discussions)
-- 🔒 **Security**: See [SECURITY.md](SECURITY.md) for reporting security issues
-
-## 🛡️ Security
-
-This bot implements enterprise-grade security:
-
-- **🔐 Access Control**: Whitelist-based user authentication
-- **📁 Directory Isolation**: Strict sandboxing to approved directories  
-- **⏱️ Rate Limiting**: Request and cost-based limits prevent abuse
-- **🛡️ Input Validation**: Protection against injection attacks
-- **📊 Audit Logging**: Complete tracking of all user actions
-- **🔒 Secure Defaults**: Principle of least privilege throughout
-
-For security issues, see [SECURITY.md](SECURITY.md).
-
-## 🤝 Contributing
-
-We welcome contributions! Here's how to get started:
-
-### Development Setup
-
-```bash
-# Fork and clone the repository
-git clone https://github.com/yourusername/claude-code-telegram.git
-cd claude-code-telegram
-
-# Install development dependencies
-make dev
-
-# Run tests to verify setup
-make test
-```
-
-### Development Commands
-
-```bash
-make help          # Show all available commands
-make test          # Run tests with coverage  
-make lint          # Run code quality checks
-make format        # Auto-format code
-make run-debug     # Run bot in debug mode
-```
-
-### Contribution Guidelines
-
-1. 🍴 **Fork** the repository
-2. 🌿 **Create** a feature branch: `git checkout -b feature/amazing-feature`
-3. ✨ **Make** your changes with tests
-4. ✅ **Test** your changes: `make test && make lint`
-5. 📝 **Commit** your changes: `git commit -m 'Add amazing feature'`
-6. 🚀 **Push** to the branch: `git push origin feature/amazing-feature`
-7. 🎯 **Submit** a Pull Request
-
-### Code Standards
-
-- **Python 3.9+** with type hints
-- **Black** formatting (88 char line length)
-- **pytest** for testing with >85% coverage
-- **mypy** for static type checking
-- **Conventional commits** for commit messages
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🌟 Star History
-
-If you find this project useful, please consider giving it a star! ⭐
-
-## 🙏 Acknowledgments
-
-- [Claude](https://claude.ai) by Anthropic for the amazing AI capabilities
-- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) for the excellent Telegram integration
-- All contributors who help make this project better
-
----
-
-**Made with ❤️ for developers who code on the go**
+- [python-telegram-bot 文档](https://docs.python-telegram-bot.org/)
+- [claude-agent-sdk](https://pypi.org/project/claude-agent-sdk/)
+- [Telegram Bot API](https://core.telegram.org/bots/api)
+- [Poetry 文档](https://python-poetry.org/docs/)
