@@ -66,6 +66,7 @@ async def handle_callback_query(
             "export": handle_export_callback,
             "permission": handle_permission_callback,
             "thinking": handle_thinking_callback,
+            "resume": handle_resume_callback,
         }
 
         handler = handlers.get(action)
@@ -1352,3 +1353,321 @@ def _escape_markdown(text: str) -> str:
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
+
+
+async def handle_resume_callback(query, param, context):
+    """Handle resume:* callback queries.
+
+    Callback data format: resume:<sub>:<token>
+    Sub-actions: p (project), s (session), f (force-confirm), cancel
+    """
+    user_id = query.from_user.id
+    settings: Settings = context.bot_data["settings"]
+
+    from ...bot.resume_tokens import ResumeTokenManager
+    from ...claude.desktop_scanner import DesktopSessionScanner
+
+    token_mgr: ResumeTokenManager = context.bot_data.get(
+        "resume_token_manager"
+    )
+    scanner: DesktopSessionScanner = context.bot_data.get(
+        "desktop_scanner"
+    )
+
+    if not token_mgr or not scanner:
+        await query.edit_message_text(
+            "Session expired. Please run /resume again."
+        )
+        return
+
+    # Parse sub-action: param is "p:<token>" or "s:<token>" etc.
+    if not param or ":" not in param:
+        if param == "cancel":
+            await query.edit_message_text("Resume cancelled.")
+            return
+        await query.edit_message_text(
+            "Invalid resume action. Please run /resume again."
+        )
+        return
+
+    sub, token = param.split(":", 1)
+
+    if sub == "p":
+        await _resume_select_project(
+            query, user_id, token, token_mgr, scanner,
+            settings, context,
+        )
+    elif sub == "s":
+        await _resume_select_session(
+            query, user_id, token, token_mgr, scanner,
+            settings, context,
+        )
+    elif sub == "f":
+        await _resume_force_confirm(
+            query, user_id, token, token_mgr, settings, context,
+        )
+    elif sub == "cancel":
+        await query.edit_message_text("Resume cancelled.")
+    else:
+        await query.edit_message_text(
+            "Unknown resume action. Please run /resume again."
+        )
+
+
+async def _resume_select_project(
+    query, user_id, token, token_mgr, scanner, settings, context,
+):
+    """S1: User selected a project, show its sessions."""
+    payload = token_mgr.resolve(
+        kind="p", user_id=user_id, token=token,
+    )
+    if payload is None:
+        await query.edit_message_text(
+            "Token expired or invalid. Please run /resume again."
+        )
+        return
+
+    from pathlib import Path
+
+    project_cwd = Path(payload["cwd"])
+    scanner.clear_cache()
+    candidates = await scanner.list_sessions(project_cwd=project_cwd)
+
+    if not candidates:
+        await query.edit_message_text(
+            f"No sessions found for project:\n"
+            f"`{project_cwd.name}`\n\n"
+            f"Run /resume to try another project.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Build session selection buttons
+    keyboard = []
+    for c in candidates[:10]:  # limit to 10 sessions
+        # Format label
+        preview = c.first_message[:40] if c.first_message else "..."
+        active_tag = " [ACTIVE]" if c.is_probably_active else ""
+        sid_short = c.session_id[:8]
+        label = f"{sid_short}{active_tag} {preview}"
+
+        tok = token_mgr.issue(
+            kind="s",
+            user_id=user_id,
+            payload={
+                "cwd": str(project_cwd),
+                "session_id": c.session_id,
+                "is_active": c.is_probably_active,
+            },
+        )
+        keyboard.append(
+            [InlineKeyboardButton(
+                label, callback_data=f"resume:s:{tok}",
+            )]
+        )
+
+    keyboard.append(
+        [InlineKeyboardButton(
+            "❌ Cancel", callback_data="resume:cancel",
+        )]
+    )
+
+    try:
+        rel = project_cwd.relative_to(settings.approved_directory)
+    except ValueError:
+        rel = project_cwd.name
+
+    await query.edit_message_text(
+        f"**Sessions in** `{rel}`\n\n"
+        f"Select a session to resume:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _resume_select_session(
+    query, user_id, token, token_mgr, scanner, settings, context,
+):
+    """S2: User selected a session. Adopt it or ask for force-confirm."""
+    payload = token_mgr.resolve(
+        kind="s", user_id=user_id, token=token,
+    )
+    if payload is None:
+        await query.edit_message_text(
+            "Token expired or invalid. Please run /resume again."
+        )
+        return
+
+    from pathlib import Path
+
+    project_cwd = Path(payload["cwd"])
+    session_id = payload["session_id"]
+    is_active = payload.get("is_active", False)
+
+    # If session appears active, ask for confirmation
+    if is_active:
+        tok = token_mgr.issue(
+            kind="f",
+            user_id=user_id,
+            payload={
+                "cwd": str(project_cwd),
+                "session_id": session_id,
+            },
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Yes, resume anyway",
+                    callback_data=f"resume:f:{tok}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "Cancel",
+                    callback_data="resume:cancel",
+                ),
+            ],
+        ]
+        await query.edit_message_text(
+            f"**Session may be active**\n\n"
+            f"Session `{session_id[:8]}...` was modified very recently "
+            f"and might still be running on your desktop.\n\n"
+            f"Resuming it here could cause conflicts.\n"
+            f"Continue anyway?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # Not active -> adopt directly
+    await _do_adopt_session(
+        query, user_id, project_cwd, session_id, settings, context,
+    )
+
+
+async def _resume_force_confirm(
+    query, user_id, token, token_mgr, settings, context,
+):
+    """S3: User confirmed force-resume of an active session."""
+    payload = token_mgr.resolve(
+        kind="f", user_id=user_id, token=token,
+    )
+    if payload is None:
+        await query.edit_message_text(
+            "Token expired or invalid. Please run /resume again."
+        )
+        return
+
+    from pathlib import Path
+
+    project_cwd = Path(payload["cwd"])
+    session_id = payload["session_id"]
+
+    await _do_adopt_session(
+        query, user_id, project_cwd, session_id, settings, context,
+    )
+
+
+async def _do_adopt_session(
+    query, user_id, project_cwd, session_id, settings, context,
+):
+    """S4: Actually adopt the session and switch cwd."""
+    # Defensive: verify project_cwd is under approved_directory
+    try:
+        resolved = project_cwd.resolve()
+        if not resolved.is_relative_to(settings.approved_directory.resolve()):
+            await query.edit_message_text(
+                "Path is outside the approved directory. Cannot adopt session."
+            )
+            return
+        project_cwd = resolved
+    except (OSError, ValueError):
+        await query.edit_message_text(
+            "Invalid project path. Please run /resume again."
+        )
+        return
+
+    claude_integration: ClaudeIntegration = context.bot_data.get(
+        "claude_integration"
+    )
+    if not claude_integration or not claude_integration.session_manager:
+        await query.edit_message_text(
+            "Claude integration not available. Cannot adopt session."
+        )
+        return
+
+    try:
+        await query.edit_message_text(
+            f"Adopting session `{session_id[:8]}...`\n"
+            f"Please wait...",
+            parse_mode="Markdown",
+        )
+
+        adopted = (
+            await claude_integration.session_manager.adopt_external_session(
+                user_id=user_id,
+                project_path=project_cwd,
+                external_session_id=session_id,
+            )
+        )
+
+        # Switch user's working directory and session
+        context.user_data["current_directory"] = project_cwd
+        context.user_data["claude_session_id"] = adopted.session_id
+
+        try:
+            rel = project_cwd.relative_to(settings.approved_directory)
+        except ValueError:
+            rel = project_cwd.name
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Start Coding",
+                    callback_data="action:start_coding",
+                ),
+                InlineKeyboardButton(
+                    "Status",
+                    callback_data="action:status",
+                ),
+            ],
+        ]
+
+        await query.edit_message_text(
+            f"**Session Resumed**\n\n"
+            f"Session: `{adopted.session_id[:8]}...`\n"
+            f"Directory: `{rel}/`\n\n"
+            f"Send a message to continue where you left off.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+        audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+        if audit_logger:
+            await audit_logger.log_command(
+                user_id=user_id,
+                command="resume",
+                args=[session_id[:8]],
+                success=True,
+            )
+
+        logger.info(
+            "Desktop session adopted",
+            user_id=user_id,
+            session_id=session_id,
+            project=str(project_cwd),
+        )
+
+    except Exception as e:
+        logger.error(
+            "Failed to adopt desktop session",
+            error=str(e),
+            user_id=user_id,
+            session_id=session_id,
+        )
+        await query.edit_message_text(
+            f"**Failed to Resume Session**\n\n"
+            f"Error: `{str(e)}`\n\n"
+            f"Please run /resume to try again.",
+            parse_mode="Markdown",
+        )

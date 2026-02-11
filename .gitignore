@@ -146,6 +146,7 @@ data/
 sessions/
 backups/
 uploads/
+.claude-images/
 claude-wrapper.sh
 
 # Codex

@@ -78,16 +78,19 @@ class SQLiteSessionStorage(SessionStorage):
             # Try to update first
             cursor = await conn.execute(
                 """
-                UPDATE sessions 
-                SET last_used = ?, total_cost = ?, total_turns = ?, message_count = ?
-                WHERE session_id = ?
+                UPDATE sessions
+                SET project_path = ?, last_used = ?, total_cost = ?,
+                    total_turns = ?, message_count = ?
+                WHERE session_id = ? AND user_id = ?
             """,
                 (
+                    session_model.project_path,
                     session_model.last_used,
                     session_model.total_cost,
                     session_model.total_turns,
                     session_model.message_count,
                     session_model.session_id,
+                    session_model.user_id,
                 ),
             )
 

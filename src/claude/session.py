@@ -7,6 +7,8 @@ Features:
 - Cleanup policies
 """
 
+import asyncio
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -159,6 +161,7 @@ class SessionManager:
         self.config = config
         self.storage = storage
         self.active_sessions: Dict[str, ClaudeSession] = {}
+        self._adopt_locks: Dict[str, asyncio.Lock] = {}
 
     async def get_or_create_session(
         self,
@@ -226,6 +229,151 @@ class SessionManager:
         )
 
         return new_session
+
+    # --- Session ID format validation ---
+    _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
+
+    async def adopt_external_session(
+        self,
+        user_id: int,
+        project_path: Path,
+        external_session_id: str,
+        created_at: Optional[datetime] = None,
+        last_used: Optional[datetime] = None,
+        allow_project_rebind: bool = False,
+    ) -> ClaudeSession:
+        """Adopt a desktop Claude Code session for resumption via TG Bot.
+
+        Constraints:
+        - external_session_id must not use temp_* prefix
+        - project_path must be under approved_directory
+        - If session already exists, user_id must match
+        - is_new_session is always False (skip temp replacement in update_session)
+        """
+        # 1. Validate session ID format
+        if not external_session_id or not self._SESSION_ID_RE.match(
+            external_session_id
+        ):
+            raise ValueError(
+                f"Invalid external session ID: {external_session_id!r}"
+            )
+        if external_session_id.startswith("temp_"):
+            raise ValueError("External session ID must not use temp_ prefix")
+
+        # 1.5 Acquire per-session mutex to prevent concurrent adoption
+        lock = self._adopt_locks.setdefault(
+            external_session_id, asyncio.Lock()
+        )
+        async with lock:
+            return await self._adopt_external_session_locked(
+                user_id=user_id,
+                project_path=project_path,
+                external_session_id=external_session_id,
+                created_at=created_at,
+                last_used=last_used,
+                allow_project_rebind=allow_project_rebind,
+            )
+
+    async def _adopt_external_session_locked(
+        self,
+        user_id: int,
+        project_path: Path,
+        external_session_id: str,
+        created_at: Optional[datetime] = None,
+        last_used: Optional[datetime] = None,
+        allow_project_rebind: bool = False,
+    ) -> ClaudeSession:
+        """Inner implementation of adopt_external_session, called under lock."""
+        # 2. Validate project_path within approved_directory
+        resolved = project_path.resolve()
+        approved = self.config.approved_directory.resolve()
+        if not resolved.is_relative_to(approved):
+            raise ValueError(
+                f"Project path {resolved} is not under approved directory {approved}"
+            )
+
+        # 3. Validate timestamps (normalize to naive UTC for consistency)
+        now = datetime.utcnow()
+        if created_at is not None and created_at.tzinfo is not None:
+            created_at = created_at.replace(tzinfo=None)
+        if last_used is not None and last_used.tzinfo is not None:
+            last_used = last_used.replace(tzinfo=None)
+        created_at = created_at or now
+        last_used = last_used or now
+        if created_at > last_used:
+            raise ValueError("created_at must not be later than last_used")
+
+        # 4. Check if session already exists
+        existing = self.active_sessions.get(external_session_id)
+        if not existing:
+            existing = await self.storage.load_session(external_session_id)
+
+        if existing:
+            # Ownership check
+            if existing.user_id != user_id:
+                raise PermissionError(
+                    f"Session {external_session_id} belongs to user {existing.user_id}, "
+                    f"not {user_id}"
+                )
+            # Project path consistency check
+            if existing.project_path.resolve() != resolved:
+                if not allow_project_rebind:
+                    raise ValueError(
+                        f"Session project path mismatch: "
+                        f"existing={existing.project_path}, requested={resolved}"
+                    )
+                logger.warning(
+                    "Rebinding session to new project path",
+                    session_id=external_session_id,
+                    old_path=str(existing.project_path),
+                    new_path=str(resolved),
+                    user_id=user_id,
+                )
+                existing.project_path = resolved
+
+            # Refresh and return
+            existing.last_used = now
+            await self.storage.save_session(existing)
+            self.active_sessions[external_session_id] = existing
+            logger.info(
+                "Reusing existing adopted session",
+                session_id=external_session_id,
+                user_id=user_id,
+            )
+            return existing
+
+        # 5. Enforce session limit (same logic as get_or_create_session)
+        user_sessions = await self._get_user_sessions(user_id)
+        if len(user_sessions) >= self.config.max_sessions_per_user:
+            oldest = min(user_sessions, key=lambda s: s.last_used)
+            await self.remove_session(oldest.session_id)
+            logger.info(
+                "Removed oldest session due to limit during adopt",
+                removed_session_id=oldest.session_id,
+                user_id=user_id,
+            )
+
+        # 6. Create session with the real external ID (skip temp_*)
+        session = ClaudeSession(
+            session_id=external_session_id,
+            user_id=user_id,
+            project_path=resolved,
+            created_at=created_at,
+            last_used=last_used,
+            is_new_session=False,
+        )
+
+        # 7. Persist: storage first, then memory
+        await self.storage.save_session(session)
+        self.active_sessions[external_session_id] = session
+
+        logger.info(
+            "Adopted external session",
+            session_id=external_session_id,
+            user_id=user_id,
+            project_path=str(resolved),
+        )
+        return session
 
     async def update_session(self, session_id: str, response: ClaudeResponse) -> None:
         """Update session with response data."""

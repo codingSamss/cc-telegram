@@ -88,6 +88,12 @@ class ClaudeCodeBot:
         # Set error handler
         self.app.add_error_handler(self._error_handler)
 
+        # Schedule periodic image cleanup
+        self._schedule_image_cleanup()
+
+        # Check .gitignore for .claude-images/
+        self._check_gitignore()
+
         logger.info("Bot initialization complete")
 
     async def _set_bot_commands(self) -> None:
@@ -107,6 +113,7 @@ class ClaudeCodeBot:
             BotCommand("actions", "Show quick actions"),
             BotCommand("git", "Git repository commands"),
             BotCommand("cancel", "Cancel the current running task"),
+            BotCommand("resume", "Resume a desktop Claude Code session"),
         ]
 
         await self.app.bot.set_my_commands(commands)
@@ -132,6 +139,7 @@ class ClaudeCodeBot:
             ("actions", command.quick_actions),
             ("git", command.git_command),
             ("cancel", command.cancel_task),
+            ("resume", command.resume_command),
         ]
 
         for cmd, handler in handlers:
@@ -232,6 +240,46 @@ class ClaudeCodeBot:
             return await middleware_func(dummy_handler, update, context.bot_data)
 
         return middleware_wrapper
+
+    def _schedule_image_cleanup(self) -> None:
+        """Register periodic image cleanup job."""
+        if not self.app.job_queue:
+            logger.warning("Job queue not available, skipping image cleanup scheduling")
+            return
+
+        from .features.image_handler import ImageHandler
+
+        async def _cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+            deleted = ImageHandler.cleanup_old_images(
+                self.settings.approved_directory,
+                self.settings.image_cleanup_max_age_hours,
+            )
+            if deleted:
+                logger.info("Image cleanup completed", deleted=deleted)
+
+        self.app.job_queue.run_repeating(
+            _cleanup_job, interval=3600, first=60, name="image_cleanup"
+        )
+        logger.info("Image cleanup job scheduled", interval_hours=1)
+
+    def _check_gitignore(self) -> None:
+        """Warn if .claude-images/ is not in .gitignore."""
+        gitignore = self.settings.approved_directory / ".gitignore"
+        if not gitignore.is_file():
+            logger.warning(
+                ".gitignore not found, consider adding .claude-images/ to it",
+                dir=str(self.settings.approved_directory),
+            )
+            return
+        try:
+            content = gitignore.read_text(encoding="utf-8")
+            if ".claude-images" not in content:
+                logger.warning(
+                    ".claude-images/ not in .gitignore, uploaded images may be committed",
+                    gitignore=str(gitignore),
+                )
+        except OSError:
+            pass
 
     async def start(self) -> None:
         """Start the bot."""

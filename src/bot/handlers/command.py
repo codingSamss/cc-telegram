@@ -1023,3 +1023,86 @@ def _escape_markdown(text: str) -> str:
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
+
+
+async def resume_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /resume command - resume a desktop Claude Code session."""
+    user_id = update.effective_user.id
+    settings: Settings = context.bot_data["settings"]
+
+    # Lazy import to avoid circular deps
+    from ...claude.desktop_scanner import DesktopSessionScanner
+    from ...bot.resume_tokens import ResumeTokenManager
+
+    # Get or create scanner and token manager
+    scanner = context.bot_data.get("desktop_scanner")
+    if scanner is None:
+        scanner = DesktopSessionScanner(
+            approved_directory=settings.approved_directory,
+        )
+        context.bot_data["desktop_scanner"] = scanner
+
+    token_mgr = context.bot_data.get("resume_token_manager")
+    if token_mgr is None:
+        token_mgr = ResumeTokenManager()
+        context.bot_data["resume_token_manager"] = token_mgr
+
+    try:
+        # S0 -> scan projects
+        scanner.clear_cache()
+        projects = await scanner.list_projects()
+
+        if not projects:
+            await update.message.reply_text(
+                "No desktop Claude Code sessions found.\n\n"
+                "Make sure you have used Claude Code CLI "
+                "in a project under your approved directory.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Build project selection buttons
+        keyboard = []
+        for proj in projects:
+            try:
+                label = str(
+                    proj.relative_to(settings.approved_directory)
+                )
+            except ValueError:
+                label = proj.name
+            token = token_mgr.issue(
+                kind="p",
+                user_id=user_id,
+                payload={"cwd": str(proj)},
+            )
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"📁 {label}",
+                        callback_data=f"resume:p:{token}",
+                    )
+                ]
+            )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "❌ Cancel", callback_data="resume:cancel"
+                )
+            ]
+        )
+
+        await update.message.reply_text(
+            "**Resume Desktop Session**\n\n"
+            "Select a project to browse its sessions:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error("Error in resume command", error=str(e))
+        await update.message.reply_text(
+            f"Failed to scan desktop sessions: {e}"
+        )
