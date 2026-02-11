@@ -150,3 +150,9 @@ claude-wrapper.sh
 
 # Codex
 .cc-codex/
+
+# Claude Code
+.claude/
+
+# Local plans
+plan/
