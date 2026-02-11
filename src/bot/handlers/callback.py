@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
 from .message import build_permission_handler
+from ...claude.task_registry import TaskRegistry
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 
@@ -34,13 +35,20 @@ async def handle_callback_query(
         # Handle cancel callback before the generic answer() call,
         # because cancel needs its own answer text.
         if action == "cancel" and param == "task":
-            from ...claude.task_registry import TaskRegistry
-
             task_registry: TaskRegistry = context.bot_data.get("task_registry")
-            if task_registry and await task_registry.cancel(user_id):
+            if not task_registry:
+                await query.answer("Task registry not available.")
+                return
+            cancelled = await task_registry.cancel(user_id)
+            if cancelled:
                 await query.answer("Task cancellation requested.")
             else:
                 await query.answer("No active task to cancel.")
+            audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+            if audit_logger:
+                await audit_logger.log_command(
+                    user_id=user_id, command="cancel_button", args=[], success=cancelled
+                )
             return
 
         # Acknowledge the callback for all other actions

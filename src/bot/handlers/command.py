@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
 from .message import build_permission_handler
+from ...claude.task_registry import TaskRegistry
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 
@@ -988,8 +989,6 @@ async def cancel_task(
     """Handle /cancel command - cancel the active Claude task."""
     user_id = update.effective_user.id
 
-    from ...claude.task_registry import TaskRegistry
-
     task_registry: TaskRegistry = context.bot_data.get("task_registry")
     if not task_registry:
         await update.message.reply_text("Task registry not available.")
@@ -1000,6 +999,12 @@ async def cancel_task(
         await update.message.reply_text("Task cancellation requested.")
     else:
         await update.message.reply_text("No active task to cancel.")
+
+    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    if audit_logger:
+        await audit_logger.log_command(
+            user_id=user_id, command="cancel", args=[], success=cancelled
+        )
 
 
 def _format_file_size(size: int) -> str:

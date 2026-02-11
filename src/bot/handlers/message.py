@@ -226,21 +226,33 @@ async def handle_text_message(
         last_progress_text = ""
 
         async def stream_handler(update_obj):
-            nonlocal last_progress_text
+            nonlocal progress_msg, last_progress_text
             try:
                 progress_text = await _format_progress_update(update_obj)
                 if not progress_text:
                     return
 
                 progress_lines.append(progress_text)
-
-                # Build accumulated message
                 full_text = "\n".join(progress_lines)
 
-                # Telegram message limit is 4096 chars; trim oldest lines if needed
-                while len(full_text) > 3800 and len(progress_lines) > 1:
-                    progress_lines.pop(0)
-                    full_text = "\n".join(progress_lines)
+                # If accumulated text exceeds Telegram limit, freeze current
+                # message and start a new one
+                if len(full_text) > 3800:
+                    progress_lines.clear()
+                    progress_lines.append(progress_text)
+                    full_text = progress_text
+                    last_progress_text = ""
+                    # Remove cancel button from old message
+                    try:
+                        await progress_msg.edit_reply_markup(reply_markup=None)
+                    except Exception:
+                        pass
+                    progress_msg = await progress_msg.reply_text(
+                        full_text,
+                        parse_mode="Markdown",
+                        reply_markup=cancel_keyboard,
+                    )
+                    return
 
                 # Skip edit if content hasn't changed
                 if full_text == last_progress_text:
