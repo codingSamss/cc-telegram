@@ -1,5 +1,9 @@
 """Command handlers for bot operations."""
 
+import asyncio
+import sys
+from pathlib import Path
+
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -29,7 +33,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• `/projects` - Show available projects\n"
         f"• `/status` - Show session status\n"
         f"• `/actions` - Show quick actions\n"
-        f"• `/git` - Git repository commands\n\n"
+        f"• `/git` - Git repository commands\n"
+        f"• `/codexdiag` - Diagnose codex MCP status\n\n"
         f"**Quick Start:**\n"
         f"1. Use `/projects` to see available projects\n"
         f"2. Use `/cd <project>` to navigate to a project\n"
@@ -82,6 +87,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/export` - Export session history\n"
         "• `/actions` - Show context-aware quick actions\n"
         "• `/git` - Git repository information\n\n"
+        "**Diagnostics:**\n"
+        "• `/codexdiag` - Diagnose latest codex MCP call in current directory\n"
+        "• `/codexdiag root` - Diagnose codex MCP call under approved root\n"
+        "• `/codexdiag <session_id>` - Diagnose a specific Claude session\n\n"
         "**Session Behavior:**\n"
         "• Sessions are automatically maintained per project directory\n"
         "• Switching directories with `/cd` resumes the session for that project\n"
@@ -238,7 +247,9 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             from ..utils.formatting import ResponseFormatter
 
             formatter = ResponseFormatter(settings)
-            formatted_messages = formatter.format_claude_response(claude_response.content)
+            formatted_messages = formatter.format_claude_response(
+                claude_response.content
+            )
 
             for msg in formatted_messages:
                 await update.message.reply_text(
@@ -684,9 +695,7 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         )
                         max_output = usage.get("maxOutputTokens", 0)
                         if max_output:
-                            status_lines.append(
-                                f"  Max output: `{max_output:,}`"
-                            )
+                            status_lines.append(f"  Max output: `{max_output:,}`")
     else:
         status_lines.append("Session: none")
 
@@ -1009,9 +1018,7 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.error("Error in git_command", error=str(e), user_id=user_id)
 
 
-async def cancel_task(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cancel command - cancel the active Claude task."""
     user_id = update.effective_user.id
 
@@ -1033,6 +1040,171 @@ async def cancel_task(
         )
 
 
+def _split_text_chunks(text: str, max_chars: int = 3500) -> list[str]:
+    """Split long text into Telegram-safe chunks while preserving line boundaries."""
+    stripped = text.strip()
+    if not stripped:
+        return ["(empty output)"]
+
+    lines = stripped.splitlines(keepends=True)
+    chunks: list[str] = []
+    current = ""
+
+    for line in lines:
+        if len(current) + len(line) <= max_chars:
+            current += line
+            continue
+
+        if current:
+            chunks.append(current.rstrip())
+            current = ""
+
+        # Handle single lines that are still too long.
+        if len(line) > max_chars:
+            start = 0
+            while start < len(line):
+                part = line[start : start + max_chars]
+                chunks.append(part.rstrip())
+                start += max_chars
+        else:
+            current = line
+
+    if current:
+        chunks.append(current.rstrip())
+
+    return chunks
+
+
+async def codex_diag_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /codexdiag command to diagnose codex MCP calls without manual shell."""
+    user_id = update.effective_user.id
+    settings: Settings = context.bot_data["settings"]
+    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+
+    current_dir = context.user_data.get(
+        "current_directory", settings.approved_directory
+    )
+    project_dir = current_dir
+    explicit_session_id = None
+
+    args = [arg.strip() for arg in context.args if arg and arg.strip()]
+    if args:
+        if args[0].lower() in {"root", "/"}:
+            project_dir = settings.approved_directory
+            if len(args) > 1:
+                explicit_session_id = args[1]
+        else:
+            explicit_session_id = args[0]
+
+    script_path = (
+        Path(__file__).resolve().parents[3] / "scripts" / "cc_codex_diagnose.py"
+    )
+    if not script_path.exists():
+        await update.message.reply_text(
+            f"❌ 诊断脚本不存在：{script_path}\n"
+            "请检查项目是否包含 `scripts/cc_codex_diagnose.py`。"
+        )
+        if audit_logger:
+            await audit_logger.log_command(
+                user_id=user_id,
+                command="codexdiag",
+                args=context.args or [],
+                success=False,
+            )
+        return
+
+    status_msg = await update.message.reply_text(
+        "🔎 正在诊断 codex MCP 调用状态，请稍候..."
+    )
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--project",
+        str(project_dir),
+    ]
+    if explicit_session_id:
+        cmd.extend(["--session-id", explicit_session_id])
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+    except asyncio.TimeoutError:
+        if "proc" in locals():
+            proc.kill()
+            await proc.communicate()
+        await status_msg.edit_text(
+            "⏰ 诊断超时（45 秒）。\n"
+            "建议稍后重试，或先检查 `~/.claude/debug/*.txt` 是否持续写入。"
+        )
+        if audit_logger:
+            await audit_logger.log_command(
+                user_id=user_id,
+                command="codexdiag",
+                args=context.args or [],
+                success=False,
+            )
+        return
+    except Exception as e:
+        await status_msg.edit_text(f"❌ 执行诊断失败：{e}")
+        if audit_logger:
+            await audit_logger.log_command(
+                user_id=user_id,
+                command="codexdiag",
+                args=context.args or [],
+                success=False,
+            )
+        return
+
+    stdout_text = stdout.decode("utf-8", errors="replace").strip()
+    stderr_text = stderr.decode("utf-8", errors="replace").strip()
+
+    if proc.returncode != 0:
+        err_body = stderr_text or stdout_text or "无可用输出"
+        err_chunks = _split_text_chunks(err_body, max_chars=3200)
+        await status_msg.edit_text(
+            "❌ codex 诊断执行失败。\n"
+            f"项目目录: {project_dir}\n"
+            f"返回码: {proc.returncode}\n\n"
+            f"{err_chunks[0]}"
+        )
+        for chunk in err_chunks[1:]:
+            await update.message.reply_text(chunk)
+        if audit_logger:
+            await audit_logger.log_command(
+                user_id=user_id,
+                command="codexdiag",
+                args=context.args or [],
+                success=False,
+            )
+        return
+
+    output_chunks = _split_text_chunks(stdout_text)
+    total = len(output_chunks)
+    header = (
+        "✅ codex 诊断完成。\n"
+        f"项目目录: {project_dir}\n"
+        f"会话范围: {'指定会话' if explicit_session_id else '自动选择最近会话'}\n\n"
+    )
+    await status_msg.edit_text(f"{header}{output_chunks[0]}")
+    for idx, chunk in enumerate(output_chunks[1:], start=2):
+        await update.message.reply_text(f"[{idx}/{total}]\n{chunk}")
+
+    if audit_logger:
+        await audit_logger.log_command(
+            user_id=user_id,
+            command="codexdiag",
+            args=context.args or [],
+            success=True,
+        )
+
+
 def _format_file_size(size: int) -> str:
     """Format file size in human-readable format."""
     for unit in ["B", "KB", "MB", "GB"]:
@@ -1045,15 +1217,32 @@ def _format_file_size(size: int) -> str:
 def _escape_markdown(text: str) -> str:
     """Escape special markdown characters in text for Telegram."""
     # Escape characters that have special meaning in Telegram Markdown
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    special_chars = [
+        "_",
+        "*",
+        "[",
+        "]",
+        "(",
+        ")",
+        "~",
+        "`",
+        ">",
+        "#",
+        "+",
+        "-",
+        "=",
+        "|",
+        "{",
+        "}",
+        ".",
+        "!",
+    ]
     for char in special_chars:
-        text = text.replace(char, f'\\{char}')
+        text = text.replace(char, f"\\{char}")
     return text
 
 
-async def model_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /model command - show inline keyboard to select Claude model."""
     current = context.user_data.get("claude_model")
 
@@ -1087,9 +1276,7 @@ async def model_command(
     )
 
 
-async def resume_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /resume command - resume a desktop Claude Code session."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
@@ -1129,9 +1316,7 @@ async def resume_command(
         keyboard = []
         for proj in projects:
             try:
-                label = str(
-                    proj.relative_to(settings.approved_directory)
-                )
+                label = str(proj.relative_to(settings.approved_directory))
             except ValueError:
                 label = proj.name
             token = token_mgr.issue(
@@ -1149,22 +1334,15 @@ async def resume_command(
             )
 
         keyboard.append(
-            [
-                InlineKeyboardButton(
-                    "❌ Cancel", callback_data="resume:cancel"
-                )
-            ]
+            [InlineKeyboardButton("❌ Cancel", callback_data="resume:cancel")]
         )
 
         await update.message.reply_text(
-            "**Resume Desktop Session**\n\n"
-            "Select a project to browse its sessions:",
+            "**Resume Desktop Session**\n\n" "Select a project to browse its sessions:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     except Exception as e:
         logger.error("Error in resume command", error=str(e))
-        await update.message.reply_text(
-            f"Failed to scan desktop sessions: {e}"
-        )
+        await update.message.reply_text(f"Failed to scan desktop sessions: {e}")

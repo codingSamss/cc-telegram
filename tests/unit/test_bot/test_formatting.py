@@ -162,12 +162,23 @@ class TestResponseFormatter:
         assert "\n\n\n" not in cleaned
 
     def test_markdown_escaping(self, formatter):
-        """Test markdown character escaping outside code blocks."""
-        text_with_markdown = "This has *bold* and _italic_ text"
+        """Test markdown escaping keeps emphasis but escapes plain symbols."""
+        text_with_markdown = "This has *bold* and _italic_ text and a plain * symbol"
         result = formatter._escape_markdown_outside_code(text_with_markdown)
 
-        # Should escape special characters outside code
-        assert r"\*" in result or r"\_" in result
+        # Intentional emphasis should remain renderable.
+        assert "*bold*" in result
+        assert "_italic_" in result
+        # Non-formatting symbol should be escaped.
+        assert r"\*" in result
+
+    def test_normalize_double_asterisk_bold(self, formatter):
+        """Test GFM double-asterisk bold is normalized for Telegram Markdown."""
+        text = "CCBot **不支持图片解析**。"
+        cleaned = formatter._clean_text(text)
+
+        assert "*不支持图片解析*" in cleaned
+        assert "**不支持图片解析**" not in cleaned
 
     def test_code_block_preservation(self, formatter):
         """Test that code blocks preserve special characters."""

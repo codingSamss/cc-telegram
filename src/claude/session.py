@@ -44,6 +44,7 @@ class ClaudeSession:
     tools_used: List[str] = field(default_factory=list)
     is_new_session: bool = False  # True if session hasn't been sent to Claude Code yet
     model_usage: Optional[Dict[str, Any]] = None  # Latest model usage snapshot
+    source: str = "bot"  # "bot" | "desktop_adopted"
 
     def is_expired(self, timeout_hours: int) -> bool:
         """Check if session has expired."""
@@ -81,6 +82,7 @@ class ClaudeSession:
             "message_count": self.message_count,
             "tools_used": self.tools_used,
             "model_usage": self.model_usage,
+            "source": self.source,
         }
 
     @classmethod
@@ -97,6 +99,7 @@ class ClaudeSession:
             message_count=data.get("message_count", 0),
             tools_used=data.get("tools_used", []),
             model_usage=data.get("model_usage"),
+            source=data.get("source", "bot"),
         )
 
 
@@ -261,16 +264,12 @@ class SessionManager:
         if not external_session_id or not self._SESSION_ID_RE.match(
             external_session_id
         ):
-            raise ValueError(
-                f"Invalid external session ID: {external_session_id!r}"
-            )
+            raise ValueError(f"Invalid external session ID: {external_session_id!r}")
         if external_session_id.startswith("temp_"):
             raise ValueError("External session ID must not use temp_ prefix")
 
         # 1.5 Acquire per-session mutex to prevent concurrent adoption
-        lock = self._adopt_locks.setdefault(
-            external_session_id, asyncio.Lock()
-        )
+        lock = self._adopt_locks.setdefault(external_session_id, asyncio.Lock())
         async with lock:
             return await self._adopt_external_session_locked(
                 user_id=user_id,
@@ -368,6 +367,7 @@ class SessionManager:
             created_at=created_at,
             last_used=last_used,
             is_new_session=False,
+            source="desktop_adopted",
         )
 
         # 7. Persist: storage first, then memory

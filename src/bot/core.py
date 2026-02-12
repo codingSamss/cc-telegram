@@ -115,6 +115,7 @@ class ClaudeCodeBot:
             BotCommand("cancel", "Cancel the current running task"),
             BotCommand("resume", "Resume a desktop Claude Code session"),
             BotCommand("model", "View or switch Claude model"),
+            BotCommand("codexdiag", "Diagnose codex MCP status"),
         ]
 
         await self.app.bot.set_my_commands(commands)
@@ -142,6 +143,7 @@ class ClaudeCodeBot:
             ("cancel", command.cancel_task),
             ("resume", command.resume_command),
             ("model", command.model_command),
+            ("codexdiag", command.codex_diag_command),
         ]
 
         for cmd, handler in handlers:

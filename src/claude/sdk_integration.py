@@ -12,16 +12,17 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterable, AsyncIterator, Callable, Dict, List, Optional
 
 import structlog
 from claude_agent_sdk import (
     AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ClaudeSDKError,
     CLIConnectionError,
     CLIJSONDecodeError,
     CLINotFoundError,
-    ClaudeAgentOptions,
-    ClaudeSDKError,
     Message,
     ProcessError,
     ResultMessage,
@@ -124,10 +125,45 @@ class ClaudeResponse:
 class StreamUpdate:
     """Streaming update from Claude SDK."""
 
-    type: str  # 'assistant', 'user', 'system', 'result'
+    type: str  # 'assistant', 'user', 'system', 'result', 'tool_result', 'error', 'progress'
     content: Optional[str] = None
     tool_calls: Optional[List[Dict]] = None
     metadata: Optional[Dict] = None
+
+    # Keep these fields aligned with integration.StreamUpdate so bot handlers
+    # can consume SDK and subprocess updates with the same logic.
+    timestamp: Optional[str] = None
+    session_context: Optional[Dict] = None
+    progress: Optional[Dict] = None
+    error_info: Optional[Dict] = None
+    execution_id: Optional[str] = None
+    parent_message_id: Optional[str] = None
+
+    def is_error(self) -> bool:
+        """Check if this update represents an error."""
+        return self.type == "error" or (
+            self.metadata and self.metadata.get("is_error", False)
+        )
+
+    def get_tool_names(self) -> List[str]:
+        """Extract tool names from tool calls."""
+        if not self.tool_calls:
+            return []
+        return [call.get("name") for call in self.tool_calls if call.get("name")]
+
+    def get_progress_percentage(self) -> Optional[int]:
+        """Get progress percentage if available."""
+        if self.progress:
+            return self.progress.get("percentage")
+        return None
+
+    def get_error_message(self) -> Optional[str]:
+        """Get error message if this is an error update."""
+        if self.error_info:
+            return self.error_info.get("message")
+        elif self.is_error() and self.content:
+            return self.content
+        return None
 
 
 class ClaudeSDKManager:
@@ -162,6 +198,7 @@ class ClaudeSDKManager:
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         permission_callback: Optional[Callable] = None,
         model: Optional[str] = None,
+        images: Optional[List[Dict[str, str]]] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -182,17 +219,19 @@ class ClaudeSDKManager:
                 allowed_tools=self.config.claude_allowed_tools,
                 cli_path=cli_path,
                 model=model,
+                # SDK 0.1.31 passes an empty --setting-sources when this is None,
+                # which can hide user auth/session settings and trigger
+                # "Not logged in · Please run /login" in bot runtime.
+                setting_sources=["user", "project", "local"],
             )
 
-            # Pass permission callback if provided
-            if permission_callback:
-                options.can_use_tool = permission_callback
+            # NOTE: permission_callback is NOT set on options here.
+            # query() does not support can_use_tool with string prompts.
+            # Use execute_with_client() for permission callback support.
 
             # Pass MCP server configuration if enabled
             if self.config.enable_mcp and self.config.mcp_config_path:
-                options.mcp_servers = self._load_mcp_config(
-                    self.config.mcp_config_path
-                )
+                options.mcp_servers = self._load_mcp_config(self.config.mcp_config_path)
                 logger.info(
                     "MCP servers configured",
                     mcp_config_path=str(self.config.mcp_config_path),
@@ -206,15 +245,24 @@ class ClaudeSDKManager:
                     session_id=session_id,
                 )
 
+            # Emit SDK-side init event so Telegram can preserve thinking
+            # summary/collapse behavior consistent with subprocess mode.
+            await self._emit_init_update(stream_callback, options)
+
             # Collect messages
             messages = []
             cost = 0.0
             tools_used = []
 
+            # Build multimodal prompt if images are provided
+            query_prompt: str | AsyncIterable[Dict[str, Any]] = prompt
+            if images:
+                query_prompt = await self._build_multimodal_prompt(prompt, images)
+
             # Execute with streaming and timeout
             await asyncio.wait_for(
                 self._execute_query_with_streaming(
-                    prompt, options, messages, stream_callback
+                    query_prompt, options, messages, stream_callback
                 ),
                 timeout=self.config.claude_timeout_seconds,
             )
@@ -300,9 +348,7 @@ class ClaudeSDKManager:
             )
             # Check if the process error is MCP-related
             if "mcp" in error_str.lower():
-                raise ClaudeMCPError(
-                    f"MCP server error: {error_str}"
-                )
+                raise ClaudeMCPError(f"MCP server error: {error_str}")
             raise ClaudeProcessError(f"Claude process error: {error_str}")
 
         except CLIConnectionError as e:
@@ -310,9 +356,7 @@ class ClaudeSDKManager:
             logger.error("Claude connection error", error=error_str)
             # Check if the connection error is MCP-related
             if "mcp" in error_str.lower() or "server" in error_str.lower():
-                raise ClaudeMCPError(
-                    f"MCP server connection failed: {error_str}"
-                )
+                raise ClaudeMCPError(f"MCP server connection failed: {error_str}")
             raise ClaudeProcessError(f"Failed to connect to Claude: {error_str}")
 
         except CLIJSONDecodeError as e:
@@ -360,12 +404,25 @@ class ClaudeSDKManager:
                 raise ClaudeProcessError(f"Unexpected error: {str(e)}")
 
     async def _execute_query_with_streaming(
-        self, prompt: str, options, messages: List, stream_callback: Optional[Callable]
+        self,
+        prompt: "str | AsyncIterable[Dict[str, Any]]",
+        options: ClaudeAgentOptions,
+        messages: List,
+        stream_callback: Optional[Callable],
     ) -> None:
         """Execute query with streaming and collect messages."""
+        model_resolved_emitted = False
         try:
             async for message in query(prompt=prompt, options=options):
                 messages.append(message)
+
+                # Emit actual resolved model once we see the first assistant message.
+                if stream_callback and not model_resolved_emitted:
+                    model_name = getattr(message, "model", None)
+                    if model_name:
+                        model_resolved_emitted = await self._emit_model_resolved_update(
+                            stream_callback, str(model_name)
+                        )
 
                 # Handle streaming callback
                 if stream_callback:
@@ -399,6 +456,95 @@ class ClaudeSDKManager:
             # Re-raise to be handled by the outer try-catch
             raise
 
+    async def _emit_init_update(
+        self,
+        stream_callback: Optional[Callable[[StreamUpdate], None]],
+        options: ClaudeAgentOptions,
+    ) -> None:
+        """Emit a synthetic init update for UI parity with CLI stream-json."""
+        if not stream_callback:
+            return
+
+        try:
+            await stream_callback(
+                StreamUpdate(
+                    type="system",
+                    metadata={
+                        "subtype": "init",
+                        "tools": self.config.claude_allowed_tools or [],
+                        # If user did not explicitly override model, SDK/CLI will
+                        # resolve its own default model. Do not display stale
+                        # config defaults here.
+                        "model": options.model or "auto (Claude CLI default)",
+                        "cwd": options.cwd,
+                    },
+                )
+            )
+        except Exception as e:
+            logger.warning("Failed to emit SDK init update", error=str(e))
+
+    async def _emit_model_resolved_update(
+        self,
+        stream_callback: Optional[Callable[[StreamUpdate], None]],
+        model_name: str,
+    ) -> bool:
+        """Emit resolved model update from real SDK response."""
+        if not stream_callback or not model_name:
+            return False
+
+        try:
+            await stream_callback(
+                StreamUpdate(
+                    type="system",
+                    metadata={
+                        "subtype": "model_resolved",
+                        "model": model_name,
+                    },
+                )
+            )
+            return True
+        except Exception as e:
+            logger.warning("Failed to emit resolved model update", error=str(e))
+            return False
+
+    async def _build_multimodal_prompt(
+        self, text: str, images: List[Dict[str, str]]
+    ) -> AsyncIterable[Dict[str, Any]]:
+        """Build an AsyncIterable prompt with text + image content blocks.
+
+        Args:
+            text: The text prompt
+            images: List of dicts with 'base64_data' and 'media_type' keys
+        """
+
+        async def _generate_messages() -> AsyncIterator[Dict[str, Any]]:
+            content_blocks: List[Dict[str, Any]] = []
+
+            # Add image blocks first
+            for img in images:
+                content_blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img["media_type"],
+                            "data": img["base64_data"],
+                        },
+                    }
+                )
+
+            # Add text block
+            content_blocks.append({"type": "text", "text": text})
+
+            yield {
+                "type": "user",
+                "session_id": "",
+                "message": {"role": "user", "content": content_blocks},
+                "parent_tool_use_id": None,
+            }
+
+        return _generate_messages()
+
     async def _handle_stream_message(
         self, message: Message, stream_callback: Callable[[StreamUpdate], None]
     ) -> None:
@@ -411,19 +557,32 @@ class ClaudeSDKManager:
                     # Extract text from TextBlock objects
                     text_parts = []
                     tool_calls = []
+                    tool_results = []
                     for block in content:
                         if hasattr(block, "text"):
                             text_parts.append(block.text)
-                        elif isinstance(block, ToolUseBlock):
+                        elif hasattr(block, "name") and hasattr(block, "input"):
                             tool_calls.append(
                                 {
                                     "name": getattr(
-                                        block, "name",
+                                        block,
+                                        "name",
                                         getattr(block, "tool_name", "unknown"),
                                     ),
                                     "input": getattr(
-                                        block, "input",
+                                        block,
+                                        "input",
                                         getattr(block, "tool_input", {}),
+                                    ),
+                                }
+                            )
+                        elif hasattr(block, "tool_use_id"):
+                            tool_results.append(
+                                {
+                                    "tool_use_id": getattr(block, "tool_use_id", None),
+                                    "content": getattr(block, "content", None),
+                                    "is_error": bool(
+                                        getattr(block, "is_error", False)
                                     ),
                                 }
                             )
@@ -432,6 +591,7 @@ class ClaudeSDKManager:
                         update = StreamUpdate(
                             type="assistant",
                             content="\n".join(text_parts),
+                            metadata={"source": "sdk"},
                         )
                         await stream_callback(update)
 
@@ -439,6 +599,23 @@ class ClaudeSDKManager:
                         update = StreamUpdate(
                             type="assistant",
                             tool_calls=tool_calls,
+                            metadata={"source": "sdk"},
+                        )
+                        await stream_callback(update)
+
+                    for result in tool_results:
+                        update = StreamUpdate(
+                            type="tool_result",
+                            content=str(result.get("content") or ""),
+                            metadata={
+                                "tool_use_id": result.get("tool_use_id"),
+                                "is_error": result.get("is_error", False),
+                            },
+                            error_info=(
+                                {"message": str(result.get("content") or "")}
+                                if result.get("is_error")
+                                else None
+                            ),
                         )
                         await stream_callback(update)
 
@@ -447,6 +624,7 @@ class ClaudeSDKManager:
                     update = StreamUpdate(
                         type="assistant",
                         content=str(content),
+                        metadata={"source": "sdk"},
                     )
                     await stream_callback(update)
 
@@ -477,9 +655,7 @@ class ClaudeSDKManager:
             "sdk": {
                 "inputTokens": sdk_usage.get("input_tokens", 0),
                 "outputTokens": sdk_usage.get("output_tokens", 0),
-                "cacheReadInputTokens": sdk_usage.get(
-                    "cache_read_input_tokens", 0
-                ),
+                "cacheReadInputTokens": sdk_usage.get("cache_read_input_tokens", 0),
                 "cacheCreationInputTokens": sdk_usage.get(
                     "cache_creation_input_tokens", 0
                 ),
@@ -517,12 +693,18 @@ class ClaudeSDKManager:
                 content = getattr(message, "content", [])
                 if content and isinstance(content, list):
                     for block in content:
-                        if isinstance(block, ToolUseBlock):
+                        if isinstance(block, ToolUseBlock) or (
+                            hasattr(block, "name") and hasattr(block, "input")
+                        ):
                             tools_used.append(
                                 {
-                                    "name": getattr(block, "tool_name", "unknown"),
+                                    "name": getattr(
+                                        block, "name", getattr(block, "tool_name", "unknown")
+                                    ),
                                     "timestamp": current_time,
-                                    "input": getattr(block, "tool_input", {}),
+                                    "input": getattr(
+                                        block, "input", getattr(block, "tool_input", {})
+                                    ),
                                 }
                             )
 
@@ -540,7 +722,9 @@ class ClaudeSDKManager:
                 config_data = json.load(f)
             return config_data.get("mcpServers", {})
         except (json.JSONDecodeError, OSError) as e:
-            logger.error("Failed to load MCP config", path=str(config_path), error=str(e))
+            logger.error(
+                "Failed to load MCP config", path=str(config_path), error=str(e)
+            )
             return {}
 
     def _update_session(self, session_id: str, messages: List[Message]) -> None:
@@ -563,3 +747,199 @@ class ClaudeSDKManager:
     def get_active_process_count(self) -> int:
         """Get number of active sessions."""
         return len(self.active_sessions)
+
+    async def execute_with_client(
+        self,
+        prompt: str,
+        working_directory: Path,
+        session_id: Optional[str] = None,
+        continue_session: bool = False,
+        stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        permission_callback: Optional[Callable] = None,
+        model: Optional[str] = None,
+        images: Optional[List[Dict[str, str]]] = None,
+    ) -> ClaudeResponse:
+        """Execute command via ClaudeSDKClient (short-lived connection mode).
+
+        This method supports can_use_tool permission callbacks, which require
+        the Client's streaming mode. Use this when Telegram permission approval
+        is needed; otherwise use execute_command() with query().
+        """
+        start_time = asyncio.get_event_loop().time()
+
+        logger.info(
+            "Starting Claude SDK Client command",
+            working_directory=str(working_directory),
+            session_id=session_id,
+            continue_session=continue_session,
+            has_permission_callback=bool(permission_callback),
+        )
+
+        try:
+            cli_path = find_claude_cli(self.config.claude_cli_path)
+            options = ClaudeAgentOptions(
+                max_turns=self.config.claude_max_turns,
+                cwd=str(working_directory),
+                allowed_tools=self.config.claude_allowed_tools or [],
+                cli_path=cli_path,
+                model=model,
+                # Keep auth/session settings visible for client mode as well.
+                setting_sources=["user", "project", "local"],
+            )
+
+            if permission_callback:
+                options.can_use_tool = permission_callback
+
+            if self.config.enable_mcp and self.config.mcp_config_path:
+                options.mcp_servers = self._load_mcp_config(self.config.mcp_config_path)
+
+            if session_id and continue_session:
+                options.resume = session_id
+
+            await self._emit_init_update(stream_callback, options)
+
+            # Execute with Client short-lived connection
+            messages: List[Message] = []
+            client = ClaudeSDKClient(options)
+            model_resolved_emitted = False
+            try:
+                # connect() without prompt — establishes connection only
+                await asyncio.wait_for(
+                    client.connect(),
+                    timeout=self.config.claude_timeout_seconds,
+                )
+
+                # Send prompt via client.query()
+                # Build multimodal prompt if images are provided
+                if images:
+                    query_prompt = await self._build_multimodal_prompt(prompt, images)
+                    await client.query(query_prompt)
+                else:
+                    await client.query(prompt)
+
+                # Receive messages until ResultMessage
+                async for message in client.receive_response():
+                    messages.append(message)
+                    if stream_callback and not model_resolved_emitted:
+                        model_name = getattr(message, "model", None)
+                        if model_name:
+                            model_resolved_emitted = (
+                                await self._emit_model_resolved_update(
+                                    stream_callback, str(model_name)
+                                )
+                            )
+                    if stream_callback:
+                        try:
+                            await self._handle_stream_message(message, stream_callback)
+                        except Exception as cb_err:
+                            logger.warning(
+                                "Stream callback failed",
+                                error=str(cb_err),
+                            )
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception as disconnect_error:
+                    logger.warning(
+                        "Failed to disconnect Claude SDK Client cleanly",
+                        error=str(disconnect_error),
+                    )
+
+            # Extract result data (same logic as execute_command)
+            cost = 0.0
+            claude_session_id = None
+            sdk_usage = None
+            tools_used: List[Dict[str, Any]] = []
+            for message in messages:
+                if isinstance(message, ResultMessage):
+                    cost = getattr(message, "total_cost_usd", 0.0) or 0.0
+                    claude_session_id = getattr(message, "session_id", None)
+                    sdk_usage = getattr(message, "usage", None)
+                    tools_used = self._extract_tools_from_messages(messages)
+                    break
+
+            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            final_session_id = claude_session_id or session_id or str(uuid.uuid4())
+
+            if claude_session_id and claude_session_id != session_id:
+                logger.info(
+                    "Got session ID from Claude (Client mode)",
+                    claude_session_id=claude_session_id,
+                    previous_session_id=session_id,
+                )
+
+            self._update_session(final_session_id, messages)
+
+            return ClaudeResponse(
+                content=self._extract_content_from_messages(messages),
+                session_id=final_session_id,
+                cost=cost,
+                duration_ms=duration_ms,
+                num_turns=len(
+                    [
+                        m
+                        for m in messages
+                        if isinstance(m, (UserMessage, AssistantMessage))
+                    ]
+                ),
+                tools_used=tools_used,
+                model_usage=self._build_model_usage(sdk_usage, cost),
+            )
+
+        except asyncio.TimeoutError:
+            logger.error(
+                "Claude SDK Client timed out",
+                timeout_seconds=self.config.claude_timeout_seconds,
+            )
+            raise ClaudeTimeoutError(
+                f"Claude SDK Client timed out after "
+                f"{self.config.claude_timeout_seconds}s"
+            )
+
+        except CLINotFoundError as e:
+            logger.error("Claude CLI not found", error=str(e))
+            raise ClaudeProcessError(
+                "Claude Code not found. Please ensure Claude is installed:\n"
+                "  npm install -g @anthropic-ai/claude-code"
+            )
+
+        except ProcessError as e:
+            error_str = str(e)
+            logger.error("Claude process failed (Client)", error=error_str)
+            if "mcp" in error_str.lower():
+                raise ClaudeMCPError(f"MCP server error: {error_str}")
+            raise ClaudeProcessError(f"Claude process error: {error_str}")
+
+        except CLIConnectionError as e:
+            error_str = str(e)
+            logger.error("Claude connection error (Client)", error=error_str)
+            if "mcp" in error_str.lower() or "server" in error_str.lower():
+                raise ClaudeMCPError(f"MCP server connection failed: {error_str}")
+            raise ClaudeProcessError(f"Failed to connect to Claude: {error_str}")
+
+        except CLIJSONDecodeError as e:
+            logger.error("Claude SDK Client JSON decode error", error=str(e))
+            raise ClaudeParsingError(f"Failed to decode Claude response: {str(e)}")
+
+        except ClaudeSDKError as e:
+            logger.error("Claude SDK Client error", error=str(e))
+            raise ClaudeProcessError(f"Claude SDK error: {str(e)}")
+
+        except Exception as e:
+            if type(e).__name__ == "ExceptionGroup" or hasattr(e, "exceptions"):
+                exceptions = getattr(e, "exceptions", [e])
+                main_exception = exceptions[0] if exceptions else e
+                logger.error(
+                    "Task group error in Claude SDK Client",
+                    error=str(e),
+                )
+                raise ClaudeProcessError(
+                    f"Claude SDK task error: {str(main_exception)}"
+                )
+            else:
+                logger.error(
+                    "Unexpected error in Claude SDK Client",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
+                raise ClaudeProcessError(f"Unexpected error: {str(e)}")

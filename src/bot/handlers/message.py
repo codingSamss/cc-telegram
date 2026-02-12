@@ -18,7 +18,6 @@ from ...security.validators import SecurityValidator
 logger = structlog.get_logger()
 
 
-
 def _escape_md(text: str) -> str:
     """Escape special characters for Telegram legacy Markdown."""
     for ch in ("_", "*", "`", "["):
@@ -152,6 +151,9 @@ async def _format_progress_update(update_obj) -> Optional[str]:
             tools_count = len(update_obj.metadata.get("tools", []))
             model = _escape_md(update_obj.metadata.get("model", "Claude"))
             return f"🚀 *Starting {model}* with {tools_count} tools available"
+        if update_obj.metadata and update_obj.metadata.get("subtype") == "model_resolved":
+            model = _escape_md(update_obj.metadata.get("model", "Claude"))
+            return f"🧠 *Resolved model:* {model}"
 
     return None
 
@@ -195,7 +197,12 @@ def _format_error_message(error_str: str) -> str:
         # Generic error handling
         # Escape special markdown characters in error message
         # Replace problematic chars that break Telegram markdown
-        safe_error = error_str.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
+        safe_error = (
+            error_str.replace("_", "\\_")
+            .replace("*", "\\*")
+            .replace("`", "\\`")
+            .replace("[", "\\[")
+        )
         # Truncate very long errors
         if len(safe_error) > 200:
             safe_error = safe_error[:200] + "..."
@@ -211,7 +218,8 @@ def _generate_thinking_summary(all_progress_lines: list[str]) -> str:
     """Generate a one-line summary from progress lines."""
     # Match both old format "Using tools:" and new format "🔧 ToolName:"
     tool_count = sum(
-        1 for line in all_progress_lines
+        1
+        for line in all_progress_lines
         if "Using tools:" in line or (line.startswith("🔧") and ":" in line)
     )
     complete_count = sum(1 for line in all_progress_lines if "completed" in line)
@@ -343,7 +351,11 @@ async def handle_text_message(
 
                 progress_lines.append(progress_text)
                 # Only collect non-content updates as thinking process
-                if not (update_obj.type == "assistant" and update_obj.content and not update_obj.tool_calls):
+                if not (
+                    update_obj.type == "assistant"
+                    and update_obj.content
+                    and not update_obj.tool_calls
+                ):
                     all_progress_lines.append(progress_text)
                 full_text = "\n".join(progress_lines)
 
@@ -412,6 +424,7 @@ async def handle_text_message(
                 chat_id=update.effective_chat.id,
             )
 
+        claude_response = None
         try:
             claude_response = await task
 
@@ -483,9 +496,7 @@ async def handle_text_message(
                     pass
             else:
                 try:
-                    await progress_msg.edit_text(
-                        "Task cancelled.", reply_markup=None
-                    )
+                    await progress_msg.edit_text("Task cancelled.", reply_markup=None)
                 except Exception:
                     pass
             # Clean up frozen messages
@@ -603,7 +614,9 @@ async def handle_text_message(
                     user_id=user_id,
                     response=claude_response,
                 )
-                conversation_context = conversation_enhancer.get_or_create_context(user_id)
+                conversation_context = conversation_enhancer.get_or_create_context(
+                    user_id
+                )
 
                 # Check if we should show follow-up suggestions
                 if conversation_enhancer.should_show_suggestions(
@@ -682,7 +695,7 @@ async def handle_text_message(
             except:
                 pass
 
-        error_msg = f"❌ **Error processing message**\n\n{str(e)}"
+        error_msg = _format_error_message(str(e))
         await update.message.reply_text(error_msg, parse_mode="Markdown")
 
         # Log failed processing
@@ -965,6 +978,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "🤖 Analyzing image with Claude...", parse_mode="Markdown"
             )
 
+            # Multimodal image analysis requires SDK mode.
+            if not settings.use_sdk:
+                await claude_progress_msg.edit_text(
+                    "📸 **Image Analysis Requires SDK Mode**\n\n"
+                    "Current runtime is CLI subprocess mode (`USE_SDK=false`), "
+                    "which cannot send image content to Claude.\n\n"
+                    "**Fix:** set `USE_SDK=true` in `.env` and restart the bot.",
+                    parse_mode="Markdown",
+                )
+                return
+
             # Get Claude integration
             claude_integration = context.bot_data.get("claude_integration")
 
@@ -988,6 +1012,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
             # Process with Claude
             try:
+                # Build image data for multimodal input
+                img_format = processed_image.metadata.get("format", "jpeg")
+                if img_format == "unknown":
+                    img_format = "jpeg"  # Default to JPEG for unknown formats
+                images = [
+                    {
+                        "base64_data": processed_image.base64_data,
+                        "media_type": f"image/{img_format}",
+                    }
+                ]
+
                 claude_response = await claude_integration.run_command(
                     prompt=processed_image.prompt,
                     working_directory=current_dir,
@@ -996,6 +1031,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     force_new_session=force_new_session,
                     permission_handler=permission_handler,
                     model=context.user_data.get("claude_model"),
+                    images=images,
                 )
 
                 # Update session ID
@@ -1027,9 +1063,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         await asyncio.sleep(0.5)
 
             except Exception as e:
-                await claude_progress_msg.edit_text(
-                    _format_error_message(str(e)), parse_mode="Markdown"
-                )
+                error_text = _format_error_message(str(e))
+                try:
+                    await claude_progress_msg.edit_text(
+                        error_text, parse_mode="Markdown"
+                    )
+                except Exception as send_error:
+                    logger.warning(
+                        "Failed to edit image progress message with error",
+                        error=str(send_error),
+                        original_error=str(e),
+                        user_id=user_id,
+                    )
+                    await update.message.reply_text(
+                        error_text,
+                        parse_mode="Markdown",
+                        reply_to_message_id=update.message.message_id,
+                    )
                 logger.error(
                     "Claude image processing failed", error=str(e), user_id=user_id
                 )
@@ -1037,7 +1087,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as e:
             logger.error("Image processing failed", error=str(e), user_id=user_id)
             await update.message.reply_text(
-                f"❌ **Error processing image**\n\n{str(e)}", parse_mode="Markdown"
+                _format_error_message(str(e)), parse_mode="Markdown"
             )
     else:
         # Fall back to unsupported message

@@ -38,8 +38,17 @@ async def rate_limit_middleware(
         # Don't block on missing rate limiter - this could be a config issue
         return await handler(event, data)
 
-    # Estimate cost based on message content and type
-    estimated_cost = estimate_message_cost(event)
+    # Estimate cost based on message content and type.
+    # Never let estimator edge cases break the request pipeline.
+    try:
+        estimated_cost = estimate_message_cost(event)
+    except Exception as e:
+        logger.warning(
+            "Failed to estimate message cost, using fallback",
+            user_id=user_id,
+            error=str(e),
+        )
+        estimated_cost = 0.01
 
     # Check rate limits
     allowed, message = await rate_limiter.check_rate_limit(
@@ -91,7 +100,11 @@ def estimate_message_cost(event: Any) -> float:
     - Expected Claude usage
     """
     message = event.effective_message
-    message_text = message.text if message else ""
+    message_text = ""
+    if message:
+        # Non-text updates (photo/document) usually have text=None.
+        # Use caption as best-effort context and keep empty fallback.
+        message_text = (message.text or message.caption or "").strip()
 
     # Base cost for any message
     base_cost = 0.01
@@ -104,7 +117,7 @@ def estimate_message_cost(event: Any) -> float:
         # File uploads cost more
         return base_cost + length_cost + 0.05
 
-    if message_text.startswith("/"):
+    if message and message.text and message.text.startswith("/"):
         # Commands cost more
         return base_cost + length_cost + 0.02
 

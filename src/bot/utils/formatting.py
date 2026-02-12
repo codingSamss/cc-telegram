@@ -428,22 +428,96 @@ class ResponseFormatter:
         # Remove excessive whitespace
         text = re.sub(r"\n{3,}", "\n\n", text)
 
+        # Normalize common Markdown syntax from Claude/GFM output
+        # into Telegram legacy Markdown-compatible markers.
+        text = self._normalize_markdown_outside_code(text)
+
         # Escape special Markdown characters (but preserve intentional formatting)
         # Be careful not to escape characters inside code blocks
         text = self._escape_markdown_outside_code(text)
 
         return text.strip()
 
-    def _escape_markdown_outside_code(self, text: str) -> str:
-        """Escape Markdown characters outside of code blocks."""
-        # This is a simplified approach - in practice, you might want more sophisticated parsing
+    def _normalize_markdown_outside_code(self, text: str) -> str:
+        """Normalize common Markdown markers outside of code blocks.
+
+        Telegram legacy Markdown uses `*bold*` instead of `**bold**`.
+        """
+
+        def _normalize_segment(segment: str) -> str:
+            # Convert GFM-style bold to Telegram legacy Markdown bold.
+            segment = re.sub(
+                r"\*\*(?=\S)(.+?)(?<=\S)\*\*",
+                r"*\1*",
+                segment,
+            )
+            return segment
+
         parts = []
         in_code_block = False
-        in_inline_code = False
+
+        for line in text.split("\n"):
+            if line.strip().startswith("```"):
+                in_code_block = not in_code_block
+                parts.append(line)
+            elif in_code_block:
+                parts.append(line)
+            else:
+                # Preserve inline code blocks while normalizing plain text.
+                line_parts = line.split("`")
+                for i, part in enumerate(line_parts):
+                    if i % 2 == 0:
+                        line_parts[i] = _normalize_segment(part)
+                parts.append("`".join(line_parts))
+
+        return "\n".join(parts)
+
+    def _escape_markdown_outside_code(self, text: str) -> str:
+        """Escape Markdown characters outside of code blocks."""
+        # Preserve intentional Markdown emphasis while escaping non-formatting chars.
+        def _escape_segment(segment: str) -> str:
+            placeholders: dict[str, str] = {}
+
+            def _store(token_text: str) -> str:
+                key = f"@@FMT{len(placeholders)}@@"
+                placeholders[key] = token_text
+                return key
+
+            def _replace_bold(match: re.Match[str]) -> str:
+                inner = (
+                    match.group(1)
+                    .replace("_", r"\_")
+                    .replace("*", r"\*")
+                )
+                return _store(f"*{inner}*")
+
+            def _replace_italic(match: re.Match[str]) -> str:
+                inner = (
+                    match.group(1)
+                    .replace("_", r"\_")
+                    .replace("*", r"\*")
+                )
+                return _store(f"_{inner}_")
+
+            # Protect bold/italic fragments first.
+            segment = re.sub(r"\*(?=\S)(.+?)(?<=\S)\*", _replace_bold, segment)
+            segment = re.sub(r"_(?=\S)(.+?)(?<=\S)_", _replace_italic, segment)
+
+            # Escape remaining markdown symbols.
+            segment = segment.replace("_", r"\_").replace("*", r"\*")
+
+            # Restore protected formatting.
+            for key, value in placeholders.items():
+                segment = segment.replace(key, value)
+
+            return segment
+
+        parts = []
+        in_code_block = False
 
         lines = text.split("\n")
         for line in lines:
-            if line.strip() == "```":
+            if line.strip().startswith("```"):
                 in_code_block = not in_code_block
                 parts.append(line)
             elif in_code_block:
@@ -453,8 +527,8 @@ class ResponseFormatter:
                 line_parts = line.split("`")
                 for i, part in enumerate(line_parts):
                     if i % 2 == 0:  # Outside inline code
-                        # Escape special characters
-                        part = part.replace("_", r"\_").replace("*", r"\*")
+                        # Escape special characters while keeping bold/italic markers.
+                        part = _escape_segment(part)
                     line_parts[i] = part
                 parts.append("`".join(line_parts))
 
@@ -498,7 +572,7 @@ class ResponseFormatter:
             line_length = len(line) + 1  # +1 for newline
 
             # Check for code block markers
-            if line.strip() == "```":
+            if line.strip().startswith("```"):
                 in_code_block = not in_code_block
 
             # If this is a very long line that exceeds limit by itself, split it

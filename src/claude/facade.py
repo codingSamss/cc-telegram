@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import structlog
 
 from ..config.settings import Settings
-from .exceptions import ClaudeToolValidationError
+from .exceptions import ClaudeProcessError, ClaudeToolValidationError
 from .integration import ClaudeProcessManager, ClaudeResponse, StreamUpdate
 from .monitor import ToolMonitor
 from .permissions import PermissionManager, PermissionRequestCallback
@@ -62,6 +62,7 @@ class ClaudeIntegration:
         force_new_session: bool = False,
         permission_handler: Optional[PermissionRequestCallback] = None,
         model: Optional[str] = None,
+        images: Optional[List[Dict[str, str]]] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
         logger.info(
@@ -164,9 +165,7 @@ class ClaudeIntegration:
         try:
             # Continue session if we have a real (non-temporary) session ID
             is_new = getattr(session, "is_new_session", False)
-            has_real_session = (
-                not is_new and not session.session_id.startswith("temp_")
-            )
+            has_real_session = not is_new and not session.session_id.startswith("temp_")
             should_continue = has_real_session
 
             # For new sessions, don't pass the temporary session_id to Claude Code
@@ -181,36 +180,55 @@ class ClaudeIntegration:
                     stream_callback=stream_handler,
                     permission_callback=permission_callback,
                     model=model,
+                    images=images,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as resume_error:
                 # If resume failed (e.g., session expired on Claude's side),
-                # retry as a fresh session
-                if should_continue and "no conversation found" in str(
-                    resume_error
-                ).lower():
-                    logger.warning(
-                        "Session resume failed, starting fresh session",
-                        failed_session_id=claude_session_id,
-                        error=str(resume_error),
-                    )
-                    # Clean up the stale session
-                    await self.session_manager.remove_session(session.session_id)
+                # behavior depends on session source
+                if (
+                    should_continue
+                    and "no conversation found" in str(resume_error).lower()
+                ):
+                    session_source = getattr(session, "source", "bot")
 
-                    # Create a fresh session and retry
-                    session = await self.session_manager.get_or_create_session(
-                        user_id, working_directory
-                    )
-                    response = await self._execute_with_fallback(
-                        prompt=prompt,
-                        working_directory=working_directory,
-                        session_id=None,
-                        continue_session=False,
-                        stream_callback=stream_handler,
-                        permission_callback=permission_callback,
-                        model=model,
-                    )
+                    if session_source == "desktop_adopted":
+                        # Adopted desktop sessions: explicit error, no silent fallback
+                        logger.error(
+                            "Adopted desktop session no longer available",
+                            session_id=claude_session_id,
+                            error=str(resume_error),
+                        )
+                        await self.session_manager.remove_session(session.session_id)
+                        raise ClaudeProcessError(
+                            f"Desktop session {session.session_id[:8]}... "
+                            f"is no longer available. The session may have "
+                            f"expired or been deleted on the desktop. "
+                            f"Please use /resume to select a different "
+                            f"session, or start a new one."
+                        )
+                    else:
+                        # Bot-created sessions: silent fallback to fresh session
+                        logger.warning(
+                            "Session resume failed, starting fresh session",
+                            failed_session_id=claude_session_id,
+                            error=str(resume_error),
+                        )
+                        await self.session_manager.remove_session(session.session_id)
+                        session = await self.session_manager.get_or_create_session(
+                            user_id, working_directory
+                        )
+                        response = await self._execute_with_fallback(
+                            prompt=prompt,
+                            working_directory=working_directory,
+                            session_id=None,
+                            continue_session=False,
+                            stream_callback=stream_handler,
+                            permission_callback=permission_callback,
+                            model=model,
+                            images=images,
+                        )
                 else:
                     raise
 
@@ -290,6 +308,16 @@ class ClaudeIntegration:
             )
             raise
 
+    # Error types that are safe to retry with subprocess fallback.
+    # Parameter/permission errors should NOT be retried — they indicate
+    # code bugs or user decisions, not transient transport issues.
+    _RETRYABLE_ERROR_TYPES = (
+        "ClaudeTimeoutError",
+        "CLIConnectionError",
+        "CLIJSONDecodeError",
+        "ClaudeParsingError",
+    )
+
     async def _execute_with_fallback(
         self,
         prompt: str,
@@ -299,21 +327,77 @@ class ClaudeIntegration:
         stream_callback: Optional[Callable] = None,
         permission_callback: Optional[Callable] = None,
         model: Optional[str] = None,
+        images: Optional[List[Dict[str, str]]] = None,
     ) -> ClaudeResponse:
-        """Execute command with SDK->subprocess fallback on JSON decode errors."""
+        """Execute command with SDK->subprocess fallback on retryable errors.
+
+        Channel selection:
+        - With permission_callback -> ClaudeSDKClient (supports can_use_tool)
+        - Without permission_callback -> query() function (existing path)
+
+        Fallback strategy:
+        - Retryable errors (timeout, connection, JSON decode) -> subprocess
+        - Non-retryable errors (ValueError, permission denied) -> raise immediately
+        """
+        has_images = bool(images)
+
+        # Image analysis requires SDK multimodal input. CLI subprocess fallback
+        # can only send plain text prompts, so we fail fast with clear guidance.
+        if has_images and not (self.config.use_sdk and self.sdk_manager):
+            logger.warning(
+                "Image request rejected because SDK mode is disabled",
+                use_sdk=self.config.use_sdk,
+                has_sdk_manager=bool(self.sdk_manager),
+            )
+            raise ClaudeProcessError(
+                "Image analysis requires SDK mode. "
+                "Set USE_SDK=true and restart the bot."
+            )
+
         # Try SDK first if configured
         if self.config.use_sdk and self.sdk_manager:
             try:
-                logger.debug("Attempting Claude SDK execution")
-                response = await self.sdk_manager.execute_command(
-                    prompt=prompt,
-                    working_directory=working_directory,
-                    session_id=session_id,
-                    continue_session=continue_session,
-                    stream_callback=stream_callback,
-                    permission_callback=permission_callback,
-                    model=model,
-                )
+                # NOTE:
+                # SDKClient path currently has task/cancel-scope instability in
+                # this bot runtime. To prioritize reliability, keep SDK enabled
+                # but route requests through query() mode by default.
+                # (permission_callback is intentionally not wired here)
+                use_client_mode = False
+
+                if use_client_mode:
+                    # Client mode: supports can_use_tool permission callbacks
+                    logger.debug("Attempting Claude SDK Client execution")
+                    response = await self.sdk_manager.execute_with_client(
+                        prompt=prompt,
+                        working_directory=working_directory,
+                        session_id=session_id,
+                        continue_session=continue_session,
+                        stream_callback=stream_callback,
+                        permission_callback=permission_callback,
+                        model=model,
+                        images=images,
+                    )
+                else:
+                    # query() mode: simpler, more robust for multimodal prompts.
+                    # If permission_callback exists, we intentionally skip
+                    # callback wiring for stability.
+                    if permission_callback:
+                        logger.info(
+                            "Using SDK query mode "
+                            "(permission callback bypassed for stability)"
+                        )
+                    else:
+                        logger.debug("Attempting Claude SDK query execution")
+                    response = await self.sdk_manager.execute_command(
+                        prompt=prompt,
+                        working_directory=working_directory,
+                        session_id=session_id,
+                        continue_session=continue_session,
+                        stream_callback=stream_callback,
+                        permission_callback=None,
+                        model=model,
+                        images=images,
+                    )
                 # Reset failure count on success
                 self._sdk_failed_count = 0
                 return response
@@ -323,31 +407,49 @@ class ClaudeIntegration:
                 raise
             except Exception as e:
                 error_str = str(e)
-                # Check if this is a JSON decode error that indicates SDK issues
-                if (
-                    "Failed to decode JSON" in error_str
-                    or "JSON decode error" in error_str
+                error_type = type(e).__name__
+
+                # Check if this error is retryable with subprocess fallback
+                is_retryable = (
+                    error_type in self._RETRYABLE_ERROR_TYPES
                     or "TaskGroup" in error_str
                     or "ExceptionGroup" in error_str
-                ):
+                )
+
+                if is_retryable:
                     self._sdk_failed_count += 1
+
+                    # Do not silently degrade multimodal image requests to text-only
+                    # subprocess mode, otherwise Claude will respond as if no image
+                    # was provided.
+                    if has_images:
+                        logger.error(
+                            "Claude SDK image request failed; skipping subprocess fallback",
+                            error=error_str,
+                            error_type=error_type,
+                            failure_count=self._sdk_failed_count,
+                        )
+                        raise ClaudeProcessError(
+                            "Image analysis failed in SDK mode and cannot fall back "
+                            "to CLI text mode. Please retry. "
+                            f"Original error: {error_str}"
+                        )
+
                     logger.warning(
-                        "Claude SDK failed with JSON/TaskGroup error, falling back to subprocess",
+                        "Claude SDK failed with retryable error, "
+                        "falling back to subprocess",
                         error=error_str,
+                        error_type=error_type,
                         failure_count=self._sdk_failed_count,
-                        error_type=type(e).__name__,
                     )
 
-                    # Use subprocess fallback
                     try:
                         logger.info("Executing with subprocess fallback")
-                        # Don't pass SDK session_id to subprocess - start fresh
-                        # SDK and subprocess have separate session management
                         response = await self.process_manager.execute_command(
                             prompt=prompt,
                             working_directory=working_directory,
-                            session_id=None,  # Start new session in subprocess
-                            continue_session=False,  # Fresh start
+                            session_id=None,
+                            continue_session=False,
                             stream_callback=stream_callback,
                             model=model,
                         )
@@ -360,12 +462,13 @@ class ClaudeIntegration:
                             sdk_error=error_str,
                             subprocess_error=str(fallback_error),
                         )
-                        # Re-raise the original SDK error since it was the primary method
                         raise e
                 else:
-                    # For non-JSON errors, re-raise immediately
+                    # Non-retryable: raise immediately
                     logger.error(
-                        "Claude SDK failed with non-JSON error", error=error_str
+                        "Claude SDK failed with non-retryable error",
+                        error=error_str,
+                        error_type=error_type,
                     )
                     raise
         else:

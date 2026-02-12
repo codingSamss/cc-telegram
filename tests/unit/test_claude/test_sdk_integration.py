@@ -1,11 +1,19 @@
 """Test Claude SDK integration."""
 
 import os
+from collections.abc import AsyncIterable
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 from src.claude.sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
 from src.config.settings import Settings
@@ -108,6 +116,7 @@ class TestClaudeSDKManager:
 
     async def test_execute_command_success(self, sdk_manager):
         """Test successful command execution."""
+
         async def mock_query(prompt, options):
             yield _make_assistant_message("Test response")
             yield _make_result_message(session_id="test-session", total_cost_usd=0.05)
@@ -125,6 +134,62 @@ class TestClaudeSDKManager:
         assert response.duration_ms >= 0  # Can be 0 in tests
         assert not response.is_error
         assert response.cost == 0.05
+
+    async def test_execute_command_sets_default_setting_sources(self, sdk_manager):
+        """Test SDK options include explicit setting sources for auth visibility."""
+        captured_options = []
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield _make_assistant_message("Test response")
+            yield _make_result_message()
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert len(captured_options) == 1
+        assert captured_options[0].setting_sources == ["user", "project", "local"]
+
+    async def test_execute_command_with_images_uses_async_iterable_prompt(
+        self, sdk_manager
+    ):
+        """Test multimodal path passes an AsyncIterable prompt (not coroutine)."""
+        captured_message = None
+
+        async def mock_query(prompt, options):
+            nonlocal captured_message
+            assert isinstance(prompt, AsyncIterable)
+
+            async for msg in prompt:
+                captured_message = msg
+                break
+
+            yield _make_assistant_message("Image response")
+            yield _make_result_message()
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            await sdk_manager.execute_command(
+                prompt="Describe this image",
+                working_directory=Path("/test"),
+                images=[
+                    {
+                        "base64_data": "dGVzdA==",
+                        "media_type": "image/jpeg",
+                    }
+                ],
+            )
+
+        assert captured_message is not None
+        assert captured_message["type"] == "user"
+        assert captured_message["message"]["role"] == "user"
+        content_blocks = captured_message["message"]["content"]
+        assert content_blocks[0]["type"] == "image"
+        assert content_blocks[0]["source"]["media_type"] == "image/jpeg"
+        assert content_blocks[1]["type"] == "text"
+        assert content_blocks[1]["text"] == "Describe this image"
 
     async def test_execute_command_with_streaming(self, sdk_manager):
         """Test command execution with streaming callback."""
@@ -147,6 +212,88 @@ class TestClaudeSDKManager:
         # Verify streaming was called
         assert len(stream_updates) > 0
         assert any(update.type == "assistant" for update in stream_updates)
+
+    async def test_execute_command_emits_init_stream_update(self, sdk_manager):
+        """SDK mode should emit an init update for thinking UI parity."""
+        stream_updates = []
+
+        async def stream_callback(update: StreamUpdate):
+            stream_updates.append(update)
+
+        async def mock_query(prompt, options):
+            yield _make_assistant_message("Test response")
+            yield _make_result_message()
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+                stream_callback=stream_callback,
+            )
+
+        assert len(stream_updates) >= 1
+        init_update = stream_updates[0]
+        assert init_update.type == "system"
+        assert init_update.metadata is not None
+        assert init_update.metadata.get("subtype") == "init"
+        assert init_update.metadata.get("model") == "auto (Claude CLI default)"
+
+    async def test_execute_command_emits_resolved_model_update(self, sdk_manager):
+        """SDK mode should emit resolved model once first assistant message arrives."""
+        stream_updates = []
+
+        async def stream_callback(update: StreamUpdate):
+            stream_updates.append(update)
+
+        async def mock_query(prompt, options):
+            yield _make_assistant_message("Test response")
+            yield _make_result_message()
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+                stream_callback=stream_callback,
+            )
+
+        resolved_updates = [
+            u
+            for u in stream_updates
+            if u.type == "system"
+            and u.metadata
+            and u.metadata.get("subtype") == "model_resolved"
+        ]
+        assert len(resolved_updates) == 1
+        assert resolved_updates[0].metadata.get("model") == "claude-sonnet-4-20250514"
+
+    async def test_handle_stream_message_emits_tool_events(self, sdk_manager):
+        """Tool use/result blocks should become stream updates."""
+        updates = []
+
+        async def stream_callback(update: StreamUpdate):
+            updates.append(update)
+
+        message = AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    id="toolu_123",
+                    name="Read",
+                    input={"file_path": "README.md"},
+                ),
+                ToolResultBlock(
+                    tool_use_id="toolu_123",
+                    content="ok",
+                    is_error=False,
+                ),
+                TextBlock(text="Done"),
+            ],
+            model="claude-sonnet-4-20250514",
+        )
+
+        await sdk_manager._handle_stream_message(message, stream_callback)
+
+        assert any(u.type == "assistant" and u.tool_calls for u in updates)
+        assert any(u.type == "tool_result" for u in updates)
 
     async def test_execute_command_timeout(self, sdk_manager):
         """Test command execution timeout."""
