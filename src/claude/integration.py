@@ -41,6 +41,7 @@ class ClaudeResponse:
     is_error: bool = False
     error_type: Optional[str] = None
     tools_used: List[Dict[str, Any]] = field(default_factory=list)
+    model_usage: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -110,10 +111,11 @@ class ClaudeProcessManager:
         session_id: Optional[str] = None,
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        model: Optional[str] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command."""
         # Build command
-        cmd = self._build_command(prompt, session_id, continue_session)
+        cmd = self._build_command(prompt, session_id, continue_session, model=model)
 
         # Create process ID for tracking
         process_id = str(uuid.uuid4())
@@ -176,7 +178,8 @@ class ClaudeProcessManager:
                 del self.active_processes[process_id]
 
     def _build_command(
-        self, prompt: str, session_id: Optional[str], continue_session: bool
+        self, prompt: str, session_id: Optional[str], continue_session: bool,
+        model: Optional[str] = None,
     ) -> List[str]:
         """Build Claude Code command with arguments."""
         from .sdk_integration import find_claude_cli
@@ -211,6 +214,10 @@ class ClaudeProcessManager:
 
         # Add safety limits
         cmd.extend(["--max-turns", str(self.config.claude_max_turns)])
+
+        # Add model override if specified by user
+        if model:
+            cmd.extend(["--model", model])
 
         # Add allowed tools if configured
         if (
@@ -571,12 +578,13 @@ class ClaudeProcessManager:
         return ClaudeResponse(
             content=content,
             session_id=result.get("session_id", ""),
-            cost=result.get("cost_usd", 0.0),
+            cost=result.get("total_cost_usd", 0.0) or 0.0,
             duration_ms=result.get("duration_ms", 0),
             num_turns=result.get("num_turns", 0),
             is_error=result.get("is_error", False),
             error_type=result.get("subtype") if result.get("is_error") else None,
             tools_used=tools_used,
+            model_usage=result.get("modelUsage"),
         )
 
     async def kill_all_processes(self) -> None:

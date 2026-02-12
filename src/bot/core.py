@@ -114,6 +114,7 @@ class ClaudeCodeBot:
             BotCommand("git", "Git repository commands"),
             BotCommand("cancel", "Cancel the current running task"),
             BotCommand("resume", "Resume a desktop Claude Code session"),
+            BotCommand("model", "View or switch Claude model"),
         ]
 
         await self.app.bot.set_my_commands(commands)
@@ -140,6 +141,7 @@ class ClaudeCodeBot:
             ("git", command.git_command),
             ("cancel", command.cancel_task),
             ("resume", command.resume_command),
+            ("model", command.model_command),
         ]
 
         for cmd, handler in handlers:

@@ -387,6 +387,7 @@ async def handle_text_message(
         )
 
         # Run Claude command as cancellable task
+
         async def _run_claude():
             return await claude_integration.run_command(
                 prompt=message_text,
@@ -396,6 +397,7 @@ async def handle_text_message(
                 on_stream=stream_handler,
                 force_new_session=force_new_session,
                 permission_handler=permission_handler,
+                model=context.user_data.get("claude_model"),
             )
 
         task = asyncio.create_task(_run_claude())
@@ -859,6 +861,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 session_id=session_id,
                 force_new_session=force_new_session,
                 permission_handler=permission_handler,
+                model=context.user_data.get("claude_model"),
             )
 
             # Update session ID
@@ -992,6 +995,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     session_id=session_id,
                     force_new_session=force_new_session,
                     permission_handler=permission_handler,
+                    model=context.user_data.get("claude_model"),
                 )
 
                 # Update session ID

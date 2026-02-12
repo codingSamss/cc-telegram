@@ -620,35 +620,77 @@ async def show_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /status command."""
+    """Handle /status command - show real CLI session data."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
 
-    # Get session info
     claude_session_id = context.user_data.get("claude_session_id")
     current_dir = context.user_data.get(
         "current_directory", settings.approved_directory
     )
     relative_path = current_dir.relative_to(settings.approved_directory)
+    current_model = context.user_data.get("claude_model")
 
-    # Get rate limiter info if available
-    rate_limiter = context.bot_data.get("rate_limiter")
-    usage_info = ""
-    if rate_limiter:
-        try:
-            user_status = rate_limiter.get_user_status(user_id)
-            cost_usage = user_status.get("cost_usage", {})
-            current_cost = cost_usage.get("current", 0.0)
-            cost_limit = cost_usage.get("limit", settings.claude_max_cost_per_user)
-            cost_percentage = (current_cost / cost_limit) * 100 if cost_limit > 0 else 0
+    status_lines = [
+        "**Session Status**\n",
+        f"Directory: `{relative_path}/`",
+        f"Model: `{current_model or 'default'}`",
+    ]
 
-            usage_info = f"💰 Usage: ${current_cost:.2f} / ${cost_limit:.2f} ({cost_percentage:.0f}%)\n"
-        except Exception:
-            usage_info = "💰 Usage: _Unable to retrieve_\n"
+    if claude_session_id:
+        status_lines.append(f"Session: `{claude_session_id[:8]}...`")
 
-    # Check if there's a resumable session from the database
-    resumable_info = ""
-    if not claude_session_id:
+        # Fetch real session data from session manager
+        claude_integration: ClaudeIntegration = context.bot_data.get(
+            "claude_integration"
+        )
+        if claude_integration:
+            info = await claude_integration.get_session_info(claude_session_id)
+            if info:
+                status_lines.append(f"Messages: {info.get('messages', 0)}")
+                status_lines.append(f"Turns: {info.get('turns', 0)}")
+                status_lines.append(f"Cost: `${info.get('cost', 0.0):.4f}`")
+
+                # Model usage details
+                model_usage = info.get("model_usage")
+                if model_usage:
+                    for model_name, usage in model_usage.items():
+                        if not isinstance(usage, dict):
+                            continue
+                        input_t = usage.get("inputTokens", 0)
+                        output_t = usage.get("outputTokens", 0)
+                        cache_read = usage.get("cacheReadInputTokens", 0)
+                        cache_create = usage.get("cacheCreationInputTokens", 0)
+                        ctx_window = usage.get("contextWindow", 0)
+
+                        total_tokens = input_t + output_t + cache_read + cache_create
+                        status_lines.append(f"\n*Context ({model_name})*")
+                        if ctx_window:
+                            used_pct = total_tokens / ctx_window * 100
+                            remaining = ctx_window - total_tokens
+                            status_lines.append(
+                                f"Usage: `{total_tokens:,}` / `{ctx_window:,}` "
+                                f"({used_pct:.1f}%)"
+                            )
+                            status_lines.append(f"Remaining: `{remaining:,}` tokens")
+                        else:
+                            status_lines.append(f"Tokens: `{total_tokens:,}`")
+                        status_lines.append(
+                            f"  Input: `{input_t:,}` | Output: `{output_t:,}`"
+                        )
+                        status_lines.append(
+                            f"  Cache read: `{cache_read:,}` | "
+                            f"Cache create: `{cache_create:,}`"
+                        )
+                        max_output = usage.get("maxOutputTokens", 0)
+                        if max_output:
+                            status_lines.append(
+                                f"  Max output: `{max_output:,}`"
+                            )
+    else:
+        status_lines.append("Session: none")
+
+        # Check for resumable session
         claude_integration: ClaudeIntegration = context.bot_data.get(
             "claude_integration"
         )
@@ -657,28 +699,12 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 user_id, current_dir
             )
             if existing:
-                resumable_info = (
-                    f"🔄 Resumable: `{existing.session_id[:8]}...` "
+                status_lines.append(
+                    f"Resumable: `{existing.session_id[:8]}...` "
                     f"({existing.message_count} msgs)"
                 )
 
-    # Format status message
-    status_lines = [
-        "📊 **Session Status**",
-        "",
-        f"📂 Directory: `{relative_path}/`",
-        f"🤖 Claude Session: {'✅ Active' if claude_session_id else '❌ None'}",
-        usage_info.rstrip(),
-        f"🕐 Last Update: {update.message.date.strftime('%H:%M:%S UTC')}",
-    ]
-
-    if claude_session_id:
-        status_lines.append(f"🆔 Session ID: `{claude_session_id[:8]}...`")
-    elif resumable_info:
-        status_lines.append(resumable_info)
-        status_lines.append("💡 Session will auto-resume on your next message")
-
-    # Add action buttons
+    # Action buttons
     keyboard = []
     if claude_session_id:
         keyboard.append(
@@ -705,10 +731,10 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ]
     )
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
-        "\n".join(status_lines), parse_mode="Markdown", reply_markup=reply_markup
+        "\n".join(status_lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -1023,6 +1049,42 @@ def _escape_markdown(text: str) -> str:
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
+
+
+async def model_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /model command - show inline keyboard to select Claude model."""
+    current = context.user_data.get("claude_model")
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{'> ' if current == 'sonnet' else ''}Sonnet",
+                callback_data="model:sonnet",
+            ),
+            InlineKeyboardButton(
+                f"{'> ' if current == 'opus' else ''}Opus",
+                callback_data="model:opus",
+            ),
+            InlineKeyboardButton(
+                f"{'> ' if current == 'haiku' else ''}Haiku",
+                callback_data="model:haiku",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'> ' if not current else ''}Default",
+                callback_data="model:default",
+            ),
+        ],
+    ]
+
+    await update.message.reply_text(
+        f"Current model: `{current or 'default'}`\nSelect a model:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def resume_command(

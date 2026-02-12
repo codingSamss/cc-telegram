@@ -67,6 +67,7 @@ async def handle_callback_query(
             "permission": handle_permission_callback,
             "thinking": handle_thinking_callback,
             "resume": handle_resume_callback,
+            "model": handle_model_callback,
         }
 
         handler = handlers.get(action)
@@ -565,9 +566,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle status action."""
-    # This essentially duplicates the /status command functionality
-    user_id = query.from_user.id
+    """Handle status action - synced with /status command logic."""
     settings: Settings = context.bot_data["settings"]
 
     claude_session_id = context.user_data.get("claude_session_id")
@@ -575,48 +574,37 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
         "current_directory", settings.approved_directory
     )
     relative_path = current_dir.relative_to(settings.approved_directory)
-
-    # Get usage info if rate limiter is available
-    rate_limiter = context.bot_data.get("rate_limiter")
-    usage_info = ""
-    if rate_limiter:
-        try:
-            user_status = rate_limiter.get_user_status(user_id)
-            cost_usage = user_status.get("cost_usage", {})
-            current_cost = cost_usage.get("current", 0.0)
-            cost_limit = cost_usage.get("limit", settings.claude_max_cost_per_user)
-            cost_percentage = (current_cost / cost_limit) * 100 if cost_limit > 0 else 0
-
-            usage_info = f"💰 Usage: ${current_cost:.2f} / ${cost_limit:.2f} ({cost_percentage:.0f}%)\n"
-        except Exception:
-            usage_info = "💰 Usage: _Unable to retrieve_\n"
+    current_model = context.user_data.get("claude_model")
 
     status_lines = [
-        "📊 **Session Status**",
-        "",
-        f"📂 Directory: `{relative_path}/`",
-        f"🤖 Claude Session: {'✅ Active' if claude_session_id else '❌ None'}",
-        usage_info.rstrip(),
+        "**Session Status**\n",
+        f"Directory: `{relative_path}/`",
+        f"Model: `{current_model or 'default'}`",
     ]
 
     if claude_session_id:
-        status_lines.append(f"🆔 Session ID: `{claude_session_id[:8]}...`")
+        status_lines.append(f"Session: `{claude_session_id[:8]}...`")
 
-    # Add action buttons
+        claude_integration: ClaudeIntegration = context.bot_data.get(
+            "claude_integration"
+        )
+        if claude_integration:
+            info = await claude_integration.get_session_info(claude_session_id)
+            if info:
+                status_lines.append(f"Cost: `${info.get('cost', 0.0):.4f}`")
+                status_lines.append(f"Messages: {info.get('messages', 0)}")
+                status_lines.append(f"Turns: {info.get('turns', 0)}")
+    else:
+        status_lines.append("Session: none")
+
+    # Action buttons
     keyboard = []
     if claude_session_id:
         keyboard.append(
             [
-                InlineKeyboardButton("🔄 Continue", callback_data="action:continue"),
+                InlineKeyboardButton("Continue", callback_data="action:continue"),
                 InlineKeyboardButton(
-                    "🛑 End Session", callback_data="action:end_session"
-                ),
-            ]
-        )
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    "🆕 New Session", callback_data="action:new_session"
+                    "New Session", callback_data="action:new_session"
                 ),
             ]
         )
@@ -624,15 +612,15 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    "🆕 Start Session", callback_data="action:new_session"
+                    "Start Session", callback_data="action:new_session"
                 )
             ]
         )
 
     keyboard.append(
         [
-            InlineKeyboardButton("🔄 Refresh", callback_data="action:refresh_status"),
-            InlineKeyboardButton("📁 Projects", callback_data="action:show_projects"),
+            InlineKeyboardButton("Export", callback_data="action:export"),
+            InlineKeyboardButton("Refresh", callback_data="action:refresh_status"),
         ]
     )
 
@@ -640,6 +628,49 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await query.edit_message_text(
         "\n".join(status_lines), parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+
+async def handle_model_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle model selection callback from inline keyboard."""
+    if param == "default":
+        context.user_data.pop("claude_model", None)
+        selected = "default"
+    else:
+        context.user_data["claude_model"] = param
+        selected = param
+
+    # Rebuild keyboard with updated selection indicator
+    current = context.user_data.get("claude_model")
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{'> ' if current == 'sonnet' else ''}Sonnet",
+                callback_data="model:sonnet",
+            ),
+            InlineKeyboardButton(
+                f"{'> ' if current == 'opus' else ''}Opus",
+                callback_data="model:opus",
+            ),
+            InlineKeyboardButton(
+                f"{'> ' if current == 'haiku' else ''}Haiku",
+                callback_data="model:haiku",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'> ' if not current else ''}Default",
+                callback_data="model:default",
+            ),
+        ],
+    ]
+
+    await query.edit_message_text(
+        f"Model switched to `{selected}`.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 

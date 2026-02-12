@@ -61,6 +61,7 @@ class ClaudeIntegration:
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
         force_new_session: bool = False,
         permission_handler: Optional[PermissionRequestCallback] = None,
+        model: Optional[str] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
         logger.info(
@@ -179,6 +180,7 @@ class ClaudeIntegration:
                     continue_session=should_continue,
                     stream_callback=stream_handler,
                     permission_callback=permission_callback,
+                    model=model,
                 )
             except asyncio.CancelledError:
                 raise
@@ -207,6 +209,7 @@ class ClaudeIntegration:
                         continue_session=False,
                         stream_callback=stream_handler,
                         permission_callback=permission_callback,
+                        model=model,
                     )
                 else:
                     raise
@@ -295,6 +298,7 @@ class ClaudeIntegration:
         continue_session: bool = False,
         stream_callback: Optional[Callable] = None,
         permission_callback: Optional[Callable] = None,
+        model: Optional[str] = None,
     ) -> ClaudeResponse:
         """Execute command with SDK->subprocess fallback on JSON decode errors."""
         # Try SDK first if configured
@@ -308,6 +312,7 @@ class ClaudeIntegration:
                     continue_session=continue_session,
                     stream_callback=stream_callback,
                     permission_callback=permission_callback,
+                    model=model,
                 )
                 # Reset failure count on success
                 self._sdk_failed_count = 0
@@ -344,6 +349,7 @@ class ClaudeIntegration:
                             session_id=None,  # Start new session in subprocess
                             continue_session=False,  # Fresh start
                             stream_callback=stream_callback,
+                            model=model,
                         )
                         logger.info("Subprocess fallback succeeded")
                         return response
@@ -371,6 +377,7 @@ class ClaudeIntegration:
                 session_id=session_id,
                 continue_session=continue_session,
                 stream_callback=stream_callback,
+                model=model,
             )
 
     async def _find_resumable_session(

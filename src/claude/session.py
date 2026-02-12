@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import structlog
 
@@ -43,6 +43,7 @@ class ClaudeSession:
     message_count: int = 0
     tools_used: List[str] = field(default_factory=list)
     is_new_session: bool = False  # True if session hasn't been sent to Claude Code yet
+    model_usage: Optional[Dict[str, Any]] = None  # Latest model usage snapshot
 
     def is_expired(self, timeout_hours: int) -> bool:
         """Check if session has expired."""
@@ -55,6 +56,10 @@ class ClaudeSession:
         self.total_cost += response.cost
         self.total_turns += response.num_turns
         self.message_count += 1
+
+        # Update model usage snapshot (latest state, not cumulative)
+        if hasattr(response, "model_usage") and response.model_usage:
+            self.model_usage = response.model_usage
 
         # Track unique tools
         if response.tools_used:
@@ -75,6 +80,7 @@ class ClaudeSession:
             "total_turns": self.total_turns,
             "message_count": self.message_count,
             "tools_used": self.tools_used,
+            "model_usage": self.model_usage,
         }
 
     @classmethod
@@ -90,6 +96,7 @@ class ClaudeSession:
             total_turns=data.get("total_turns", 0),
             message_count=data.get("message_count", 0),
             tools_used=data.get("tools_used", []),
+            model_usage=data.get("model_usage"),
         )
 
 
@@ -464,6 +471,7 @@ class SessionManager:
                 "messages": session.message_count,
                 "tools_used": session.tools_used,
                 "expired": session.is_expired(self.config.session_timeout_hours),
+                "model_usage": session.model_usage,
             }
 
         return None

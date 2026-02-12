@@ -117,6 +117,7 @@ class ClaudeResponse:
     is_error: bool = False
     error_type: Optional[str] = None
     tools_used: List[Dict[str, Any]] = field(default_factory=list)
+    model_usage: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -160,6 +161,7 @@ class ClaudeSDKManager:
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         permission_callback: Optional[Callable] = None,
+        model: Optional[str] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -179,6 +181,7 @@ class ClaudeSDKManager:
                 cwd=str(working_directory),
                 allowed_tools=self.config.claude_allowed_tools,
                 cli_path=cli_path,
+                model=model,
             )
 
             # Pass permission callback if provided
@@ -220,11 +223,19 @@ class ClaudeSDKManager:
             cost = 0.0
             tools_used = []
             claude_session_id = None
+            sdk_usage = None
             for message in messages:
                 if isinstance(message, ResultMessage):
                     cost = getattr(message, "total_cost_usd", 0.0) or 0.0
                     claude_session_id = getattr(message, "session_id", None)
+                    sdk_usage = getattr(message, "usage", None)
                     tools_used = self._extract_tools_from_messages(messages)
+                    logger.debug(
+                        "ResultMessage details",
+                        cost=cost,
+                        usage=sdk_usage,
+                        session_id=claude_session_id,
+                    )
                     break
 
             # Calculate duration
@@ -256,6 +267,7 @@ class ClaudeSDKManager:
                     ]
                 ),
                 tools_used=tools_used,
+                model_usage=self._build_model_usage(sdk_usage, cost),
             )
 
         except asyncio.TimeoutError:
@@ -449,6 +461,31 @@ class ClaudeSDKManager:
 
         except Exception as e:
             logger.warning("Stream callback failed", error=str(e))
+
+    @staticmethod
+    def _build_model_usage(
+        sdk_usage: Optional[Dict[str, Any]], cost: float
+    ) -> Optional[Dict[str, Any]]:
+        """Build model_usage dict from SDK usage data.
+
+        SDK usage has flat fields like input_tokens, output_tokens.
+        We wrap them in a format compatible with CLI's modelUsage.
+        """
+        if not sdk_usage:
+            return None
+        return {
+            "sdk": {
+                "inputTokens": sdk_usage.get("input_tokens", 0),
+                "outputTokens": sdk_usage.get("output_tokens", 0),
+                "cacheReadInputTokens": sdk_usage.get(
+                    "cache_read_input_tokens", 0
+                ),
+                "cacheCreationInputTokens": sdk_usage.get(
+                    "cache_creation_input_tokens", 0
+                ),
+                "costUSD": cost,
+            }
+        }
 
     def _extract_content_from_messages(self, messages: List[Message]) -> str:
         """Extract content from message list."""
