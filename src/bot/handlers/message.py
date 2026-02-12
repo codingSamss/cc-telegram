@@ -176,7 +176,7 @@ def _format_error_message(error_str: str) -> str:
             f"**What you can do:**\n"
             f"• Use `/new` to start a fresh session\n"
             f"• Try your request again\n"
-            f"• Use `/status` to check your current session"
+            f"• Use `/context` to check your current session"
         )
     elif "rate limit" in error_str.lower():
         return (
@@ -185,7 +185,7 @@ def _format_error_message(error_str: str) -> str:
             f"**What you can do:**\n"
             f"• Wait a moment before trying again\n"
             f"• Use simpler requests\n"
-            f"• Check your current usage with `/status`"
+            f"• Check your current usage with `/context`"
         )
     elif "timeout" in error_str.lower():
         return (
@@ -230,6 +230,25 @@ def _get_stream_merge_key(update_obj: Any) -> Optional[str]:
     return None
 
 
+def _is_high_priority_stream_update(update_obj: Any) -> bool:
+    """Whether a stream update should bypass debounce and flush immediately."""
+    if update_obj.type in {"error", "tool_result"}:
+        return True
+
+    if update_obj.type == "assistant" and update_obj.tool_calls:
+        return True
+
+    if update_obj.type == "system" and update_obj.metadata:
+        return update_obj.metadata.get("subtype") in {"init", "model_resolved"}
+
+    return False
+
+
+def _is_noop_edit_error(error: Exception) -> bool:
+    """Check whether Telegram rejected edit because content is unchanged."""
+    return "message is not modified" in str(error).lower()
+
+
 def _append_progress_line_with_merge(
     progress_lines: list[str],
     progress_merge_keys: list[Optional[str]],
@@ -245,6 +264,10 @@ def _append_progress_line_with_merge(
     ):
         progress_lines[-1] = progress_text
         progress_merge_keys[-1] = merge_key
+        return
+
+    # Skip exact consecutive duplicates to reduce noisy UI refreshes.
+    if progress_lines and progress_lines[-1] == progress_text:
         return
 
     progress_lines.append(progress_text)
@@ -482,7 +505,29 @@ async def handle_text_message(
                     last_progress_text = text_to_send
                     last_progress_edit_ts = stream_loop.time()
                 except Exception as e:
-                    logger.warning("Failed to update progress message", error=str(e))
+                    if _is_noop_edit_error(e):
+                        last_progress_text = text_to_send
+                        last_progress_edit_ts = stream_loop.time()
+                        return
+
+                    # Fallback: retry without parse_mode when markdown parsing fails.
+                    try:
+                        await progress_msg.edit_text(
+                            text_to_send,
+                            reply_markup=cancel_keyboard,
+                        )
+                        last_progress_text = text_to_send
+                        last_progress_edit_ts = stream_loop.time()
+                    except Exception as fallback_error:
+                        if _is_noop_edit_error(fallback_error):
+                            last_progress_text = text_to_send
+                            last_progress_edit_ts = stream_loop.time()
+                            return
+                        logger.warning(
+                            "Failed to update progress message",
+                            error=str(e),
+                            fallback_error=str(fallback_error),
+                        )
 
         def _schedule_progress_flush() -> None:
             nonlocal progress_flush_task
@@ -569,7 +614,11 @@ async def handle_text_message(
                     return
 
                 pending_progress_text = full_text
-                _schedule_progress_flush()
+                if _is_high_priority_stream_update(update_obj):
+                    await _cancel_progress_flush_task()
+                    await _flush_pending_progress(force=True)
+                else:
+                    _schedule_progress_flush()
             except Exception as e:
                 logger.warning("Failed to process stream update", error=str(e))
 
@@ -1577,7 +1626,7 @@ async def _generate_placeholder_response(
             f"**What I can do now:**\n"
             f"• Navigate directories (`/cd`, `/ls`, `/pwd`)\n"
             f"• Show projects (`/projects`)\n"
-            f"• Manage sessions (`/new`, `/status`)\n\n"
+            f"• Manage sessions (`/new`, `/context`)\n\n"
             f"**Coming soon:**\n"
             f"• Full Claude Code integration\n"
             f"• Code generation and editing\n"

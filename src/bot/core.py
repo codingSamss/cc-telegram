@@ -101,7 +101,7 @@ class ClaudeCodeBot:
         commands = [
             BotCommand("new", "Clear context and start fresh session"),
             BotCommand("resume", "Resume a desktop Claude Code session"),
-            BotCommand("status", "Show session status"),
+            BotCommand("context", "Show session context status"),
             BotCommand("cancel", "Cancel the current running task"),
             BotCommand("model", "View or switch Claude model"),
             BotCommand("projects", "Show all projects"),
@@ -130,7 +130,7 @@ class ClaudeCodeBot:
             ("cd", command.change_directory),
             ("pwd", command.print_working_directory),
             ("projects", command.show_projects),
-            ("status", command.session_status),
+            ("context", command.session_status),
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),

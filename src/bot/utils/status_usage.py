@@ -31,7 +31,7 @@ def build_model_usage_status_lines(
     current_model: Optional[str] = None,
     allow_estimated_ratio: bool = True,
 ) -> List[str]:
-    """Build context/token usage lines for /status output."""
+    """Build context/token usage lines for /context output."""
     status_lines: List[str] = []
 
     for model_name, usage in model_usage.items():

@@ -9,6 +9,8 @@ from src.bot.handlers.message import (
     _append_progress_line_with_merge,
     _format_progress_update,
     _get_stream_merge_key,
+    _is_high_priority_stream_update,
+    _is_noop_edit_error,
 )
 
 
@@ -125,3 +127,54 @@ def test_append_progress_line_with_merge_merges_only_consecutive_same_key():
 
     assert lines == ["🤖 second", "🔄 step 2", "✅ done", "✅ done again"]
     assert merge_keys == ["assistant_content", "progress", None, None]
+
+
+def test_append_progress_line_with_merge_skips_exact_consecutive_duplicates():
+    """Exact duplicates should be skipped to reduce noisy edits."""
+    lines: list[str] = []
+    merge_keys: list[Optional[str]] = []
+
+    _append_progress_line_with_merge(
+        progress_lines=lines,
+        progress_merge_keys=merge_keys,
+        progress_text="🔧 Read: `a.py`",
+        merge_key=None,
+    )
+    _append_progress_line_with_merge(
+        progress_lines=lines,
+        progress_merge_keys=merge_keys,
+        progress_text="🔧 Read: `a.py`",
+        merge_key=None,
+    )
+
+    assert lines == ["🔧 Read: `a.py`"]
+    assert merge_keys == [None]
+
+
+def test_high_priority_stream_update_detection():
+    """High-priority updates should bypass debounce for snappier feedback."""
+    error_update = _FakeUpdate(type="error", content="boom")
+    tool_result_update = _FakeUpdate(type="tool_result", content="done")
+    tool_call_update = _FakeUpdate(
+        type="assistant",
+        tool_calls=[{"name": "Read", "input": {"file_path": "x.py"}}],
+    )
+    system_init = _FakeUpdate(type="system", metadata={"subtype": "init"})
+    system_model = _FakeUpdate(type="system", metadata={"subtype": "model_resolved"})
+    plain_progress = _FakeUpdate(type="progress", content="working")
+
+    assert _is_high_priority_stream_update(error_update) is True
+    assert _is_high_priority_stream_update(tool_result_update) is True
+    assert _is_high_priority_stream_update(tool_call_update) is True
+    assert _is_high_priority_stream_update(system_init) is True
+    assert _is_high_priority_stream_update(system_model) is True
+    assert _is_high_priority_stream_update(plain_progress) is False
+
+
+def test_noop_edit_error_detection():
+    """Should detect Telegram 'message is not modified' edit rejection."""
+    assert _is_noop_edit_error(Exception("Message is not modified")) is True
+    assert (
+        _is_noop_edit_error(Exception("Bad Request: message is not modified")) is True
+    )
+    assert _is_noop_edit_error(Exception("network timeout")) is False

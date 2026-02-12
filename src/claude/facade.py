@@ -261,7 +261,7 @@ class ClaudeIntegration:
                         f"**What you can do:**\n"
                         f"• Contact the administrator to request access to these tools\n"
                         f"• Try rephrasing your request to use different approaches\n"
-                        f"• Check what tools are currently available with `/status`\n\n"
+                        f"• Check what tools are currently available with `/context`\n\n"
                         f"**Currently allowed tools:**\n"
                         f"{', '.join(f'`{t}`' for t in self.config.claude_allowed_tools or [])}"
                     )

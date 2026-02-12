@@ -191,7 +191,7 @@ async def handle_cd_callback(
                 InlineKeyboardButton(
                     "📋 Projects", callback_data="action:show_projects"
                 ),
-                InlineKeyboardButton("📊 Status", callback_data="action:status"),
+                InlineKeyboardButton("📊 Context", callback_data="action:status"),
             ],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -273,7 +273,7 @@ async def _handle_help_action(query, context: ContextTypes.DEFAULT_TYPE) -> None
         "• `/projects` - Show projects\n\n"
         "**Sessions:**\n"
         "• `/new` - New Claude session\n"
-        "• `/status` - Session status\n\n"
+        "• `/context` - Session status\n\n"
         "**Tips:**\n"
         "• Send any text to interact with Claude\n"
         "• Upload files for code review\n"
@@ -413,7 +413,7 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
             "There's no active Claude session to end.\n\n"
             "**What you can do:**\n"
             "• Use the button below to start a new session\n"
-            "• Check your session status\n"
+            "• Check your session context\n"
             "• Send any message to start a conversation",
             reply_markup=InlineKeyboardMarkup(
                 [
@@ -422,7 +422,7 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
                             "🆕 New Session", callback_data="action:new_session"
                         )
                     ],
-                    [InlineKeyboardButton("📊 Status", callback_data="action:status")],
+                    [InlineKeyboardButton("📊 Context", callback_data="action:status")],
                 ]
             ),
         )
@@ -452,7 +452,7 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
             ),
         ],
         [
-            InlineKeyboardButton("📊 Status", callback_data="action:status"),
+            InlineKeyboardButton("📊 Context", callback_data="action:status"),
             InlineKeyboardButton("❓ Help", callback_data="action:help"),
         ],
     ]
@@ -467,7 +467,7 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
         f"• Ready for new commands\n\n"
         f"**Next Steps:**\n"
         f"• Start a new session\n"
-        f"• Check status\n"
+        f"• Check context\n"
         f"• Send any message to begin a new conversation",
         parse_mode="Markdown",
         reply_markup=reply_markup,
@@ -549,7 +549,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Directory: `{current_dir.relative_to(settings.approved_directory)}/`\n\n"
                 f"**What you can do:**\n"
                 f"• Use the button below to start a fresh session\n"
-                f"• Check your session status\n"
+                f"• Check your session context\n"
                 f"• Navigate to a different directory",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
@@ -559,7 +559,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
                                 "🆕 New Session", callback_data="action:new_session"
                             ),
                             InlineKeyboardButton(
-                                "📊 Status", callback_data="action:status"
+                                "📊 Context", callback_data="action:status"
                             ),
                         ]
                     ]
@@ -586,7 +586,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle status action - synced with /status command logic."""
+    """Handle status action - synced with /context command logic."""
     settings: Settings = context.bot_data["settings"]
     await query.edit_message_text(
         "**Session Status**\n\n⏳ 正在刷新状态，请稍候...", parse_mode="Markdown"
@@ -636,37 +636,8 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         status_lines.append("Session: none")
 
-    # Action buttons
-    keyboard = []
-    if claude_session_id:
-        keyboard.append(
-            [
-                InlineKeyboardButton("Continue", callback_data="action:continue"),
-                InlineKeyboardButton(
-                    "New Session", callback_data="action:new_session"
-                ),
-            ]
-        )
-    else:
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    "Start Session", callback_data="action:new_session"
-                )
-            ]
-        )
-
-    keyboard.append(
-        [
-            InlineKeyboardButton("Export", callback_data="action:export"),
-            InlineKeyboardButton("Refresh", callback_data="action:refresh_status"),
-        ]
-    )
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await query.edit_message_text(
-        "\n".join(status_lines), parse_mode="Markdown", reply_markup=reply_markup
+        "\n".join(status_lines), parse_mode="Markdown"
     )
 
 
@@ -870,7 +841,7 @@ async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
             "**What you can do:**\n"
             "• Start a new session with `/new`\n"
             "• Continue an existing session with `/continue`\n"
-            "• Check your status with `/status`",
+            "• Check your status with `/context`",
             parse_mode="Markdown",
         )
         return
@@ -1078,7 +1049,7 @@ async def handle_conversation_callback(
                 ),
             ],
             [
-                InlineKeyboardButton("📊 Status", callback_data="action:status"),
+                InlineKeyboardButton("📊 Context", callback_data="action:status"),
                 InlineKeyboardButton("❓ Help", callback_data="action:help"),
             ],
         ]
@@ -1093,7 +1064,7 @@ async def handle_conversation_callback(
             f"• Ready for new commands\n\n"
             f"**Next Steps:**\n"
             f"• Start a new session\n"
-            f"• Check status\n"
+            f"• Check context\n"
             f"• Send any message to begin a new conversation",
             parse_mode="Markdown",
             reply_markup=reply_markup,

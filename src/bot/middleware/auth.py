@@ -1,11 +1,12 @@
 """Telegram bot authentication middleware."""
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict
 
 import structlog
 
 logger = structlog.get_logger()
+BEIJING_TZ = timezone(timedelta(hours=8), name="UTC+8")
 
 
 async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -> Any:
@@ -84,9 +85,10 @@ async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -
 
         # Welcome message for new session
         if event.effective_message:
+            session_started_bjt = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
             await event.effective_message.reply_text(
                 f"🔓 Welcome! You are now authenticated.\n"
-                f"Session started at {datetime.utcnow().strftime('%H:%M:%S UTC')}"
+                f"Session started at {session_started_bjt} Beijing Time (UTC+8)"
             )
 
         # Continue to handler

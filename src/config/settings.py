@@ -158,13 +158,13 @@ class Settings(BaseSettings):
     )
     status_context_probe_ttl_seconds: int = Field(
         0,
-        description="TTL for /status precise /context probe cache (0 disables cache)",
+        description="TTL for /context precise /context probe cache (0 disables cache)",
         ge=0,
         le=600,
     )
     status_context_probe_timeout_seconds: int = Field(
         45,
-        description="Timeout for /status precise /context probe (seconds)",
+        description="Timeout for /context precise /context probe (seconds)",
         ge=5,
         le=300,
     )
