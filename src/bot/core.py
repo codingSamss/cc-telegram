@@ -99,23 +99,17 @@ class ClaudeCodeBot:
     async def _set_bot_commands(self) -> None:
         """Set bot command menu."""
         commands = [
-            BotCommand("start", "Start bot and show help"),
-            BotCommand("help", "Show available commands"),
             BotCommand("new", "Clear context and start fresh session"),
-            BotCommand("continue", "Explicitly continue last session"),
-            BotCommand("end", "End current session and clear context"),
-            BotCommand("ls", "List files in current directory"),
-            BotCommand("cd", "Change directory (resumes project session)"),
-            BotCommand("pwd", "Show current directory"),
-            BotCommand("projects", "Show all projects"),
-            BotCommand("status", "Show session status"),
-            BotCommand("export", "Export current session"),
-            BotCommand("actions", "Show quick actions"),
-            BotCommand("git", "Git repository commands"),
-            BotCommand("cancel", "Cancel the current running task"),
             BotCommand("resume", "Resume a desktop Claude Code session"),
+            BotCommand("status", "Show session status"),
+            BotCommand("cancel", "Cancel the current running task"),
             BotCommand("model", "View or switch Claude model"),
-            BotCommand("codexdiag", "Diagnose codex MCP status"),
+            BotCommand("projects", "Show all projects"),
+            BotCommand("cd", "Change directory (resumes project session)"),
+            BotCommand("ls", "List files in current directory"),
+            BotCommand("git", "Git repository commands"),
+            BotCommand("export", "Export current session"),
+            BotCommand("help", "Show available commands"),
         ]
 
         await self.app.bot.set_my_commands(commands)

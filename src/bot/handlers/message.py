@@ -217,6 +217,40 @@ def _format_error_message(error_str: str) -> str:
         )
 
 
+def _get_stream_merge_key(update_obj: Any) -> Optional[str]:
+    """Return merge key for high-frequency stream updates, or None if not mergeable."""
+    if (
+        update_obj.type == "assistant"
+        and update_obj.content
+        and not update_obj.tool_calls
+    ):
+        return "assistant_content"
+    if update_obj.type == "progress":
+        return "progress"
+    return None
+
+
+def _append_progress_line_with_merge(
+    progress_lines: list[str],
+    progress_merge_keys: list[Optional[str]],
+    progress_text: str,
+    merge_key: Optional[str],
+) -> None:
+    """Append progress line or merge into previous line when merge key matches."""
+    if (
+        merge_key
+        and progress_lines
+        and progress_merge_keys
+        and progress_merge_keys[-1] == merge_key
+    ):
+        progress_lines[-1] = progress_text
+        progress_merge_keys[-1] = merge_key
+        return
+
+    progress_lines.append(progress_text)
+    progress_merge_keys.append(merge_key)
+
+
 def _generate_thinking_summary(all_progress_lines: list[str]) -> str:
     """Generate a one-line summary from progress lines."""
     # Match both old format "Using tools:" and new format "🔧 ToolName:"
@@ -404,6 +438,7 @@ async def handle_text_message(
 
         # Enhanced stream updates handler with accumulated progress tracking
         progress_lines: list[str] = []
+        progress_merge_keys: list[Optional[str]] = []
         all_progress_lines: list[str] = []  # 完整思考过程（不受溢出 clear 影响）
         frozen_messages: list = []  # 被冻结的旧进度消息
         last_progress_text = ""
@@ -483,7 +518,13 @@ async def handle_text_message(
                 if not progress_text:
                     return
 
-                progress_lines.append(progress_text)
+                merge_key = _get_stream_merge_key(update_obj)
+                _append_progress_line_with_merge(
+                    progress_lines=progress_lines,
+                    progress_merge_keys=progress_merge_keys,
+                    progress_text=progress_text,
+                    merge_key=merge_key,
+                )
                 # Only collect non-content updates as thinking process
                 if not (
                     update_obj.type == "assistant"
@@ -500,7 +541,13 @@ async def handle_text_message(
                     pending_progress_text = None
                     frozen_messages.append(progress_msg)
                     progress_lines.clear()
-                    progress_lines.append(progress_text)
+                    progress_merge_keys.clear()
+                    _append_progress_line_with_merge(
+                        progress_lines=progress_lines,
+                        progress_merge_keys=progress_merge_keys,
+                        progress_text=progress_text,
+                        merge_key=merge_key,
+                    )
                     full_text = progress_text
                     last_progress_text = ""
                     # Remove cancel button from old message
@@ -750,30 +797,8 @@ async def handle_text_message(
                     user_id=user_id,
                     response=claude_response,
                 )
-                conversation_context = conversation_enhancer.get_or_create_context(
-                    user_id
-                )
-
-                # Check if we should show follow-up suggestions
-                if conversation_enhancer.should_show_suggestions(claude_response):
-                    # Generate follow-up suggestions
-                    suggestions = conversation_enhancer.generate_follow_up_suggestions(
-                        claude_response,
-                        conversation_context,
-                    )
-
-                    if suggestions:
-                        # Create keyboard with suggestions
-                        suggestion_keyboard = (
-                            conversation_enhancer.create_follow_up_keyboard(suggestions)
-                        )
-
-                        # Send follow-up suggestions
-                        await update.message.reply_text(
-                            "💡 **What would you like to do next?**",
-                            parse_mode="Markdown",
-                            reply_markup=suggestion_keyboard,
-                        )
+                # 关闭自动会话建议按钮，避免额外 UI 干扰。
+                # 保留上下文更新，后续如需恢复可在此处重新启用发送逻辑。
 
             except Exception as e:
                 logger.warning(

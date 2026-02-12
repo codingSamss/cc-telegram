@@ -639,96 +639,108 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handle /status command - show real CLI session data."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    status_msg = await update.message.reply_text("⏳ 正在获取会话状态，请稍候...")
 
-    claude_session_id = context.user_data.get("claude_session_id")
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
-    relative_path = current_dir.relative_to(settings.approved_directory)
-    current_model = context.user_data.get("claude_model")
+    try:
+        claude_session_id = context.user_data.get("claude_session_id")
+        current_dir = context.user_data.get(
+            "current_directory", settings.approved_directory
+        )
+        relative_path = current_dir.relative_to(settings.approved_directory)
+        current_model = context.user_data.get("claude_model")
 
-    status_lines = [
-        "**Session Status**\n",
-        f"Directory: `{relative_path}/`",
-        f"Model: `{current_model or 'default'}`",
-    ]
-    claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
+        status_lines = [
+            "**Session Status**\n",
+            f"Directory: `{relative_path}/`",
+            f"Model: `{current_model or 'default'}`",
+        ]
+        claude_integration: ClaudeIntegration = context.bot_data.get(
+            "claude_integration"
+        )
 
-    if claude_session_id:
-        status_lines.append(f"Session: `{claude_session_id[:8]}...`")
-        if claude_integration:
-            precise_context = await claude_integration.get_precise_context_usage(
-                session_id=claude_session_id,
-                working_directory=current_dir,
-                model=current_model,
-            )
-            if precise_context:
-                status_lines.extend(
-                    build_precise_context_status_lines(precise_context)
+        if claude_session_id:
+            status_lines.append(f"Session: `{claude_session_id[:8]}...`")
+            if claude_integration:
+                precise_context = await claude_integration.get_precise_context_usage(
+                    session_id=claude_session_id,
+                    working_directory=current_dir,
+                    model=current_model,
                 )
-
-            info = await claude_integration.get_session_info(claude_session_id)
-            if info:
-                status_lines.append(f"Messages: {info.get('messages', 0)}")
-                status_lines.append(f"Turns: {info.get('turns', 0)}")
-                status_lines.append(f"Cost: `${info.get('cost', 0.0):.4f}`")
-
-                # Model usage details
-                model_usage = info.get("model_usage")
-                if model_usage and not precise_context:
+                if precise_context:
                     status_lines.extend(
-                        build_model_usage_status_lines(
-                            model_usage=model_usage,
-                            current_model=current_model,
-                            allow_estimated_ratio=True,
-                        )
+                        build_precise_context_status_lines(precise_context)
                     )
-    else:
-        status_lines.append("Session: none")
 
-        # Check for resumable session
-        if claude_integration:
-            existing = await claude_integration._find_resumable_session(
-                user_id, current_dir
-            )
-            if existing:
-                status_lines.append(
-                    f"Resumable: `{existing.session_id[:8]}...` "
-                    f"({existing.message_count} msgs)"
+                info = await claude_integration.get_session_info(claude_session_id)
+                if info:
+                    status_lines.append(f"Messages: {info.get('messages', 0)}")
+                    status_lines.append(f"Turns: {info.get('turns', 0)}")
+                    status_lines.append(f"Cost: `${info.get('cost', 0.0):.4f}`")
+
+                    # Model usage details
+                    model_usage = info.get("model_usage")
+                    if model_usage and not precise_context:
+                        status_lines.extend(
+                            build_model_usage_status_lines(
+                                model_usage=model_usage,
+                                current_model=current_model,
+                                allow_estimated_ratio=True,
+                            )
+                        )
+        else:
+            status_lines.append("Session: none")
+
+            # Check for resumable session
+            if claude_integration:
+                existing = await claude_integration._find_resumable_session(
+                    user_id, current_dir
                 )
+                if existing:
+                    status_lines.append(
+                        f"Resumable: `{existing.session_id[:8]}...` "
+                        f"({existing.message_count} msgs)"
+                    )
 
-    # Action buttons
-    keyboard = []
-    if claude_session_id:
+        # Action buttons
+        keyboard = []
+        if claude_session_id:
+            keyboard.append(
+                [
+                    InlineKeyboardButton("🔄 Continue", callback_data="action:continue"),
+                    InlineKeyboardButton(
+                        "🆕 New Session", callback_data="action:new_session"
+                    ),
+                ]
+            )
+        else:
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        "🆕 Start Session", callback_data="action:new_session"
+                    )
+                ]
+            )
+
         keyboard.append(
             [
-                InlineKeyboardButton("🔄 Continue", callback_data="action:continue"),
+                InlineKeyboardButton("📤 Export", callback_data="action:export"),
                 InlineKeyboardButton(
-                    "🆕 New Session", callback_data="action:new_session"
+                    "🔄 Refresh", callback_data="action:refresh_status"
                 ),
             ]
         )
-    else:
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    "🆕 Start Session", callback_data="action:new_session"
-                )
-            ]
+
+        await status_msg.edit_text(
+            "\n".join(status_lines),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
-
-    keyboard.append(
-        [
-            InlineKeyboardButton("📤 Export", callback_data="action:export"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="action:refresh_status"),
-        ]
-    )
-
-    await update.message.reply_text(
-        "\n".join(status_lines),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    except Exception as e:
+        logger.error("Error in status command", error=str(e), user_id=user_id)
+        try:
+            await status_msg.edit_text("❌ 获取状态失败，请稍后重试。")
+        except Exception:
+            await update.message.reply_text("❌ 获取状态失败，请稍后重试。")
 
 
 async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

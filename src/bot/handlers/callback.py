@@ -10,6 +10,7 @@ from .message import build_permission_handler
 from ...claude.task_registry import TaskRegistry
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
+from ..features.session_export import ExportFormat
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.status_usage import (
     build_model_usage_status_lines,
@@ -17,6 +18,20 @@ from ..utils.status_usage import (
 )
 
 logger = structlog.get_logger()
+
+
+def _parse_export_format(export_format: str) -> ExportFormat | None:
+    """Parse callback export format string to enum."""
+    if not export_format:
+        return None
+
+    raw = export_format.strip().lower()
+    format_map = {
+        ExportFormat.MARKDOWN.value: ExportFormat.MARKDOWN,
+        ExportFormat.HTML.value: ExportFormat.HTML,
+        ExportFormat.JSON.value: ExportFormat.JSON,
+    }
+    return format_map.get(raw)
 
 
 async def handle_callback_query(
@@ -573,6 +588,9 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
 async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle status action - synced with /status command logic."""
     settings: Settings = context.bot_data["settings"]
+    await query.edit_message_text(
+        "**Session Status**\n\n⏳ 正在刷新状态，请稍候...", parse_mode="Markdown"
+    )
 
     claude_session_id = context.user_data.get("claude_session_id")
     current_dir = context.user_data.get(
@@ -833,15 +851,47 @@ async def _handle_refresh_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -
 
 async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle export action."""
+    features = context.bot_data.get("features")
+    session_exporter = features.get_session_export() if features else None
+
+    if not session_exporter:
+        await query.edit_message_text(
+            "❌ **Export Unavailable**\n\n"
+            "Session export service is not available.",
+            parse_mode="Markdown",
+        )
+        return
+
+    claude_session_id = context.user_data.get("claude_session_id")
+    if not claude_session_id:
+        await query.edit_message_text(
+            "❌ **No Active Session**\n\n"
+            "There's no active Claude session to export.\n\n"
+            "**What you can do:**\n"
+            "• Start a new session with `/new`\n"
+            "• Continue an existing session with `/continue`\n"
+            "• Check your status with `/status`",
+            parse_mode="Markdown",
+        )
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📝 Markdown", callback_data="export:markdown"),
+            InlineKeyboardButton("🌐 HTML", callback_data="export:html"),
+        ],
+        [
+            InlineKeyboardButton("📋 JSON", callback_data="export:json"),
+            InlineKeyboardButton("❌ Cancel", callback_data="export:cancel"),
+        ],
+    ]
+
     await query.edit_message_text(
         "📤 **Export Session**\n\n"
-        "Session export functionality will be available once the storage layer is implemented.\n\n"
-        "**Planned features:**\n"
-        "• Export conversation history\n"
-        "• Save session state\n"
-        "• Share conversations\n"
-        "• Create session backups\n\n"
-        "_Coming in the next development phase!_"
+        f"Ready to export session: `{claude_session_id[:8]}...`\n\n"
+        "**Choose export format:**",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -1195,6 +1245,15 @@ async def handle_export_callback(
         )
         return
 
+    parsed_format = _parse_export_format(export_format)
+    if not parsed_format:
+        await query.edit_message_text(
+            "❌ **Invalid Export Format**\n\n"
+            f"Unsupported export format: `{export_format}`",
+            parse_mode="Markdown",
+        )
+        return
+
     session_exporter = features.get_session_export() if features else None
     if not session_exporter:
         await query.edit_message_text(
@@ -1214,13 +1273,15 @@ async def handle_export_callback(
         # Show processing message
         await query.edit_message_text(
             f"📤 **Exporting Session**\n\n"
-            f"Generating {export_format.upper()} export...",
+            f"Generating {parsed_format.value.upper()} export...",
             parse_mode="Markdown",
         )
 
         # Export session
         exported_session = await session_exporter.export_session(
-            claude_session_id, export_format
+            user_id=user_id,
+            session_id=claude_session_id,
+            format=parsed_format,
         )
 
         # Send the exported file
@@ -1234,7 +1295,7 @@ async def handle_export_callback(
             filename=exported_session.filename,
             caption=(
                 f"📤 **Session Export Complete**\n\n"
-                f"Format: {exported_session.format.upper()}\n"
+                f"Format: {exported_session.format.value.upper()}\n"
                 f"Size: {exported_session.size_bytes:,} bytes\n"
                 f"Created: {exported_session.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
             ),
