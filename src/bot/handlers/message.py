@@ -14,6 +14,7 @@ from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
+from ..utils.scope_state import get_scope_state_from_update
 
 logger = structlog.get_logger()
 
@@ -395,6 +396,11 @@ async def handle_text_message(
     user_id = update.effective_user.id
     message_text = update.message.text
     settings: Settings = context.bot_data["settings"]
+    scope_key, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
 
     # Get services
     rate_limiter: Optional[RateLimiter] = context.bot_data.get("rate_limiter")
@@ -418,7 +424,7 @@ async def handle_text_message(
 
         # Check if user already has an active task
         task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
-        if task_registry and await task_registry.is_busy(user_id):
+        if task_registry and await task_registry.is_busy(user_id, scope_key=scope_key):
             await update.message.reply_text(
                 "A task is already running. Use /cancel to cancel it."
             )
@@ -451,13 +457,11 @@ async def handle_text_message(
             return
 
         # Get current directory
-        current_dir = context.user_data.get(
-            "current_directory", settings.approved_directory
-        )
+        current_dir = scope_state.get("current_directory", settings.approved_directory)
 
         # Get existing session ID
-        session_id = context.user_data.get("claude_session_id")
-        force_new_session = context.user_data.pop("force_new_session", False)
+        session_id = scope_state.get("claude_session_id")
+        force_new_session = scope_state.pop("force_new_session", False)
 
         # Enhanced stream updates handler with accumulated progress tracking
         progress_lines: list[str] = []
@@ -639,7 +643,7 @@ async def handle_text_message(
                 on_stream=stream_handler,
                 force_new_session=force_new_session,
                 permission_handler=permission_handler,
-                model=context.user_data.get("claude_model"),
+                model=scope_state.get("claude_model"),
             )
 
         task = asyncio.create_task(_run_claude())
@@ -652,6 +656,7 @@ async def handle_text_message(
                 prompt_summary=message_text,
                 progress_message_id=progress_msg.message_id,
                 chat_id=update.effective_chat.id,
+                scope_key=scope_key,
             )
 
         claude_response = None
@@ -660,14 +665,14 @@ async def handle_text_message(
 
             # Mark task as completed
             if task_registry:
-                await task_registry.complete(user_id)
+                await task_registry.complete(user_id, scope_key=scope_key)
 
             # Update session ID
-            context.user_data["claude_session_id"] = claude_response.session_id
+            scope_state["claude_session_id"] = claude_response.session_id
 
             # Check if Claude changed the working directory and update our tracking
             _update_working_directory_from_claude_response(
-                claude_response, context, settings, user_id
+                claude_response, scope_state, settings, user_id
             )
 
             # Log interaction to storage
@@ -695,7 +700,7 @@ async def handle_text_message(
             logger.info("Claude task cancelled by user", user_id=user_id)
             await _cancel_progress_flush_task()
             if task_registry:
-                await task_registry.remove(user_id)
+                await task_registry.remove(user_id, scope_key=scope_key)
             # Preserve thinking process with cancelled label
             if all_progress_lines:
                 summary_text = "[Cancelled] " + _generate_thinking_summary(
@@ -752,7 +757,7 @@ async def handle_text_message(
         except Exception as e:
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             if task_registry:
-                await task_registry.fail(user_id)
+                await task_registry.fail(user_id, scope_key=scope_key)
             # Format error and create FormattedMessage
             from ..utils.formatting import FormattedMessage
 
@@ -762,7 +767,7 @@ async def handle_text_message(
 
         # Clean up task registry
         if task_registry:
-            await task_registry.remove(user_id)
+            await task_registry.remove(user_id, scope_key=scope_key)
         await _cancel_progress_flush_task()
 
         # Collapse progress message into summary with expand button
@@ -831,7 +836,7 @@ async def handle_text_message(
                 )
 
         # Update session info
-        context.user_data["last_message"] = update.message.text
+        scope_state["last_message"] = update.message.text
 
         # Add conversation enhancements if available
         features = context.bot_data.get("features")
@@ -922,6 +927,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = update.effective_user.id
     document = update.message.document
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
 
     # Get services
     security_validator: Optional[SecurityValidator] = context.bot_data.get(
@@ -1063,11 +1073,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         # Get current directory and session
-        current_dir = context.user_data.get(
-            "current_directory", settings.approved_directory
-        )
-        session_id = context.user_data.get("claude_session_id")
-        force_new_session = context.user_data.pop("force_new_session", False)
+        current_dir = scope_state.get("current_directory", settings.approved_directory)
+        session_id = scope_state.get("claude_session_id")
+        force_new_session = scope_state.pop("force_new_session", False)
         permission_handler = build_permission_handler(
             bot=context.bot, chat_id=update.effective_chat.id, settings=settings
         )
@@ -1081,15 +1089,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 session_id=session_id,
                 force_new_session=force_new_session,
                 permission_handler=permission_handler,
-                model=context.user_data.get("claude_model"),
+                model=scope_state.get("claude_model"),
             )
 
             # Update session ID
-            context.user_data["claude_session_id"] = claude_response.session_id
+            scope_state["claude_session_id"] = claude_response.session_id
 
             # Check if Claude changed the working directory and update our tracking
             _update_working_directory_from_claude_response(
-                claude_response, context, settings, user_id
+                claude_response, scope_state, settings, user_id
             )
 
             # Format and send response
@@ -1157,6 +1165,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle photo uploads."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    scope_key, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
 
     # Check if enhanced image handler is available
     features = context.bot_data.get("features")
@@ -1164,7 +1177,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if image_handler:
         task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
-        if task_registry and await task_registry.is_busy(user_id):
+        if task_registry and await task_registry.is_busy(user_id, scope_key=scope_key):
             await update.message.reply_text(
                 "A task is already running. Use /cancel to cancel it."
             )
@@ -1286,11 +1299,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
 
             # Get current directory and session
-            current_dir = context.user_data.get(
-                "current_directory", settings.approved_directory
-            )
-            session_id = context.user_data.get("claude_session_id")
-            force_new_session = context.user_data.pop("force_new_session", False)
+            current_dir = scope_state.get("current_directory", settings.approved_directory)
+            session_id = scope_state.get("claude_session_id")
+            force_new_session = scope_state.pop("force_new_session", False)
             permission_handler = build_permission_handler(
                 bot=context.bot, chat_id=update.effective_chat.id, settings=settings
             )
@@ -1325,7 +1336,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             on_stream=_image_stream_handler,
                             force_new_session=force_new_session,
                             permission_handler=permission_handler,
-                            model=context.user_data.get("claude_model"),
+                            model=scope_state.get("claude_model"),
                             images=images,
                         ),
                         update_status=_set_image_status,
@@ -1339,12 +1350,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         prompt_summary=processed_image.prompt,
                         progress_message_id=progress_msg.message_id,
                         chat_id=update.effective_chat.id,
+                        scope_key=scope_key,
                     )
 
                 try:
                     claude_response = await image_task
                     if task_registry:
-                        await task_registry.complete(user_id)
+                        await task_registry.complete(user_id, scope_key=scope_key)
                 except asyncio.CancelledError:
                     logger.info("Image Claude task cancelled by user", user_id=user_id)
                     if thinking_lines:
@@ -1385,14 +1397,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     return
                 except Exception:
                     if task_registry:
-                        await task_registry.fail(user_id)
+                        await task_registry.fail(user_id, scope_key=scope_key)
                     raise
                 finally:
                     if task_registry:
-                        await task_registry.remove(user_id)
+                        await task_registry.remove(user_id, scope_key=scope_key)
 
                 # Update session ID
-                context.user_data["claude_session_id"] = claude_response.session_id
+                scope_state["claude_session_id"] = claude_response.session_id
 
                 # Format and send response
                 from ..utils.formatting import ResponseFormatter
@@ -1651,7 +1663,10 @@ async def _generate_placeholder_response(
 
 
 def _update_working_directory_from_claude_response(
-    claude_response, context, settings, user_id
+    claude_response,
+    scope_state: dict[str, Any],
+    settings,
+    user_id,
 ):
     """Update the working directory based on Claude's response content."""
     import re
@@ -1667,9 +1682,7 @@ def _update_working_directory_from_claude_response(
     ]
 
     content = claude_response.content.lower()
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     for pattern in patterns:
         matches = re.findall(pattern, content, re.MULTILINE | re.IGNORECASE)
@@ -1693,7 +1706,7 @@ def _update_working_directory_from_claude_response(
                     new_path.is_relative_to(settings.approved_directory)
                     and new_path.exists()
                 ):
-                    context.user_data["current_directory"] = new_path
+                    scope_state["current_directory"] = new_path
                     logger.info(
                         "Updated working directory from Claude response",
                         old_dir=str(current_dir),

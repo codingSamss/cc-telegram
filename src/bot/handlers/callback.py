@@ -1,5 +1,7 @@
 """Handle inline keyboard callbacks."""
 
+from pathlib import Path
+
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -12,12 +14,28 @@ from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 from ..features.session_export import ExportFormat
 from ..utils.resume_ui import build_resume_project_selector
+from ..utils.scope_state import get_scope_state_from_query
 from ..utils.status_usage import (
     build_model_usage_status_lines,
     build_precise_context_status_lines,
 )
 
 logger = structlog.get_logger()
+
+
+def _get_scope_state_for_query(
+    query, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[str, dict]:
+    """Get per-chat/topic scoped state for callback handlers."""
+    settings: Settings | None = context.bot_data.get("settings")
+    default_directory = (
+        settings.approved_directory if settings else Path(".").resolve()
+    )
+    return get_scope_state_from_query(
+        user_data=context.user_data,
+        query=query,
+        default_directory=default_directory,
+    )
 
 
 def _parse_export_format(export_format: str) -> ExportFormat | None:
@@ -59,7 +77,8 @@ async def handle_callback_query(
             if not task_registry:
                 await query.answer("Task registry not available.")
                 return
-            cancelled = await task_registry.cancel(user_id)
+            scope_key, _ = _get_scope_state_for_query(query, context)
+            cancelled = await task_registry.cancel(user_id, scope_key=scope_key)
             if cancelled:
                 await query.answer("Task cancellation requested.")
             else:
@@ -130,11 +149,10 @@ async def handle_cd_callback(
     settings: Settings = context.bot_data["settings"]
     security_validator: SecurityValidator = context.bot_data.get("security_validator")
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    _, scope_state = _get_scope_state_for_query(query, context)
 
     try:
-        current_dir = context.user_data.get(
-            "current_directory", settings.approved_directory
-        )
+        current_dir = scope_state.get("current_directory", settings.approved_directory)
 
         # Handle special paths
         if project_name == "/":
@@ -168,9 +186,9 @@ async def handle_cd_callback(
             return
 
         # Update directory and clear session
-        old_session_id = context.user_data.get("claude_session_id")
-        context.user_data["current_directory"] = new_path
-        context.user_data["claude_session_id"] = None
+        old_session_id = scope_state.get("claude_session_id")
+        scope_state["current_directory"] = new_path
+        scope_state["claude_session_id"] = None
         if old_session_id:
             permission_manager = context.bot_data.get("permission_manager")
             if permission_manager:
@@ -357,20 +375,19 @@ async def _handle_show_projects_action(
 async def _handle_new_session_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle new session action."""
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = _get_scope_state_for_query(query, context)
 
     # Clear session and force new session on next message
-    old_session_id = context.user_data.get("claude_session_id")
-    context.user_data["claude_session_id"] = None
-    context.user_data["session_started"] = True
-    context.user_data["force_new_session"] = True
+    old_session_id = scope_state.get("claude_session_id")
+    scope_state["claude_session_id"] = None
+    scope_state["session_started"] = True
+    scope_state["force_new_session"] = True
     if old_session_id:
         permission_manager = context.bot_data.get("permission_manager")
         if permission_manager:
             permission_manager.clear_session(old_session_id)
 
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
     keyboard = [
@@ -403,9 +420,10 @@ async def _handle_new_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
 async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle end session action."""
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = _get_scope_state_for_query(query, context)
 
     # Check if there's an active session
-    claude_session_id = context.user_data.get("claude_session_id")
+    claude_session_id = scope_state.get("claude_session_id")
 
     if not claude_session_id:
         await query.edit_message_text(
@@ -429,15 +447,13 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     # Get current directory for display
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
     # Clear session data
-    context.user_data["claude_session_id"] = None
-    context.user_data["session_started"] = False
-    context.user_data["last_message"] = None
+    scope_state["claude_session_id"] = None
+    scope_state["session_started"] = False
+    scope_state["last_message"] = None
     if claude_session_id:
         permission_manager = context.bot_data.get("permission_manager")
         if permission_manager:
@@ -479,10 +495,8 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = query.from_user.id
     settings: Settings = context.bot_data["settings"]
     claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
-
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    _, scope_state = _get_scope_state_for_query(query, context)
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         if not claude_integration:
@@ -493,7 +507,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         # Check if there's an existing session in user context
-        claude_session_id = context.user_data.get("claude_session_id")
+        claude_session_id = scope_state.get("claude_session_id")
 
         if claude_session_id:
             # Continue with the existing session (no prompt = use --continue)
@@ -533,7 +547,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if claude_response:
             # Update session ID in context
-            context.user_data["claude_session_id"] = claude_response.session_id
+            scope_state["claude_session_id"] = claude_response.session_id
 
             # Send Claude's response
             await query.message.reply_text(
@@ -588,16 +602,15 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
 async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle status action - synced with /context command logic."""
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = _get_scope_state_for_query(query, context)
     await query.edit_message_text(
         "**Session Status**\n\n⏳ 正在刷新状态，请稍候...", parse_mode="Markdown"
     )
 
-    claude_session_id = context.user_data.get("claude_session_id")
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    claude_session_id = scope_state.get("claude_session_id")
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
     relative_path = current_dir.relative_to(settings.approved_directory)
-    current_model = context.user_data.get("claude_model")
+    current_model = scope_state.get("claude_model")
 
     status_lines = [
         "**Session Status**\n",
@@ -645,15 +658,16 @@ async def handle_model_callback(
     query, param: str, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Handle model selection callback from inline keyboard."""
+    _, scope_state = _get_scope_state_for_query(query, context)
     if param == "default":
-        context.user_data.pop("claude_model", None)
+        scope_state.pop("claude_model", None)
         selected = "default"
     else:
-        context.user_data["claude_model"] = param
+        scope_state["claude_model"] = param
         selected = param
 
     # Rebuild keyboard with updated selection indicator
-    current = context.user_data.get("claude_model")
+    current = scope_state.get("claude_model")
     keyboard = [
         [
             InlineKeyboardButton(
@@ -687,9 +701,8 @@ async def handle_model_callback(
 async def _handle_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle ls action."""
     settings: Settings = context.bot_data["settings"]
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    _, scope_state = _get_scope_state_for_query(query, context)
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         # List directory contents (similar to /ls command)
@@ -822,6 +835,7 @@ async def _handle_refresh_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -
 
 async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle export action."""
+    _, scope_state = _get_scope_state_for_query(query, context)
     features = context.bot_data.get("features")
     session_exporter = features.get_session_export() if features else None
 
@@ -833,7 +847,7 @@ async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    claude_session_id = context.user_data.get("claude_session_id")
+    claude_session_id = scope_state.get("claude_session_id")
     if not claude_session_id:
         await query.edit_message_text(
             "❌ **No Active Session**\n\n"
@@ -892,9 +906,8 @@ async def handle_quick_action_callback(
         return
 
     settings: Settings = context.bot_data["settings"]
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    _, scope_state = _get_scope_state_for_query(query, context)
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         # Get the action from the manager
@@ -1003,6 +1016,7 @@ async def handle_conversation_callback(
     """Handle conversation control callbacks."""
     user_id = query.from_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = _get_scope_state_for_query(query, context)
 
     if action_type == "continue":
         # Remove suggestion buttons and show continue message
@@ -1025,17 +1039,15 @@ async def handle_conversation_callback(
             conversation_enhancer.clear_context(user_id)
 
         # Clear session data
-        old_session_id = context.user_data.get("claude_session_id")
-        context.user_data["claude_session_id"] = None
-        context.user_data["session_started"] = False
+        old_session_id = scope_state.get("claude_session_id")
+        scope_state["claude_session_id"] = None
+        scope_state["session_started"] = False
         if old_session_id:
             permission_manager = context.bot_data.get("permission_manager")
             if permission_manager:
                 permission_manager.clear_session(old_session_id)
 
-        current_dir = context.user_data.get(
-            "current_directory", settings.approved_directory
-        )
+        current_dir = scope_state.get("current_directory", settings.approved_directory)
         relative_path = current_dir.relative_to(settings.approved_directory)
 
         # Create quick action buttons
@@ -1085,6 +1097,7 @@ async def handle_git_callback(
     """Handle git-related callbacks."""
     user_id = query.from_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = _get_scope_state_for_query(query, context)
     features = context.bot_data.get("features")
 
     if not features or not features.is_enabled("git"):
@@ -1094,9 +1107,7 @@ async def handle_git_callback(
         )
         return
 
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         git_integration = features.get_git_integration()
@@ -1208,6 +1219,7 @@ async def handle_export_callback(
 ) -> None:
     """Handle export format selection callbacks."""
     user_id = query.from_user.id
+    _, scope_state = _get_scope_state_for_query(query, context)
     features = context.bot_data.get("features")
 
     if export_format == "cancel":
@@ -1233,7 +1245,7 @@ async def handle_export_callback(
         return
 
     # Get current session
-    claude_session_id = context.user_data.get("claude_session_id")
+    claude_session_id = scope_state.get("claude_session_id")
     if not claude_session_id:
         await query.edit_message_text(
             "❌ **No Active Session**\n\n" "There's no active session to export."
@@ -1534,7 +1546,8 @@ async def _resume_render_project_list(
         )
         return
 
-    current_dir = context.user_data.get("current_directory")
+    _, scope_state = _get_scope_state_for_query(query, context)
+    current_dir = scope_state.get("current_directory")
     message_text, keyboard = build_resume_project_selector(
         projects=projects,
         approved_root=settings.approved_directory,
@@ -1747,8 +1760,9 @@ async def _do_adopt_session(
         )
 
         # Switch user's working directory and session
-        context.user_data["current_directory"] = project_cwd
-        context.user_data["claude_session_id"] = adopted.session_id
+        _, scope_state = _get_scope_state_for_query(query, context)
+        scope_state["current_directory"] = project_cwd
+        scope_state["claude_session_id"] = adopted.session_id
 
         try:
             rel = project_cwd.relative_to(settings.approved_directory)

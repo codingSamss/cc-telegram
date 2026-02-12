@@ -1,0 +1,70 @@
+"""Tests for TaskRegistry scoped behavior."""
+
+import asyncio
+from contextlib import suppress
+
+import pytest
+
+from src.claude.task_registry import TaskRegistry
+
+
+async def _long_running() -> None:
+    """Keep task alive until cancelled."""
+    await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_cancel_only_current_scope_task() -> None:
+    """Cancelling one scope should not affect other scopes for same user."""
+    registry = TaskRegistry()
+    user_id = 101
+    scope_a = "101:-100:1"
+    scope_b = "101:-100:2"
+
+    task_a = asyncio.create_task(_long_running())
+    task_b = asyncio.create_task(_long_running())
+    await registry.register(user_id=user_id, task=task_a, scope_key=scope_a)
+    await registry.register(user_id=user_id, task=task_b, scope_key=scope_b)
+
+    cancelled = await registry.cancel(user_id, scope_key=scope_a)
+    await asyncio.sleep(0)
+
+    assert cancelled is True
+    assert task_a.cancelled() is True
+    assert task_b.cancelled() is False
+    assert await registry.is_busy(user_id, scope_key=scope_a) is False
+    assert await registry.is_busy(user_id, scope_key=scope_b) is True
+
+    task_b.cancel()
+    with suppress(asyncio.CancelledError):
+        await task_b
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_scope_cancels_all_user_tasks() -> None:
+    """Legacy cancel(user_id) should still cancel all scopes for that user."""
+    registry = TaskRegistry()
+
+    user_1 = 1
+    user_2 = 2
+    task_u1_a = asyncio.create_task(_long_running())
+    task_u1_b = asyncio.create_task(_long_running())
+    task_u2 = asyncio.create_task(_long_running())
+
+    await registry.register(user_id=user_1, task=task_u1_a, scope_key="1:-100:10")
+    await registry.register(user_id=user_1, task=task_u1_b, scope_key="1:-100:11")
+    await registry.register(user_id=user_2, task=task_u2, scope_key="2:-200:20")
+
+    cancelled = await registry.cancel(user_1)
+    await asyncio.sleep(0)
+
+    assert cancelled is True
+    assert task_u1_a.cancelled() is True
+    assert task_u1_b.cancelled() is True
+    assert task_u2.cancelled() is False
+    assert await registry.is_busy(user_1) is False
+    assert await registry.is_busy(user_2) is True
+
+    task_u2.cancel()
+    with suppress(asyncio.CancelledError):
+        await task_u2

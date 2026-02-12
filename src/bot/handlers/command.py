@@ -15,6 +15,7 @@ from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 from ..utils.resume_ui import build_resume_project_selector
+from ..utils.scope_state import get_scope_state_from_update
 from ..utils.status_usage import (
     build_model_usage_status_lines,
     build_precise_context_status_lines,
@@ -553,20 +554,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /new command - explicitly starts a fresh session, clearing previous context."""
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
 
     # Get current directory (default to approved directory)
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
     # Track what was cleared for user feedback
-    old_session_id = context.user_data.get("claude_session_id")
+    old_session_id = scope_state.get("claude_session_id")
 
     # Clear existing session data - this is the explicit way to reset context
-    context.user_data["claude_session_id"] = None
-    context.user_data["session_started"] = True
-    context.user_data["force_new_session"] = True
+    scope_state["claude_session_id"] = None
+    scope_state["session_started"] = True
+    scope_state["force_new_session"] = True
 
     cleared_info = ""
     if old_session_id:
@@ -604,6 +608,11 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Handle /continue command with optional prompt."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
     claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
 
@@ -612,9 +621,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     prompt = " ".join(context.args) if context.args else None
     default_prompt = "Please continue where we left off"
 
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         if not claude_integration:
@@ -625,7 +632,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         # Check if there's an existing session in user context
-        claude_session_id = context.user_data.get("claude_session_id")
+        claude_session_id = scope_state.get("claude_session_id")
 
         if claude_session_id:
             # We have a session in context, continue it directly
@@ -667,7 +674,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         if claude_response:
             # Update session ID in context
-            context.user_data["claude_session_id"] = claude_response.session_id
+            scope_state["claude_session_id"] = claude_response.session_id
 
             # Delete status message and send response
             await status_msg.delete()
@@ -758,12 +765,15 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     """Handle /ls command."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
 
     # Get current directory
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         # List directory contents
@@ -853,6 +863,11 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Handle /cd command."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
     security_validator: SecurityValidator = context.bot_data.get("security_validator")
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
 
@@ -872,9 +887,7 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     target_path = " ".join(context.args)
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         # Validate path using security validator
@@ -921,7 +934,7 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         # Update current directory in user data
-        context.user_data["current_directory"] = resolved_path
+        scope_state["current_directory"] = resolved_path
 
         # Look up existing session for the new directory instead of clearing
         claude_integration: ClaudeIntegration = context.bot_data.get(
@@ -933,14 +946,14 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 user_id, resolved_path
             )
             if existing_session:
-                context.user_data["claude_session_id"] = existing_session.session_id
+                scope_state["claude_session_id"] = existing_session.session_id
                 resumed_session_info = (
                     f"\n🔄 Resumed session `{existing_session.session_id[:8]}...` "
                     f"({existing_session.message_count} messages)"
                 )
             else:
                 # No session for this directory - clear the current one
-                context.user_data["claude_session_id"] = None
+                scope_state["claude_session_id"] = None
                 resumed_session_info = (
                     "\n🆕 No existing session. Send a message to start a new one."
                 )
@@ -974,9 +987,12 @@ async def print_working_directory(
 ) -> None:
     """Handle /pwd command."""
     settings: Settings = context.bot_data["settings"]
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
     )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     relative_path = current_dir.relative_to(settings.approved_directory)
     absolute_path = str(current_dir)
@@ -1063,16 +1079,19 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handle /context command - show real CLI session data."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
     full_mode = _is_context_full_mode(context)
     status_msg = await update.message.reply_text("⏳ 正在获取会话状态，请稍候...")
 
     try:
-        claude_session_id = context.user_data.get("claude_session_id")
-        current_dir = context.user_data.get(
-            "current_directory", settings.approved_directory
-        )
+        claude_session_id = scope_state.get("claude_session_id")
+        current_dir = scope_state.get("current_directory", settings.approved_directory)
         relative_path = current_dir.relative_to(settings.approved_directory)
-        current_model = context.user_data.get("claude_model")
+        current_model = scope_state.get("claude_model")
 
         status_lines = [
             "**Session Status**\n",
@@ -1163,6 +1182,12 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /export command."""
     user_id = update.effective_user.id
+    settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
     features = context.bot_data.get("features")
 
     # Check if session export is available
@@ -1181,7 +1206,7 @@ async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Get current session
-    claude_session_id = context.user_data.get("claude_session_id")
+    claude_session_id = scope_state.get("claude_session_id")
 
     if not claude_session_id:
         await update.message.reply_text(
@@ -1220,9 +1245,14 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Handle /end command to terminate the current session."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
 
     # Check if there's an active session
-    claude_session_id = context.user_data.get("claude_session_id")
+    claude_session_id = scope_state.get("claude_session_id")
 
     if not claude_session_id:
         await update.message.reply_text(
@@ -1236,15 +1266,13 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Get current directory for display
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
     # Clear session data
-    context.user_data["claude_session_id"] = None
-    context.user_data["session_started"] = False
-    context.user_data["last_message"] = None
+    scope_state["claude_session_id"] = None
+    scope_state["session_started"] = False
+    scope_state["last_message"] = None
 
     # Create quick action buttons
     keyboard = [
@@ -1283,6 +1311,11 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Handle /actions command to show quick actions."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
     features = context.bot_data.get("features")
 
     if not features or not features.is_enabled("quick_actions"):
@@ -1294,9 +1327,7 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     # Get current directory
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         quick_action_manager = features.get_quick_actions()
@@ -1344,6 +1375,11 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Handle /git command to show git repository information."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
     features = context.bot_data.get("features")
 
     if not features or not features.is_enabled("git"):
@@ -1355,9 +1391,7 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Get current directory
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
         git_integration = features.get_git_integration()
@@ -1434,13 +1468,18 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cancel command - cancel the active Claude task."""
     user_id = update.effective_user.id
+    scope_key, _ = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=context.bot_data["settings"].approved_directory,
+    )
 
     task_registry: TaskRegistry = context.bot_data.get("task_registry")
     if not task_registry:
         await update.message.reply_text("Task registry not available.")
         return
 
-    cancelled = await task_registry.cancel(user_id)
+    cancelled = await task_registry.cancel(user_id, scope_key=scope_key)
     if cancelled:
         await update.message.reply_text("Task cancellation requested.")
     else:
@@ -1494,11 +1533,14 @@ async def codex_diag_command(
     """Handle /codexdiag command to diagnose codex MCP calls without manual shell."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
 
-    current_dir = context.user_data.get(
-        "current_directory", settings.approved_directory
-    )
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
     project_dir = current_dir
     explicit_session_id = None
 
@@ -1657,7 +1699,13 @@ def _escape_markdown(text: str) -> str:
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /model command - show inline keyboard to select Claude model."""
-    current = context.user_data.get("claude_model")
+    settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
+    current = scope_state.get("claude_model")
 
     keyboard = [
         [
@@ -1693,6 +1741,11 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handle /resume command - resume a desktop Claude Code session."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
 
     # Lazy import to avoid circular deps
     from ...bot.resume_tokens import ResumeTokenManager
@@ -1716,7 +1769,7 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # S0 -> scan projects
         projects = await scanner.list_projects()
 
-        current_dir = context.user_data.get("current_directory")
+        current_dir = scope_state.get("current_directory")
 
         if not projects:
             await update.message.reply_text(
