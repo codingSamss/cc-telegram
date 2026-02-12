@@ -138,6 +138,18 @@ class Settings(BaseSettings):
     image_cleanup_max_age_hours: int = Field(
         24, description="Max age in hours for uploaded images before cleanup"
     )
+    stream_render_debounce_ms: int = Field(
+        400,
+        description="Debounce interval for streaming progress message updates",
+        ge=0,
+        le=5000,
+    )
+    stream_render_min_edit_interval_ms: int = Field(
+        700,
+        description="Minimum interval between Telegram progress message edits",
+        ge=0,
+        le=10000,
+    )
 
     # Monitoring
     log_level: str = Field("INFO", description="Logging level")

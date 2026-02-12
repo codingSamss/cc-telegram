@@ -406,9 +406,77 @@ async def handle_text_message(
         all_progress_lines: list[str] = []  # 完整思考过程（不受溢出 clear 影响）
         frozen_messages: list = []  # 被冻结的旧进度消息
         last_progress_text = ""
+        pending_progress_text: Optional[str] = None
+        progress_flush_task: Optional[asyncio.Task] = None
+        progress_flush_lock = asyncio.Lock()
+        stream_loop = asyncio.get_event_loop()
+        debounce_seconds = max(settings.stream_render_debounce_ms, 0) / 1000
+        min_edit_interval_seconds = (
+            max(settings.stream_render_min_edit_interval_ms, 0) / 1000
+        )
+        last_progress_edit_ts = stream_loop.time()
+
+        async def _flush_pending_progress(force: bool = False) -> None:
+            nonlocal last_progress_text, pending_progress_text, last_progress_edit_ts
+
+            async with progress_flush_lock:
+                if not pending_progress_text:
+                    return
+
+                now = stream_loop.time()
+                wait_seconds = 0.0
+                if not force:
+                    wait_seconds = max(
+                        0.0, min_edit_interval_seconds - (now - last_progress_edit_ts)
+                    )
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+
+                # Always use latest pending content (it may have changed while waiting).
+                text_to_send = pending_progress_text
+                if not text_to_send or text_to_send == last_progress_text:
+                    return
+
+                try:
+                    await progress_msg.edit_text(
+                        text_to_send,
+                        parse_mode="Markdown",
+                        reply_markup=cancel_keyboard,
+                    )
+                    last_progress_text = text_to_send
+                    last_progress_edit_ts = stream_loop.time()
+                except Exception as e:
+                    logger.warning("Failed to update progress message", error=str(e))
+
+        def _schedule_progress_flush() -> None:
+            nonlocal progress_flush_task
+
+            if progress_flush_task and not progress_flush_task.done():
+                return
+
+            async def _runner():
+                try:
+                    if debounce_seconds > 0:
+                        await asyncio.sleep(debounce_seconds)
+                    await _flush_pending_progress(force=False)
+                except asyncio.CancelledError:
+                    return
+
+            progress_flush_task = asyncio.create_task(_runner())
+
+        async def _cancel_progress_flush_task() -> None:
+            nonlocal progress_flush_task
+            if progress_flush_task and not progress_flush_task.done():
+                progress_flush_task.cancel()
+                try:
+                    await progress_flush_task
+                except asyncio.CancelledError:
+                    pass
+            progress_flush_task = None
 
         async def stream_handler(update_obj):
-            nonlocal progress_msg, last_progress_text
+            nonlocal progress_msg, last_progress_text, pending_progress_text
+            nonlocal last_progress_edit_ts
             try:
                 progress_text = await _format_progress_update(update_obj)
                 if not progress_text:
@@ -427,6 +495,8 @@ async def handle_text_message(
                 # If accumulated text exceeds Telegram limit, freeze current
                 # message and start a new one
                 if len(full_text) > 3800:
+                    await _cancel_progress_flush_task()
+                    pending_progress_text = None
                     frozen_messages.append(progress_msg)
                     progress_lines.clear()
                     progress_lines.append(progress_text)
@@ -442,20 +512,18 @@ async def handle_text_message(
                         parse_mode="Markdown",
                         reply_markup=cancel_keyboard,
                     )
+                    last_progress_text = full_text
+                    last_progress_edit_ts = stream_loop.time()
                     return
 
                 # Skip edit if content hasn't changed
                 if full_text == last_progress_text:
                     return
 
-                last_progress_text = full_text
-                await progress_msg.edit_text(
-                    full_text,
-                    parse_mode="Markdown",
-                    reply_markup=cancel_keyboard,
-                )
+                pending_progress_text = full_text
+                _schedule_progress_flush()
             except Exception as e:
-                logger.warning("Failed to update progress message", error=str(e))
+                logger.warning("Failed to process stream update", error=str(e))
 
         # Build permission handler only when SDK is active
         settings_obj: Settings = context.bot_data["settings"]
@@ -528,6 +596,7 @@ async def handle_text_message(
 
         except asyncio.CancelledError:
             logger.info("Claude task cancelled by user", user_id=user_id)
+            await _cancel_progress_flush_task()
             if task_registry:
                 await task_registry.remove(user_id)
             # Preserve thinking process with cancelled label
@@ -597,6 +666,7 @@ async def handle_text_message(
         # Clean up task registry
         if task_registry:
             await task_registry.remove(user_id)
+        await _cancel_progress_flush_task()
 
         # Collapse progress message into summary with expand button
         if all_progress_lines:
