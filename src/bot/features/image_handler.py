@@ -7,7 +7,7 @@ prompts for Claude's multimodal input.
 
 import base64
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Awaitable, Callable, Dict, Optional
 
 from telegram import PhotoSize
 
@@ -31,17 +31,26 @@ class ImageHandler:
         self.config = config
 
     async def process_image(
-        self, photo: PhotoSize, caption: Optional[str] = None
+        self,
+        photo: PhotoSize,
+        caption: Optional[str] = None,
+        on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> ProcessedImage:
         """Download and process an uploaded image."""
+        if on_progress:
+            await on_progress("downloading")
         file = await photo.get_file()
         image_bytes = await file.download_as_bytearray()
 
         # Validate
+        if on_progress:
+            await on_progress("validating")
         valid, error = self._validate_image(image_bytes)
         if not valid:
             raise ValueError(error)
 
+        if on_progress:
+            await on_progress("encoding")
         img_format = self._detect_format(image_bytes)
         base64_image = base64.b64encode(image_bytes).decode("utf-8")
 

@@ -1,7 +1,7 @@
 """Message handlers for non-command inputs."""
 
 import asyncio
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -16,6 +16,8 @@ from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
 
 logger = structlog.get_logger()
+
+_IMAGE_STATUS_TOTAL_STEPS = 6
 
 
 def _escape_md(text: str) -> str:
@@ -263,6 +265,69 @@ def _cache_thinking_data(
     while len(thinking_keys) > max_cache:
         oldest = thinking_keys.pop(0)
         context.user_data.pop(oldest, None)
+
+
+def _format_elapsed_time(total_seconds: int) -> str:
+    """Format elapsed seconds as mm:ss."""
+    minutes = max(total_seconds, 0) // 60
+    seconds = max(total_seconds, 0) % 60
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _image_heartbeat_interval_seconds(elapsed_seconds: int) -> int:
+    """Adaptive heartbeat interval for image analysis status updates."""
+    if elapsed_seconds < 30:
+        return 6
+    if elapsed_seconds < 90:
+        return 12
+    return 20
+
+
+def _build_image_stage_status(
+    step: int,
+    title: str,
+    detail: Optional[str] = None,
+) -> str:
+    """Build a user-friendly status message for image processing."""
+    lines = [
+        "📸 **图片分析中**",
+        "",
+        f"`{step}/{_IMAGE_STATUS_TOTAL_STEPS}` {title}",
+    ]
+    if detail:
+        lines.extend(["", detail])
+    return "\n".join(lines)
+
+
+def _build_image_analyzing_status(elapsed_seconds: int) -> str:
+    """Build analysis-stage status with elapsed-time heartbeat text."""
+    detail = f"已等待 `{_format_elapsed_time(elapsed_seconds)}`"
+    if elapsed_seconds >= 90:
+        detail += "\n⏳ 响应时间较长，但 Claude 仍在处理中。"
+    return _build_image_stage_status(5, "Claude 正在分析图片...", detail=detail)
+
+
+async def _run_with_image_analysis_heartbeat(
+    *,
+    run_coro: Awaitable[Any],
+    update_status: Callable[[str], Awaitable[None]],
+) -> Any:
+    """Run Claude image analysis while sending adaptive heartbeat updates."""
+    task = asyncio.create_task(run_coro)
+    loop = asyncio.get_event_loop()
+    start_time = loop.time()
+    last_heartbeat_at = 0
+
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=1)
+        if task in done:
+            return await task
+
+        elapsed = int(loop.time() - start_time)
+        interval = _image_heartbeat_interval_seconds(elapsed)
+        if elapsed > 0 and (elapsed - last_heartbeat_at) >= interval:
+            await update_status(_build_image_analyzing_status(elapsed))
+            last_heartbeat_at = elapsed
 
 
 async def handle_text_message(
@@ -957,35 +1022,52 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if image_handler:
         try:
-            # Send processing indicator
+            last_status_text = ""
+
+            async def _set_image_status(text: str) -> None:
+                nonlocal progress_msg, last_status_text
+
+                if text == last_status_text:
+                    return
+
+                last_status_text = text
+                try:
+                    await progress_msg.edit_text(text, parse_mode="Markdown")
+                except Exception as e:
+                    logger.warning(
+                        "Failed to update image status message",
+                        error=str(e),
+                        user_id=user_id,
+                    )
+                    try:
+                        progress_msg = await update.message.reply_text(
+                            text,
+                            parse_mode="Markdown",
+                            reply_to_message_id=update.message.message_id,
+                        )
+                    except Exception as send_error:
+                        logger.warning(
+                            "Failed to send fallback image status message",
+                            error=str(send_error),
+                            user_id=user_id,
+                        )
+
+            # Send processing indicator (single message that will be updated)
+            initial_status = _build_image_stage_status(1, "已接收图片")
             progress_msg = await update.message.reply_text(
-                "📸 Processing image...", parse_mode="Markdown"
+                initial_status,
+                parse_mode="Markdown",
+                reply_to_message_id=update.message.message_id,
             )
-
-            # Get the largest photo size
-            photo = update.message.photo[-1]
-
-            # Process image with enhanced handler
-            processed_image = await image_handler.process_image(
-                photo, update.message.caption
-            )
-
-            # Delete progress message
-            await progress_msg.delete()
-
-            # Create Claude progress message
-            claude_progress_msg = await update.message.reply_text(
-                "🤖 Analyzing image with Claude...", parse_mode="Markdown"
-            )
+            last_status_text = initial_status
 
             # Multimodal image analysis requires SDK mode.
             if not settings.use_sdk:
-                await claude_progress_msg.edit_text(
-                    "📸 **Image Analysis Requires SDK Mode**\n\n"
-                    "Current runtime is CLI subprocess mode (`USE_SDK=false`), "
-                    "which cannot send image content to Claude.\n\n"
-                    "**Fix:** set `USE_SDK=true` in `.env` and restart the bot.",
-                    parse_mode="Markdown",
+                await _set_image_status(
+                    "📸 **图片分析需要 SDK 模式**\n\n"
+                    "当前运行模式为 CLI 子进程（`USE_SDK=false`），"
+                    "无法将图片内容发送给 Claude。\n\n"
+                    "**处理方式：**将 `.env` 中 `USE_SDK` 设为 `true` 并重启机器人。"
                 )
                 return
 
@@ -993,12 +1075,35 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             claude_integration = context.bot_data.get("claude_integration")
 
             if not claude_integration:
-                await claude_progress_msg.edit_text(
-                    "❌ **Claude integration not available**\n\n"
-                    "The Claude Code integration is not properly configured.",
-                    parse_mode="Markdown",
+                await _set_image_status(
+                    "❌ **Claude 集成不可用**\n\n"
+                    "Claude Code 集成当前不可用，请检查服务配置。"
                 )
                 return
+
+            # Get the largest photo size
+            photo = update.message.photo[-1]
+
+            async def _image_progress(stage: str) -> None:
+                if stage == "downloading":
+                    await _set_image_status(
+                        _build_image_stage_status(2, "正在从 Telegram 下载图片...")
+                    )
+                elif stage == "validating":
+                    await _set_image_status(
+                        _build_image_stage_status(3, "正在校验图片格式与大小...")
+                    )
+                elif stage == "encoding":
+                    await _set_image_status(
+                        _build_image_stage_status(3, "正在编码图片数据...")
+                    )
+
+            # Process image with enhanced handler
+            processed_image = await image_handler.process_image(
+                photo,
+                update.message.caption,
+                on_progress=_image_progress,
+            )
 
             # Get current directory and session
             current_dir = context.user_data.get(
@@ -1022,16 +1127,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         "media_type": f"image/{img_format}",
                     }
                 ]
+                await _set_image_status(
+                    _build_image_stage_status(
+                        4,
+                        "正在提交图片给 Claude...",
+                    )
+                )
+                await _set_image_status(_build_image_analyzing_status(0))
 
-                claude_response = await claude_integration.run_command(
-                    prompt=processed_image.prompt,
-                    working_directory=current_dir,
-                    user_id=user_id,
-                    session_id=session_id,
-                    force_new_session=force_new_session,
-                    permission_handler=permission_handler,
-                    model=context.user_data.get("claude_model"),
-                    images=images,
+                claude_response = await _run_with_image_analysis_heartbeat(
+                    run_coro=claude_integration.run_command(
+                        prompt=processed_image.prompt,
+                        working_directory=current_dir,
+                        user_id=user_id,
+                        session_id=session_id,
+                        force_new_session=force_new_session,
+                        permission_handler=permission_handler,
+                        model=context.user_data.get("claude_model"),
+                        images=images,
+                    ),
+                    update_status=_set_image_status,
                 )
 
                 # Update session ID
@@ -1040,13 +1155,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 # Format and send response
                 from ..utils.formatting import ResponseFormatter
 
+                await _set_image_status(
+                    _build_image_stage_status(6, "正在整理回复内容...")
+                )
                 formatter = ResponseFormatter(settings)
                 formatted_messages = formatter.format_claude_response(
                     claude_response.content
                 )
 
                 # Delete progress message
-                await claude_progress_msg.delete()
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
 
                 # Send responses
                 for i, message in enumerate(formatted_messages):
@@ -1065,9 +1186,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except Exception as e:
                 error_text = _format_error_message(str(e))
                 try:
-                    await claude_progress_msg.edit_text(
-                        error_text, parse_mode="Markdown"
-                    )
+                    await _set_image_status(error_text)
                 except Exception as send_error:
                     logger.warning(
                         "Failed to edit image progress message with error",
