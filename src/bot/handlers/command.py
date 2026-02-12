@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
 from ..utils.resume_ui import build_resume_project_selector
+from ..utils.status_usage import build_model_usage_status_lines
 from .message import build_permission_handler
 from ...claude.task_registry import TaskRegistry
 from ...security.audit import AuditLogger
@@ -666,37 +667,12 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 # Model usage details
                 model_usage = info.get("model_usage")
                 if model_usage:
-                    for model_name, usage in model_usage.items():
-                        if not isinstance(usage, dict):
-                            continue
-                        input_t = usage.get("inputTokens", 0)
-                        output_t = usage.get("outputTokens", 0)
-                        cache_read = usage.get("cacheReadInputTokens", 0)
-                        cache_create = usage.get("cacheCreationInputTokens", 0)
-                        ctx_window = usage.get("contextWindow", 0)
-
-                        total_tokens = input_t + output_t + cache_read + cache_create
-                        status_lines.append(f"\n*Context ({model_name})*")
-                        if ctx_window:
-                            used_pct = total_tokens / ctx_window * 100
-                            remaining = ctx_window - total_tokens
-                            status_lines.append(
-                                f"Usage: `{total_tokens:,}` / `{ctx_window:,}` "
-                                f"({used_pct:.1f}%)"
-                            )
-                            status_lines.append(f"Remaining: `{remaining:,}` tokens")
-                        else:
-                            status_lines.append(f"Tokens: `{total_tokens:,}`")
-                        status_lines.append(
-                            f"  Input: `{input_t:,}` | Output: `{output_t:,}`"
+                    status_lines.extend(
+                        build_model_usage_status_lines(
+                            model_usage=model_usage,
+                            current_model=current_model,
                         )
-                        status_lines.append(
-                            f"  Cache read: `{cache_read:,}` | "
-                            f"Cache create: `{cache_create:,}`"
-                        )
-                        max_output = usage.get("maxOutputTokens", 0)
-                        if max_output:
-                            status_lines.append(f"  Max output: `{max_output:,}`")
+                    )
     else:
         status_lines.append("Session: none")
 

@@ -272,7 +272,12 @@ class ClaudeSDKManager:
             tools_used = []
             claude_session_id = None
             sdk_usage = None
+            resolved_model = None
             for message in messages:
+                if resolved_model is None:
+                    model_name = getattr(message, "model", None)
+                    if model_name:
+                        resolved_model = str(model_name)
                 if isinstance(message, ResultMessage):
                     cost = getattr(message, "total_cost_usd", 0.0) or 0.0
                     claude_session_id = getattr(message, "session_id", None)
@@ -315,7 +320,11 @@ class ClaudeSDKManager:
                     ]
                 ),
                 tools_used=tools_used,
-                model_usage=self._build_model_usage(sdk_usage, cost),
+                model_usage=self._build_model_usage(
+                    sdk_usage,
+                    cost,
+                    resolved_model=resolved_model,
+                ),
             )
 
         except asyncio.TimeoutError:
@@ -640,9 +649,11 @@ class ClaudeSDKManager:
         except Exception as e:
             logger.warning("Stream callback failed", error=str(e))
 
-    @staticmethod
     def _build_model_usage(
-        sdk_usage: Optional[Dict[str, Any]], cost: float
+        self,
+        sdk_usage: Optional[Dict[str, Any]],
+        cost: float,
+        resolved_model: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Build model_usage dict from SDK usage data.
 
@@ -651,17 +662,33 @@ class ClaudeSDKManager:
         """
         if not sdk_usage:
             return None
-        return {
-            "sdk": {
-                "inputTokens": sdk_usage.get("input_tokens", 0),
-                "outputTokens": sdk_usage.get("output_tokens", 0),
-                "cacheReadInputTokens": sdk_usage.get("cache_read_input_tokens", 0),
-                "cacheCreationInputTokens": sdk_usage.get(
-                    "cache_creation_input_tokens", 0
-                ),
-                "costUSD": cost,
-            }
+        usage_payload = {
+            "inputTokens": sdk_usage.get("input_tokens", 0),
+            "outputTokens": sdk_usage.get("output_tokens", 0),
+            "cacheReadInputTokens": sdk_usage.get("cache_read_input_tokens", 0),
+            "cacheCreationInputTokens": sdk_usage.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "costUSD": cost,
         }
+        if resolved_model:
+            usage_payload["resolvedModel"] = resolved_model
+            inferred_ctx = self._estimate_context_window_tokens(resolved_model)
+            if inferred_ctx:
+                usage_payload["contextWindow"] = inferred_ctx
+        return {
+            (resolved_model or "sdk"): usage_payload
+        }
+
+    @staticmethod
+    def _estimate_context_window_tokens(model_name: Optional[str]) -> Optional[int]:
+        """Estimate context window tokens for common Claude model names."""
+        if not model_name:
+            return None
+        lower = str(model_name).lower()
+        if "claude" in lower or "sonnet" in lower or "opus" in lower or "haiku" in lower:
+            return 200_000
+        return None
 
     def _extract_content_from_messages(self, messages: List[Message]) -> str:
         """Extract content from message list."""
@@ -849,8 +876,13 @@ class ClaudeSDKManager:
             cost = 0.0
             claude_session_id = None
             sdk_usage = None
+            resolved_model = None
             tools_used: List[Dict[str, Any]] = []
             for message in messages:
+                if resolved_model is None:
+                    model_name = getattr(message, "model", None)
+                    if model_name:
+                        resolved_model = str(model_name)
                 if isinstance(message, ResultMessage):
                     cost = getattr(message, "total_cost_usd", 0.0) or 0.0
                     claude_session_id = getattr(message, "session_id", None)
@@ -883,7 +915,11 @@ class ClaudeSDKManager:
                     ]
                 ),
                 tools_used=tools_used,
-                model_usage=self._build_model_usage(sdk_usage, cost),
+                model_usage=self._build_model_usage(
+                    sdk_usage,
+                    cost,
+                    resolved_model=resolved_model,
+                ),
             )
 
         except asyncio.TimeoutError:

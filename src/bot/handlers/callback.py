@@ -11,6 +11,7 @@ from ...claude.task_registry import TaskRegistry
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 from ..utils.resume_ui import build_resume_project_selector
+from ..utils.status_usage import build_model_usage_status_lines
 
 logger = structlog.get_logger()
 
@@ -595,6 +596,14 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
                 status_lines.append(f"Cost: `${info.get('cost', 0.0):.4f}`")
                 status_lines.append(f"Messages: {info.get('messages', 0)}")
                 status_lines.append(f"Turns: {info.get('turns', 0)}")
+                model_usage = info.get("model_usage")
+                if model_usage:
+                    status_lines.extend(
+                        build_model_usage_status_lines(
+                            model_usage=model_usage,
+                            current_model=current_model,
+                        )
+                    )
     else:
         status_lines.append("Session: none")
 
