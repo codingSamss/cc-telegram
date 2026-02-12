@@ -151,11 +151,12 @@ async def _format_progress_update(update_obj) -> Optional[str]:
         # System initialization or other system messages
         if update_obj.metadata and update_obj.metadata.get("subtype") == "init":
             tools_count = len(update_obj.metadata.get("tools", []))
-            model = _escape_md(update_obj.metadata.get("model", "Claude"))
-            return f"🚀 *Starting {model}* with {tools_count} tools available"
+            # Avoid showing potentially stale requested/default model names here.
+            # Actual model should be shown only after resolution.
+            return f"🚀 *Starting Claude* with {tools_count} tools available"
         if update_obj.metadata and update_obj.metadata.get("subtype") == "model_resolved":
             model = _escape_md(update_obj.metadata.get("model", "Claude"))
-            return f"🧠 *Resolved model:* {model}"
+            return f"🧠 *Using model:* {model}"
 
     return None
 
