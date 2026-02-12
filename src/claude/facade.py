@@ -4,6 +4,7 @@ Provides simple interface for bot handlers.
 """
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -51,6 +52,7 @@ class ClaudeIntegration:
         self.session_manager = session_manager
         self.tool_monitor = tool_monitor
         self._sdk_failed_count = 0  # Track SDK failures for adaptive fallback
+        self._context_usage_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
 
     async def run_command(
         self,
@@ -559,6 +561,123 @@ class ClaudeIntegration:
         """Get session information."""
         return await self.session_manager.get_session_info(session_id)
 
+    async def get_precise_context_usage(
+        self,
+        session_id: str,
+        working_directory: Path,
+        model: Optional[str] = None,
+        force_refresh: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Probe precise context usage via /context command with short cache."""
+        if not session_id:
+            return None
+
+        now = asyncio.get_event_loop().time()
+        ttl_seconds = max(
+            int(getattr(self.config, "status_context_probe_ttl_seconds", 0) or 0), 0
+        )
+
+        cached = self._context_usage_cache.get(session_id)
+        if (
+            not force_refresh
+            and ttl_seconds > 0
+            and cached
+            and now - cached[0] <= ttl_seconds
+        ):
+            payload = dict(cached[1])
+            payload["cached"] = True
+            return payload
+
+        probe_timeout_cfg = max(
+            int(getattr(self.config, "status_context_probe_timeout_seconds", 45) or 45),
+            1,
+        )
+        probe_timeout = max(1, min(self.config.claude_timeout_seconds, probe_timeout_cfg))
+        probe_runners: List[tuple[str, Callable[[], Any]]] = [
+            (
+                "subprocess",
+                lambda: self.process_manager.execute_command(
+                    prompt="/context",
+                    working_directory=working_directory,
+                    session_id=session_id,
+                    continue_session=True,
+                    model=model,
+                ),
+            )
+        ]
+        if self.config.use_sdk and self.sdk_manager:
+            probe_runners.append(
+                (
+                    "sdk",
+                    lambda: self.sdk_manager.execute_command(
+                        prompt="/context",
+                        working_directory=working_directory,
+                        session_id=session_id,
+                        continue_session=True,
+                        model=model,
+                    ),
+                )
+            )
+
+        parsed: Optional[Dict[str, Any]] = None
+        for probe_source, runner in probe_runners:
+            try:
+                response = await asyncio.wait_for(
+                    runner(),
+                    timeout=probe_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.info(
+                    "Precise context probe timed out",
+                    session_id=session_id,
+                    timeout_seconds=probe_timeout,
+                    probe_source=probe_source,
+                )
+                continue
+            except Exception as e:
+                logger.info(
+                    "Failed to probe precise context usage",
+                    session_id=session_id,
+                    error=str(e),
+                    probe_source=probe_source,
+                )
+                continue
+
+            if response.is_error:
+                logger.info(
+                    "Context probe returned error response",
+                    session_id=session_id,
+                    error_type=response.error_type,
+                    content_preview=(response.content or "")[:240],
+                    probe_source=probe_source,
+                )
+                continue
+
+            parsed = self._parse_context_usage_text(response.content or "")
+            if parsed:
+                break
+
+            logger.info(
+                "Unable to parse /context output",
+                session_id=session_id,
+                content_preview=(response.content or "")[:240],
+                probe_source=probe_source,
+            )
+
+        if not parsed:
+            return None
+
+        payload = {
+            **parsed,
+            "session_id": session_id,
+            "cached": False,
+        }
+        if ttl_seconds > 0:
+            self._context_usage_cache[session_id] = (now, dict(payload))
+        else:
+            self._context_usage_cache.pop(session_id, None)
+        return payload
+
     async def get_user_sessions(self, user_id: int) -> List[Dict[str, Any]]:
         """Get all sessions for a user."""
         sessions = await self.session_manager._get_user_sessions(user_id)
@@ -575,6 +694,191 @@ class ClaudeIntegration:
             }
             for s in sessions
         ]
+
+    @classmethod
+    def _parse_context_usage_text(cls, text: str) -> Optional[Dict[str, Any]]:
+        """Parse used/total token usage from /context output text."""
+        if not text:
+            return None
+
+        numeric = r"\d[\d,._]*(?:\.\d+)?\s*[kKmMbB]?"
+        pair_pattern = re.compile(
+            rf"(?P<used>{numeric})\s*/\s*(?P<total>{numeric})"
+        )
+        percent_pattern = re.compile(r"(?P<pct>\d{1,3}(?:\.\d+)?)\s*%")
+        used_pattern = re.compile(
+            rf"(?:used|usage|已使用|占用)\D{{0,16}}(?P<used>{numeric})",
+            re.IGNORECASE,
+        )
+        total_pattern = re.compile(
+            rf"(?:total|window|capacity|max(?:imum)?|总量|上下文窗口|窗口)\D{{0,20}}(?P<total>{numeric})",
+            re.IGNORECASE,
+        )
+        remaining_pattern = re.compile(
+            rf"(?:remaining|left|available|剩余)\D{{0,16}}(?P<remaining>{numeric})",
+            re.IGNORECASE,
+        )
+        keyword_pattern = re.compile(
+            r"(?:context|token|window|usage|上下文|令牌|剩余|已使用)",
+            re.IGNORECASE,
+        )
+
+        normalized = text.replace("`", " ").replace("\r", "\n")
+        lines = [line.strip() for line in normalized.split("\n") if line.strip()]
+        candidates = [line for line in lines if keyword_pattern.search(line)]
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+        for candidate in candidates:
+            for match in pair_pattern.finditer(candidate):
+                used_tokens = cls._parse_token_number(match.group("used"))
+                total_tokens = cls._parse_token_number(match.group("total"))
+                payload = cls._build_context_usage_payload(
+                    text=text,
+                    candidate=candidate,
+                    used_tokens=used_tokens,
+                    total_tokens=total_tokens,
+                    percent_pattern=percent_pattern,
+                    remaining_pattern=remaining_pattern,
+                )
+                if payload:
+                    return payload
+
+            used_match = used_pattern.search(candidate)
+            total_match = total_pattern.search(candidate)
+            remaining_match = remaining_pattern.search(candidate)
+            pct_match = percent_pattern.search(candidate)
+
+            used_tokens = (
+                cls._parse_token_number(used_match.group("used"))
+                if used_match
+                else None
+            )
+            total_tokens = (
+                cls._parse_token_number(total_match.group("total"))
+                if total_match
+                else None
+            )
+            remaining_tokens = (
+                cls._parse_token_number(remaining_match.group("remaining"))
+                if remaining_match
+                else None
+            )
+            percent = float(pct_match.group("pct")) if pct_match else None
+
+            if total_tokens is None and used_tokens is not None and remaining_tokens is not None:
+                total_tokens = used_tokens + remaining_tokens
+
+            if used_tokens is None and total_tokens is not None and remaining_tokens is not None:
+                used_tokens = max(total_tokens - remaining_tokens, 0)
+
+            if (
+                used_tokens is None
+                and total_tokens is not None
+                and percent is not None
+                and 0 < percent < 100
+            ):
+                used_tokens = int(round(total_tokens * percent / 100))
+
+            if (
+                total_tokens is None
+                and used_tokens is not None
+                and percent is not None
+                and 0 < percent <= 100
+            ):
+                total_tokens = int(round(used_tokens / (percent / 100)))
+
+            payload = cls._build_context_usage_payload(
+                text=text,
+                candidate=candidate,
+                used_tokens=used_tokens,
+                total_tokens=total_tokens,
+                percent_pattern=percent_pattern,
+                remaining_pattern=remaining_pattern,
+                remaining_tokens_override=remaining_tokens,
+            )
+            if payload:
+                return payload
+
+        return None
+
+    @classmethod
+    def _build_context_usage_payload(
+        cls,
+        *,
+        text: str,
+        candidate: str,
+        used_tokens: Optional[int],
+        total_tokens: Optional[int],
+        percent_pattern: re.Pattern[str],
+        remaining_pattern: re.Pattern[str],
+        remaining_tokens_override: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build normalized context-usage payload if values are valid."""
+        if (
+            used_tokens is None
+            or total_tokens is None
+            or used_tokens < 0
+            or total_tokens <= 0
+        ):
+            return None
+
+        pct_match = percent_pattern.search(candidate)
+        used_percent = (
+            float(pct_match.group("pct"))
+            if pct_match
+            else used_tokens / total_tokens * 100
+        )
+
+        remaining_tokens = remaining_tokens_override
+        if remaining_tokens is None:
+            remaining_match = remaining_pattern.search(candidate)
+            remaining_tokens = (
+                cls._parse_token_number(remaining_match.group("remaining"))
+                if remaining_match
+                else None
+            )
+        if remaining_tokens is None:
+            remaining_tokens = max(total_tokens - used_tokens, 0)
+
+        return {
+            "used_tokens": used_tokens,
+            "total_tokens": total_tokens,
+            "remaining_tokens": remaining_tokens,
+            "used_percent": used_percent,
+            "raw_text": text,
+        }
+
+    @staticmethod
+    def _parse_token_number(value: Optional[str]) -> Optional[int]:
+        """Parse token count strings like '55,000', '55k', '1.2m'."""
+        if not value:
+            return None
+
+        normalized = re.sub(r"\s+", "", value.strip().lower())
+        if not normalized:
+            return None
+
+        multiplier = 1
+        if normalized.endswith("k"):
+            multiplier = 1_000
+            normalized = normalized[:-1]
+        elif normalized.endswith("m"):
+            multiplier = 1_000_000
+            normalized = normalized[:-1]
+        elif normalized.endswith("b"):
+            multiplier = 1_000_000_000
+            normalized = normalized[:-1]
+
+        normalized = normalized.replace(",", "").replace("_", "")
+        try:
+            parsed = float(normalized)
+        except ValueError:
+            return None
+
+        if parsed < 0:
+            return None
+        return int(round(parsed * multiplier))
 
     async def cleanup_expired_sessions(self) -> int:
         """Clean up expired sessions."""

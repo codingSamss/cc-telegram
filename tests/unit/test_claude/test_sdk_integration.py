@@ -13,6 +13,7 @@ from claude_agent_sdk import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from src.claude.sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
@@ -134,6 +135,55 @@ class TestClaudeSDKManager:
         assert response.duration_ms >= 0  # Can be 0 in tests
         assert not response.is_error
         assert response.cost == 0.05
+
+    async def test_execute_command_falls_back_to_result_text(self, sdk_manager):
+        """When assistant text is empty, ResultMessage.result should be used."""
+
+        async def mock_query(prompt, options):
+            yield _make_result_message(
+                session_id="test-session",
+                total_cost_usd=0.0,
+                result="Context (claude-opus-4-6)\nUsage: 32,536 / 200,000 (16.3%)",
+            )
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            response = await sdk_manager.execute_command(
+                prompt="/context",
+                working_directory=Path("/test"),
+                session_id="test-session",
+                continue_session=True,
+            )
+
+        assert "Usage: 32,536 / 200,000 (16.3%)" in response.content
+
+    async def test_execute_command_falls_back_to_local_command_stdout(
+        self, sdk_manager
+    ):
+        """Local command stdout in UserMessage should be extracted when result is empty."""
+
+        async def mock_query(prompt, options):
+            yield UserMessage(
+                content=(
+                    "<local-command-stdout>"
+                    "Context usage: 14% (28.8k / 200k tokens)"
+                    "</local-command-stdout>"
+                )
+            )
+            yield _make_result_message(
+                session_id="test-session",
+                total_cost_usd=0.0,
+                result="",
+            )
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            response = await sdk_manager.execute_command(
+                prompt="/context",
+                working_directory=Path("/test"),
+                session_id="test-session",
+                continue_session=True,
+            )
+
+        assert "28.8k / 200k" in response.content
 
     async def test_execute_command_sets_default_setting_sources(self, sdk_manager):
         """Test SDK options include explicit setting sources for auth visibility."""

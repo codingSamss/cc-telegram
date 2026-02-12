@@ -2,6 +2,7 @@
 
 from src.bot.utils.status_usage import (
     build_model_usage_status_lines,
+    build_precise_context_status_lines,
     estimate_context_window_tokens,
 )
 
@@ -23,6 +24,7 @@ def test_build_model_usage_status_lines_with_explicit_window():
                 "cacheReadInputTokens": 5_000,
                 "cacheCreationInputTokens": 0,
                 "contextWindow": 200_000,
+                "contextWindowSource": "exact",
             }
         },
         current_model="sonnet",
@@ -49,3 +51,59 @@ def test_build_model_usage_status_lines_with_estimated_window():
 
     joined = "\n".join(lines)
     assert "Usage: `100,000` / `200,000` (50.0%) _(estimated)_" in joined
+
+
+def test_build_model_usage_status_lines_marks_unknown_source_as_estimated():
+    """Context window without explicit exact source should be labeled estimated."""
+    lines = build_model_usage_status_lines(
+        model_usage={
+            "claude-opus-4-6": {
+                "inputTokens": 32_000,
+                "outputTokens": 500,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "contextWindow": 200_000,
+            }
+        },
+        current_model="opus",
+    )
+
+    joined = "\n".join(lines)
+    assert "Usage: `32,500` / `200,000` (16.2%) _(estimated)_" in joined
+
+
+def test_build_model_usage_status_lines_can_hide_estimated_ratio():
+    """Estimated ratio should be suppressible when exact /context exists."""
+    lines = build_model_usage_status_lines(
+        model_usage={
+            "sdk": {
+                "inputTokens": 80_000,
+                "outputTokens": 20_000,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+            }
+        },
+        current_model="sonnet",
+        allow_estimated_ratio=False,
+    )
+
+    joined = "\n".join(lines)
+    assert "Usage:" not in joined
+    assert "Tokens: `100,000`" in joined
+
+
+def test_build_precise_context_status_lines_marks_exact_source():
+    """Precise context lines should include exact marker and cached hint."""
+    lines = build_precise_context_status_lines(
+        {
+            "used_tokens": 55_000,
+            "total_tokens": 200_000,
+            "remaining_tokens": 145_000,
+            "used_percent": 27.5,
+            "cached": True,
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "Context (/context, cached)" in joined
+    assert "Usage: `55,000` / `200,000` (27.5%) _(exact)_" in joined

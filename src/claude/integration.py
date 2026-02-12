@@ -9,6 +9,7 @@ Features:
 
 import asyncio
 import json
+import re
 import uuid
 from asyncio.subprocess import Process
 from collections import deque
@@ -546,6 +547,7 @@ class ClaudeProcessManager:
         # Extract tools used from messages
         tools_used = []
         assistant_texts = []  # Collect all assistant text responses
+        local_command_outputs = []  # Collect /context-like local command stdout
 
         for msg in messages:
             if msg.get("type") == "assistant":
@@ -563,6 +565,12 @@ class ClaudeProcessManager:
                         text = block.get("text", "").strip()
                         if text:
                             assistant_texts.append(text)
+            elif msg.get("type") == "user":
+                message = msg.get("message", {})
+                user_content = message.get("content", "")
+                extracted = self._extract_local_command_output(user_content)
+                if extracted:
+                    local_command_outputs.append(extracted)
 
         # Get content from result, or fallback to collected assistant texts
         content = result.get("result", "")
@@ -573,6 +581,13 @@ class ClaudeProcessManager:
                 "Using fallback content from assistant messages",
                 num_texts=len(assistant_texts),
                 content_length=len(content)
+            )
+        if not content and local_command_outputs:
+            content = local_command_outputs[-1]
+            logger.debug(
+                "Using fallback content from local command output",
+                num_outputs=len(local_command_outputs),
+                content_length=len(content),
             )
 
         return ClaudeResponse(
@@ -586,6 +601,36 @@ class ClaudeProcessManager:
             tools_used=tools_used,
             model_usage=result.get("modelUsage"),
         )
+
+    @classmethod
+    def _extract_local_command_output(cls, content: Any) -> str:
+        """Extract <local-command-stdout> payload from user replay messages."""
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+                elif isinstance(block, str):
+                    parts.append(block)
+            content_text = "\n".join(parts)
+        else:
+            content_text = str(content or "")
+
+        if not content_text:
+            return ""
+
+        matches = list(
+            re.finditer(
+                r"<local-command-(stdout|stderr)>(.*?)</local-command-\1>",
+                content_text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+        )
+        if not matches:
+            return ""
+
+        extracted = "\n\n".join(match.group(2).strip() for match in matches).strip()
+        return extracted
 
     async def kill_all_processes(self) -> None:
         """Kill all active processes."""

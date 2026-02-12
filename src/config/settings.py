@@ -156,6 +156,18 @@ class Settings(BaseSettings):
         ge=0,
         le=10000,
     )
+    status_context_probe_ttl_seconds: int = Field(
+        0,
+        description="TTL for /status precise /context probe cache (0 disables cache)",
+        ge=0,
+        le=600,
+    )
+    status_context_probe_timeout_seconds: int = Field(
+        45,
+        description="Timeout for /status precise /context probe (seconds)",
+        ge=5,
+        le=300,
+    )
 
     # Monitoring
     log_level: str = Field("INFO", description="Logging level")

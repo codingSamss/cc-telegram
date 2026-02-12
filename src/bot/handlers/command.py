@@ -11,7 +11,10 @@ from telegram.ext import ContextTypes
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
 from ..utils.resume_ui import build_resume_project_selector
-from ..utils.status_usage import build_model_usage_status_lines
+from ..utils.status_usage import (
+    build_model_usage_status_lines,
+    build_precise_context_status_lines,
+)
 from .message import build_permission_handler
 from ...claude.task_registry import TaskRegistry
 from ...security.audit import AuditLogger
@@ -649,15 +652,21 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Directory: `{relative_path}/`",
         f"Model: `{current_model or 'default'}`",
     ]
+    claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
 
     if claude_session_id:
         status_lines.append(f"Session: `{claude_session_id[:8]}...`")
-
-        # Fetch real session data from session manager
-        claude_integration: ClaudeIntegration = context.bot_data.get(
-            "claude_integration"
-        )
         if claude_integration:
+            precise_context = await claude_integration.get_precise_context_usage(
+                session_id=claude_session_id,
+                working_directory=current_dir,
+                model=current_model,
+            )
+            if precise_context:
+                status_lines.extend(
+                    build_precise_context_status_lines(precise_context)
+                )
+
             info = await claude_integration.get_session_info(claude_session_id)
             if info:
                 status_lines.append(f"Messages: {info.get('messages', 0)}")
@@ -666,20 +675,18 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 # Model usage details
                 model_usage = info.get("model_usage")
-                if model_usage:
+                if model_usage and not precise_context:
                     status_lines.extend(
                         build_model_usage_status_lines(
                             model_usage=model_usage,
                             current_model=current_model,
+                            allow_estimated_ratio=True,
                         )
                     )
     else:
         status_lines.append("Session: none")
 
         # Check for resumable session
-        claude_integration: ClaudeIntegration = context.bot_data.get(
-            "claude_integration"
-        )
         if claude_integration:
             existing = await claude_integration._find_resumable_session(
                 user_id, current_dir

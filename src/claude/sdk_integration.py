@@ -9,6 +9,7 @@ Features:
 
 import asyncio
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -308,7 +309,7 @@ class ClaudeSDKManager:
             self._update_session(final_session_id, messages)
 
             return ClaudeResponse(
-                content=self._extract_content_from_messages(messages),
+                content=self._extract_response_content(messages),
                 session_id=final_session_id,
                 cost=cost,
                 duration_ms=duration_ms,
@@ -676,6 +677,7 @@ class ClaudeSDKManager:
             inferred_ctx = self._estimate_context_window_tokens(resolved_model)
             if inferred_ctx:
                 usage_payload["contextWindow"] = inferred_ctx
+                usage_payload["contextWindowSource"] = "estimated"
         return {
             (resolved_model or "sdk"): usage_payload
         }
@@ -707,6 +709,85 @@ class ClaudeSDKManager:
                     content_parts.append(str(content))
 
         return "\n".join(content_parts)
+
+    def _extract_result_text_from_messages(self, messages: List[Message]) -> str:
+        """Extract fallback text from ResultMessage when assistant text is absent."""
+        for message in reversed(messages):
+            if not isinstance(message, ResultMessage):
+                continue
+            result = getattr(message, "result", None)
+            if result is None:
+                continue
+            result_text = str(result).strip()
+            if result_text:
+                return result_text
+        return ""
+
+    def _extract_response_content(self, messages: List[Message]) -> str:
+        """Extract response content with safe fallback for command-style outputs."""
+        content = self._extract_content_from_messages(messages)
+        if content and content.strip():
+            return content
+
+        result_text = self._extract_result_text_from_messages(messages)
+        if result_text:
+            logger.debug(
+                "Using ResultMessage fallback content",
+                content_preview=result_text[:240],
+            )
+            return result_text
+
+        local_output_text = self._extract_local_command_output_from_messages(messages)
+        if local_output_text:
+            logger.debug(
+                "Using local-command stdout fallback content",
+                content_preview=local_output_text[:240],
+            )
+            return local_output_text
+
+        return content
+
+    def _extract_local_command_output_from_messages(self, messages: List[Message]) -> str:
+        """Extract <local-command-stdout> payload carried by UserMessage replay."""
+        for message in reversed(messages):
+            if not isinstance(message, UserMessage):
+                continue
+            content = getattr(message, "content", "")
+            extracted = self._extract_local_command_output(content)
+            if extracted:
+                return extracted
+        return ""
+
+    @staticmethod
+    def _extract_local_command_output(content: Any) -> str:
+        """Extract text inside <local-command-stdout|stderr> wrappers."""
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if hasattr(block, "text"):
+                    parts.append(str(getattr(block, "text", "")))
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+                elif isinstance(block, str):
+                    parts.append(block)
+            content_text = "\n".join(parts)
+        else:
+            content_text = str(content or "")
+
+        if not content_text:
+            return ""
+
+        matches = list(
+            re.finditer(
+                r"<local-command-(stdout|stderr)>(.*?)</local-command-\1>",
+                content_text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+        )
+        if not matches:
+            return ""
+
+        return "\n\n".join(match.group(2).strip() for match in matches).strip()
 
     def _extract_tools_from_messages(
         self, messages: List[Message]
@@ -903,7 +984,7 @@ class ClaudeSDKManager:
             self._update_session(final_session_id, messages)
 
             return ClaudeResponse(
-                content=self._extract_content_from_messages(messages),
+                content=self._extract_response_content(messages),
                 session_id=final_session_id,
                 cost=cost,
                 duration_ms=duration_ms,

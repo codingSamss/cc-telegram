@@ -30,3 +30,4 @@ def test_build_model_usage_includes_resolved_model_and_context_window(tmp_path):
     payload = usage["claude-sonnet-4-20250514"]
     assert payload["resolvedModel"] == "claude-sonnet-4-20250514"
     assert payload["contextWindow"] == 200_000
+    assert payload["contextWindowSource"] == "estimated"
