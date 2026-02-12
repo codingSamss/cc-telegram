@@ -1291,6 +1291,7 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if scanner is None:
         scanner = DesktopSessionScanner(
             approved_directory=settings.approved_directory,
+            cache_ttl_sec=settings.resume_scan_cache_ttl_seconds,
         )
         context.bot_data["desktop_scanner"] = scanner
 
@@ -1301,7 +1302,6 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         # S0 -> scan projects
-        scanner.clear_cache()
         projects = await scanner.list_projects()
 
         current_dir = context.user_data.get("current_directory")

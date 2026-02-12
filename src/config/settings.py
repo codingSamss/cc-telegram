@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     image_cleanup_max_age_hours: int = Field(
         24, description="Max age in hours for uploaded images before cleanup"
     )
+    resume_scan_cache_ttl_seconds: int = Field(
+        30,
+        description="TTL for /resume desktop session scan cache",
+        ge=0,
+        le=3600,
+    )
     stream_render_debounce_ms: int = Field(
         400,
         description="Debounce interval for streaming progress message updates",

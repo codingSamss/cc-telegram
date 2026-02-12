@@ -1472,7 +1472,6 @@ async def _resume_render_project_list(
     show_all: bool,
 ) -> None:
     """Render resume project selection in recent/all modes."""
-    scanner.clear_cache()
     projects = await scanner.list_projects()
 
     if not projects:
@@ -1515,7 +1514,6 @@ async def _resume_select_project(
     from pathlib import Path
 
     project_cwd = Path(payload["cwd"])
-    scanner.clear_cache()
     candidates = await scanner.list_sessions(project_cwd=project_cwd)
 
     if not candidates:
