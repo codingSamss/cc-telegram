@@ -1023,6 +1023,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if image_handler:
         try:
             last_status_text = ""
+            thinking_lines: list[str] = []
 
             async def _set_image_status(text: str) -> None:
                 nonlocal progress_msg, last_status_text
@@ -1051,6 +1052,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             error=str(send_error),
                             user_id=user_id,
                         )
+
+            async def _image_stream_handler(update_obj) -> None:
+                try:
+                    progress_text = await _format_progress_update(update_obj)
+                    if not progress_text:
+                        return
+
+                    # Keep behavior aligned with text flow:
+                    # assistant plain content is not part of thinking details.
+                    if not (
+                        update_obj.type == "assistant"
+                        and update_obj.content
+                        and not update_obj.tool_calls
+                    ):
+                        thinking_lines.append(progress_text)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to collect image stream progress",
+                        error=str(e),
+                        user_id=user_id,
+                    )
 
             # Send processing indicator (single message that will be updated)
             initial_status = _build_image_stage_status(1, "已接收图片")
@@ -1141,6 +1163,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         working_directory=current_dir,
                         user_id=user_id,
                         session_id=session_id,
+                        on_stream=_image_stream_handler,
                         force_new_session=force_new_session,
                         permission_handler=permission_handler,
                         model=context.user_data.get("claude_model"),
@@ -1163,11 +1186,46 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     claude_response.content
                 )
 
-                # Delete progress message
-                try:
-                    await progress_msg.delete()
-                except Exception:
-                    pass
+                # Collapse progress message into thinking summary when available
+                if thinking_lines:
+                    summary_text = _generate_thinking_summary(thinking_lines)
+                    thinking_keyboard = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "View thinking process",
+                                    callback_data=f"thinking:expand:{progress_msg.message_id}",
+                                )
+                            ]
+                        ]
+                    )
+                    try:
+                        await progress_msg.edit_text(
+                            summary_text,
+                            parse_mode="Markdown",
+                            reply_markup=thinking_keyboard,
+                        )
+                        _cache_thinking_data(
+                            context,
+                            progress_msg.message_id,
+                            thinking_lines,
+                            summary_text,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to collapse image progress to summary",
+                            error=str(e),
+                            user_id=user_id,
+                        )
+                        try:
+                            await progress_msg.delete()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        await progress_msg.delete()
+                    except Exception:
+                        pass
 
                 # Send responses
                 for i, message in enumerate(formatted_messages):
@@ -1186,7 +1244,38 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except Exception as e:
                 error_text = _format_error_message(str(e))
                 try:
-                    await _set_image_status(error_text)
+                    if thinking_lines:
+                        summary_text = "[Error] " + _generate_thinking_summary(
+                            thinking_lines
+                        )
+                        thinking_keyboard = InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "View thinking process",
+                                        callback_data=f"thinking:expand:{progress_msg.message_id}",
+                                    )
+                                ]
+                            ]
+                        )
+                        await progress_msg.edit_text(
+                            summary_text,
+                            parse_mode="Markdown",
+                            reply_markup=thinking_keyboard,
+                        )
+                        _cache_thinking_data(
+                            context,
+                            progress_msg.message_id,
+                            thinking_lines,
+                            summary_text,
+                        )
+                        await update.message.reply_text(
+                            error_text,
+                            parse_mode="Markdown",
+                            reply_to_message_id=update.message.message_id,
+                        )
+                    else:
+                        await _set_image_status(error_text)
                 except Exception as send_error:
                     logger.warning(
                         "Failed to edit image progress message with error",
