@@ -1021,9 +1021,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     image_handler = features.get_image_handler() if features else None
 
     if image_handler:
+        task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
+        if task_registry and await task_registry.is_busy(user_id):
+            await update.message.reply_text(
+                "A task is already running. Use /cancel to cancel it."
+            )
+            return
+
         try:
             last_status_text = ""
             thinking_lines: list[str] = []
+            cancel_keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Cancel", callback_data="cancel:task")]]
+            )
 
             async def _set_image_status(text: str) -> None:
                 nonlocal progress_msg, last_status_text
@@ -1033,7 +1043,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
                 last_status_text = text
                 try:
-                    await progress_msg.edit_text(text, parse_mode="Markdown")
+                    await progress_msg.edit_text(
+                        text,
+                        parse_mode="Markdown",
+                        reply_markup=cancel_keyboard,
+                    )
                 except Exception as e:
                     logger.warning(
                         "Failed to update image status message",
@@ -1045,6 +1059,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             text,
                             parse_mode="Markdown",
                             reply_to_message_id=update.message.message_id,
+                            reply_markup=cancel_keyboard,
                         )
                     except Exception as send_error:
                         logger.warning(
@@ -1080,6 +1095,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 initial_status,
                 parse_mode="Markdown",
                 reply_to_message_id=update.message.message_id,
+                reply_markup=cancel_keyboard,
             )
             last_status_text = initial_status
 
@@ -1157,20 +1173,81 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
                 await _set_image_status(_build_image_analyzing_status(0))
 
-                claude_response = await _run_with_image_analysis_heartbeat(
-                    run_coro=claude_integration.run_command(
-                        prompt=processed_image.prompt,
-                        working_directory=current_dir,
-                        user_id=user_id,
-                        session_id=session_id,
-                        on_stream=_image_stream_handler,
-                        force_new_session=force_new_session,
-                        permission_handler=permission_handler,
-                        model=context.user_data.get("claude_model"),
-                        images=images,
-                    ),
-                    update_status=_set_image_status,
-                )
+                async def _run_image_claude():
+                    return await _run_with_image_analysis_heartbeat(
+                        run_coro=claude_integration.run_command(
+                            prompt=processed_image.prompt,
+                            working_directory=current_dir,
+                            user_id=user_id,
+                            session_id=session_id,
+                            on_stream=_image_stream_handler,
+                            force_new_session=force_new_session,
+                            permission_handler=permission_handler,
+                            model=context.user_data.get("claude_model"),
+                            images=images,
+                        ),
+                        update_status=_set_image_status,
+                    )
+
+                image_task = asyncio.create_task(_run_image_claude())
+                if task_registry:
+                    await task_registry.register(
+                        user_id,
+                        image_task,
+                        prompt_summary=processed_image.prompt,
+                        progress_message_id=progress_msg.message_id,
+                        chat_id=update.effective_chat.id,
+                    )
+
+                try:
+                    claude_response = await image_task
+                    if task_registry:
+                        await task_registry.complete(user_id)
+                except asyncio.CancelledError:
+                    logger.info("Image Claude task cancelled by user", user_id=user_id)
+                    if thinking_lines:
+                        summary_text = "[Cancelled] " + _generate_thinking_summary(
+                            thinking_lines
+                        )
+                        thinking_keyboard = InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "View thinking process",
+                                        callback_data=f"thinking:expand:{progress_msg.message_id}",
+                                    )
+                                ]
+                            ]
+                        )
+                        try:
+                            await progress_msg.edit_text(
+                                summary_text,
+                                parse_mode="Markdown",
+                                reply_markup=thinking_keyboard,
+                            )
+                            _cache_thinking_data(
+                                context,
+                                progress_msg.message_id,
+                                thinking_lines,
+                                summary_text,
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            await progress_msg.edit_text(
+                                "Task cancelled.", reply_markup=None
+                            )
+                        except Exception:
+                            pass
+                    return
+                except Exception:
+                    if task_registry:
+                        await task_registry.fail(user_id)
+                    raise
+                finally:
+                    if task_registry:
+                        await task_registry.remove(user_id)
 
                 # Update session ID
                 context.user_data["claude_session_id"] = claude_response.session_id
@@ -1275,7 +1352,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             reply_to_message_id=update.message.message_id,
                         )
                     else:
-                        await _set_image_status(error_text)
+                        await progress_msg.edit_text(
+                            error_text,
+                            parse_mode="Markdown",
+                            reply_markup=None,
+                        )
                 except Exception as send_error:
                     logger.warning(
                         "Failed to edit image progress message with error",
