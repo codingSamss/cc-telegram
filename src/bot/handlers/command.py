@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
+from ..utils.resume_ui import build_resume_project_selector
 from .message import build_permission_handler
 from ...claude.task_registry import TaskRegistry
 from ...security.audit import AuditLogger
@@ -1303,6 +1304,8 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         scanner.clear_cache()
         projects = await scanner.list_projects()
 
+        current_dir = context.user_data.get("current_directory")
+
         if not projects:
             await update.message.reply_text(
                 "No desktop Claude Code sessions found.\n\n"
@@ -1312,35 +1315,19 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-        # Build project selection buttons
-        keyboard = []
-        for proj in projects:
-            try:
-                label = str(proj.relative_to(settings.approved_directory))
-            except ValueError:
-                label = proj.name
-            token = token_mgr.issue(
-                kind="p",
-                user_id=user_id,
-                payload={"cwd": str(proj)},
-            )
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        f"📁 {label}",
-                        callback_data=f"resume:p:{token}",
-                    )
-                ]
-            )
-
-        keyboard.append(
-            [InlineKeyboardButton("❌ Cancel", callback_data="resume:cancel")]
+        message_text, keyboard = build_resume_project_selector(
+            projects=projects,
+            approved_root=settings.approved_directory,
+            token_mgr=token_mgr,
+            user_id=user_id,
+            current_directory=Path(current_dir) if current_dir else None,
+            show_all=False,
         )
 
         await update.message.reply_text(
-            "**Resume Desktop Session**\n\n" "Select a project to browse its sessions:",
+            message_text,
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=keyboard,
         )
 
     except Exception as e:

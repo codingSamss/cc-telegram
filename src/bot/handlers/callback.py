@@ -10,6 +10,7 @@ from .message import build_permission_handler
 from ...claude.task_registry import TaskRegistry
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
+from ..utils.resume_ui import build_resume_project_selector
 
 logger = structlog.get_logger()
 
@@ -1390,7 +1391,9 @@ async def handle_resume_callback(query, param, context):
     """Handle resume:* callback queries.
 
     Callback data format: resume:<sub>:<token>
-    Sub-actions: p (project), s (session), f (force-confirm), cancel
+    Sub-actions:
+    - p (project), s (session), f (force-confirm)
+    - show_all, show_recent, cancel
     """
     user_id = query.from_user.id
     settings: Settings = context.bot_data["settings"]
@@ -1411,7 +1414,20 @@ async def handle_resume_callback(query, param, context):
         )
         return
 
-    # Parse sub-action: param is "p:<token>" or "s:<token>" etc.
+    # Handle non-token sub-actions first.
+    if param in {"show_all", "show_recent"}:
+        await _resume_render_project_list(
+            query=query,
+            user_id=user_id,
+            scanner=scanner,
+            token_mgr=token_mgr,
+            settings=settings,
+            context=context,
+            show_all=(param == "show_all"),
+        )
+        return
+
+    # Parse tokenized sub-action: "p:<token>" / "s:<token>" / "f:<token>"
     if not param or ":" not in param:
         if param == "cancel":
             await query.edit_message_text("Resume cancelled.")
@@ -1443,6 +1459,44 @@ async def handle_resume_callback(query, param, context):
         await query.edit_message_text(
             "Unknown resume action. Please run /resume again."
         )
+
+
+async def _resume_render_project_list(
+    *,
+    query,
+    user_id: int,
+    scanner,
+    token_mgr,
+    settings: Settings,
+    context: ContextTypes.DEFAULT_TYPE,
+    show_all: bool,
+) -> None:
+    """Render resume project selection in recent/all modes."""
+    scanner.clear_cache()
+    projects = await scanner.list_projects()
+
+    if not projects:
+        await query.edit_message_text(
+            "No desktop Claude Code sessions found.\n\n"
+            "Run /resume again after using Claude Code on desktop.",
+            parse_mode="Markdown",
+        )
+        return
+
+    current_dir = context.user_data.get("current_directory")
+    message_text, keyboard = build_resume_project_selector(
+        projects=projects,
+        approved_root=settings.approved_directory,
+        token_mgr=token_mgr,
+        user_id=user_id,
+        current_directory=current_dir,
+        show_all=show_all,
+    )
+    await query.edit_message_text(
+        message_text,
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
 
 
 async def _resume_select_project(

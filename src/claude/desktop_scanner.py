@@ -72,6 +72,9 @@ class DesktopSessionScanner:
         Each project is identified by the *cwd* field inside its JSONL files,
         not by decoding the directory name.  Only projects whose cwd falls
         under ``approved_directory`` are returned.
+
+        Projects are sorted by latest session-file mtime descending so that
+        recently active projects appear first in /resume.
         """
         now = time.monotonic()
         if (
@@ -80,7 +83,8 @@ class DesktopSessionScanner:
         ):
             return list(self._cache.projects)
 
-        seen: Dict[str, Path] = {}  # str(resolved) -> Path
+        # str(resolved) -> (Path, latest_mtime)
+        seen: Dict[str, Tuple[Path, float]] = {}
 
         if not self._projects_dir.is_dir():
             logger.warning(
@@ -101,11 +105,22 @@ class DesktopSessionScanner:
                 resolved = cwd.resolve()
                 if not resolved.is_relative_to(self._approved):
                     continue
+                try:
+                    mtime = jsonl.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
                 key = str(resolved)
-                if key not in seen:
-                    seen[key] = resolved
+                existing = seen.get(key)
+                if existing is None or mtime > existing[1]:
+                    seen[key] = (resolved, mtime)
 
-        projects = sorted(seen.values(), key=lambda p: str(p))
+        projects = [
+            item[0]
+            for item in sorted(
+                seen.values(),
+                key=lambda item: (-item[1], str(item[0])),
+            )
+        ]
         self._cache.projects = projects
         self._cache.projects_ts = now
         logger.debug("Scanned desktop projects", count=len(projects))
