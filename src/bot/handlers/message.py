@@ -461,7 +461,9 @@ async def handle_text_message(
 
         # Get existing session ID
         session_id = scope_state.get("claude_session_id")
-        force_new_session = scope_state.pop("force_new_session", False)
+        # Read but don't consume yet -- consume only after successful execution
+        # so that the protection survives retries on failure.
+        force_new_session = scope_state.get("force_new_session", False)
 
         # Enhanced stream updates handler with accumulated progress tracking
         progress_lines: list[str] = []
@@ -669,6 +671,8 @@ async def handle_text_message(
 
             # Update session ID
             scope_state["claude_session_id"] = claude_response.session_id
+            # Consume force_new_session only after success
+            scope_state.pop("force_new_session", None)
 
             # Check if Claude changed the working directory and update our tracking
             _update_working_directory_from_claude_response(
@@ -1075,7 +1079,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Get current directory and session
         current_dir = scope_state.get("current_directory", settings.approved_directory)
         session_id = scope_state.get("claude_session_id")
-        force_new_session = scope_state.pop("force_new_session", False)
+        force_new_session = scope_state.get("force_new_session", False)
         permission_handler = build_permission_handler(
             bot=context.bot, chat_id=update.effective_chat.id, settings=settings
         )
@@ -1094,6 +1098,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             # Update session ID
             scope_state["claude_session_id"] = claude_response.session_id
+            scope_state.pop("force_new_session", None)
 
             # Check if Claude changed the working directory and update our tracking
             _update_working_directory_from_claude_response(
@@ -1301,7 +1306,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # Get current directory and session
             current_dir = scope_state.get("current_directory", settings.approved_directory)
             session_id = scope_state.get("claude_session_id")
-            force_new_session = scope_state.pop("force_new_session", False)
+            force_new_session = scope_state.get("force_new_session", False)
             permission_handler = build_permission_handler(
                 bot=context.bot, chat_id=update.effective_chat.id, settings=settings
             )
@@ -1405,6 +1410,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
                 # Update session ID
                 scope_state["claude_session_id"] = claude_response.session_id
+                scope_state.pop("force_new_session", None)
 
                 # Format and send response
                 from ..utils.formatting import ResponseFormatter

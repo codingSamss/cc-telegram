@@ -25,7 +25,7 @@ from src.config.features import FeatureFlags
 from src.config.loader import load_config
 from src.config.settings import Settings
 from src.exceptions import ConfigurationError
-from src.security.audit import AuditLogger, InMemoryAuditStorage
+from src.security.audit import AuditLogger, SQLiteAuditStorage
 from src.security.auth import (
     AuthenticationManager,
     InMemoryTokenStorage,
@@ -34,9 +34,15 @@ from src.security.auth import (
 )
 from src.security.rate_limiter import RateLimiter
 from src.security.validators import SecurityValidator
+from src.services import (
+    ApprovalService,
+    EventService,
+    SessionInteractionService,
+    SessionLifecycleService,
+    SessionService,
+)
 from src.storage.facade import Storage
 from src.storage.session_storage import SQLiteSessionStorage
-
 
 _TELEGRAM_BOT_TOKEN_IN_URL_RE = re.compile(
     r"(https?://api\.telegram\.org/bot)([^/\s]+)"
@@ -157,14 +163,22 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     rate_limiter = RateLimiter(config)
 
     # Create audit storage and logger
-    audit_storage = InMemoryAuditStorage()  # TODO: Use database storage in production
+    audit_storage = SQLiteAuditStorage(storage.audit)
     audit_logger = AuditLogger(audit_storage)
 
     # Create Claude integration components with persistent storage
     session_storage = SQLiteSessionStorage(storage.db_manager)
     session_manager = SessionManager(config, session_storage)
     tool_monitor = ToolMonitor(config, security_validator)
-    permission_manager = PermissionManager()
+    permission_manager = PermissionManager(approval_repository=storage.approvals)
+    await permission_manager.initialize()
+    approval_service = ApprovalService()
+    session_lifecycle_service = SessionLifecycleService(
+        permission_manager=permission_manager
+    )
+    session_interaction_service = SessionInteractionService()
+    event_service = EventService(storage)
+    session_service = SessionService(storage=storage, event_service=event_service)
 
     # Create Claude manager based on configuration
     if config.use_sdk:
@@ -195,6 +209,11 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "claude_integration": claude_integration,
         "storage": storage,
         "permission_manager": permission_manager,
+        "approval_service": approval_service,
+        "session_lifecycle_service": session_lifecycle_service,
+        "session_interaction_service": session_interaction_service,
+        "event_service": event_service,
+        "session_service": session_service,
     }
 
     bot = ClaudeCodeBot(config, dependencies)

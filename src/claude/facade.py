@@ -338,10 +338,12 @@ class ClaudeIntegration:
         - Without permission_callback -> query() function (existing path)
 
         Fallback strategy:
-        - Retryable errors (timeout, connection, JSON decode) -> subprocess
+        - With permission_callback: run SDK client mode only. On error, deny by default.
+        - Without permission_callback: retryable SDK errors fallback to subprocess.
         - Non-retryable errors (ValueError, permission denied) -> raise immediately
         """
         has_images = bool(images)
+        permission_gate_required = permission_callback is not None
 
         # Image analysis requires SDK multimodal input. CLI subprocess fallback
         # can only send plain text prompts, so we fail fast with clear guidance.
@@ -359,12 +361,9 @@ class ClaudeIntegration:
         # Try SDK first if configured
         if self.config.use_sdk and self.sdk_manager:
             try:
-                # NOTE:
-                # SDKClient path currently has task/cancel-scope instability in
-                # this bot runtime. To prioritize reliability, keep SDK enabled
-                # but route requests through query() mode by default.
-                # (permission_callback is intentionally not wired here)
-                use_client_mode = False
+                # Permission-gated requests must use SDK client mode because
+                # query() cannot wire can_use_tool callbacks.
+                use_client_mode = permission_gate_required
 
                 if use_client_mode:
                     # Client mode: supports can_use_tool permission callbacks
@@ -380,16 +379,9 @@ class ClaudeIntegration:
                         images=images,
                     )
                 else:
-                    # query() mode: simpler, more robust for multimodal prompts.
-                    # If permission_callback exists, we intentionally skip
-                    # callback wiring for stability.
-                    if permission_callback:
-                        logger.info(
-                            "Using SDK query mode "
-                            "(permission callback bypassed for stability)"
-                        )
-                    else:
-                        logger.debug("Attempting Claude SDK query execution")
+                    # query() mode: simpler and more robust when permission
+                    # callbacks are not required.
+                    logger.debug("Attempting Claude SDK query execution")
                     response = await self.sdk_manager.execute_command(
                         prompt=prompt,
                         working_directory=working_directory,
@@ -420,6 +412,21 @@ class ClaudeIntegration:
 
                 if is_retryable:
                     self._sdk_failed_count += 1
+
+                    # Safety first: do not bypass permission approval by
+                    # falling back to subprocess when callbacks are required.
+                    if permission_gate_required:
+                        logger.error(
+                            "Claude SDK permission-gated request failed; denying fallback",
+                            error=error_str,
+                            error_type=error_type,
+                            failure_count=self._sdk_failed_count,
+                        )
+                        raise ClaudeProcessError(
+                            "Tool permission approval failed. "
+                            "For safety, this request is denied by default. "
+                            f"Please retry. Original error: {error_str}"
+                        )
 
                     # Do not silently degrade multimodal image requests to text-only
                     # subprocess mode, otherwise Claude will respond as if no image

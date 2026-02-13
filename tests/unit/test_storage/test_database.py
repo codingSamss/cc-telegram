@@ -51,6 +51,8 @@ class TestDatabaseManager:
                 "messages",
                 "tool_usage",
                 "audit_log",
+                "session_events",
+                "approval_requests",
                 "user_tokens",
                 "cost_tracking",
                 "schema_version",
@@ -81,6 +83,13 @@ class TestDatabaseManager:
                 "idx_messages_timestamp",
                 "idx_audit_log_user_id",
                 "idx_audit_log_timestamp",
+                "idx_approval_requests_user_id",
+                "idx_approval_requests_session_id",
+                "idx_approval_requests_status",
+                "idx_approval_requests_created_at",
+                "idx_session_events_session",
+                "idx_session_events_type",
+                "idx_session_events_created_at",
                 "idx_cost_tracking_user_date",
             ]
 

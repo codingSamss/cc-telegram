@@ -13,15 +13,18 @@ from .database import DatabaseManager
 from .models import (
     AuditLogModel,
     MessageModel,
+    SessionEventModel,
     SessionModel,
     ToolUsageModel,
     UserModel,
 )
 from .repositories import (
+    ApprovalRequestRepository,
     AnalyticsRepository,
     AuditLogRepository,
     CostTrackingRepository,
     MessageRepository,
+    SessionEventRepository,
     SessionRepository,
     ToolUsageRepository,
     UserRepository,
@@ -40,7 +43,9 @@ class Storage:
         self.sessions = SessionRepository(self.db_manager)
         self.messages = MessageRepository(self.db_manager)
         self.tools = ToolUsageRepository(self.db_manager)
+        self.session_events = SessionEventRepository(self.db_manager)
         self.audit = AuditLogRepository(self.db_manager)
+        self.approvals = ApprovalRequestRepository(self.db_manager)
         self.costs = CostTrackingRepository(self.db_manager)
         self.analytics = AnalyticsRepository(self.db_manager)
 
@@ -127,6 +132,16 @@ class Storage:
             session.last_used = datetime.utcnow()
             await self.sessions.update_session(session)
 
+        # Save semantic session events for timeline replay.
+        interaction_events = self._build_interaction_events(
+            user_id=user_id,
+            session_id=session_id,
+            prompt=prompt,
+            message_id=message_id,
+            response=response,
+        )
+        await self.session_events.save_events(interaction_events)
+
         # Log audit event
         audit_event = AuditLogModel(
             id=None,
@@ -178,6 +193,18 @@ class Storage:
         )
 
         await self.sessions.create_session(session)
+        await self.session_events.save_event(
+            SessionEventModel(
+                id=None,
+                session_id=session_id,
+                event_type="session_created",
+                event_data={
+                    "user_id": user_id,
+                    "project_path": project_path,
+                },
+                created_at=datetime.utcnow(),
+            )
+        )
 
         # Update user session count
         user = await self.users.get_user(user_id)
@@ -255,11 +282,13 @@ class Storage:
 
         messages = await self.messages.get_session_messages(session_id, limit)
         tools = await self.tools.get_session_tool_usage(session_id)
+        events = await self.session_events.get_session_events(session_id, limit=limit)
 
         return {
             "session": session.to_dict(),
             "messages": [m.to_dict() for m in messages],
             "tool_usage": [t.to_dict() for t in tools],
+            "events": [e.to_dict() for e in events],
         }
 
     async def cleanup_old_data(self, days: int = 30) -> Dict[str, int]:
@@ -328,3 +357,104 @@ class Storage:
             "total_costs": total_costs,
             "tool_stats": tool_stats,
         }
+
+    @staticmethod
+    def _build_interaction_events(
+        *,
+        user_id: int,
+        session_id: str,
+        prompt: str,
+        message_id: int,
+        response: ClaudeResponse,
+    ) -> list[SessionEventModel]:
+        """Build semantic events from one Claude interaction."""
+        created_at = datetime.utcnow()
+        clipped_prompt = Storage._clip_text(prompt)
+        clipped_response = Storage._clip_text(response.content)
+
+        events: list[SessionEventModel] = [
+            SessionEventModel(
+                id=None,
+                session_id=session_id,
+                event_type="command_exec",
+                event_data={
+                    "user_id": user_id,
+                    "message_id": message_id,
+                    "prompt": clipped_prompt,
+                    "prompt_length": len(prompt),
+                    "duration_ms": response.duration_ms,
+                    "cost": response.cost,
+                    "num_turns": response.num_turns,
+                    "is_error": response.is_error,
+                    "error_type": response.error_type,
+                },
+                created_at=created_at,
+            ),
+            SessionEventModel(
+                id=None,
+                session_id=session_id,
+                event_type="assistant_text",
+                event_data={
+                    "message_id": message_id,
+                    "content": clipped_response,
+                    "content_length": len(response.content),
+                    "content_truncated": len(clipped_response) < len(response.content),
+                },
+                created_at=created_at,
+            ),
+        ]
+
+        for tool in response.tools_used:
+            tool_name = tool.get("name", "unknown")
+            tool_input = tool.get("input", {})
+            events.append(
+                SessionEventModel(
+                    id=None,
+                    session_id=session_id,
+                    event_type="tool_call",
+                    event_data={
+                        "message_id": message_id,
+                        "tool_name": tool_name,
+                        "tool_input": tool_input,
+                    },
+                    created_at=created_at,
+                )
+            )
+            events.append(
+                SessionEventModel(
+                    id=None,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    event_data={
+                        "message_id": message_id,
+                        "tool_name": tool_name,
+                        "success": not response.is_error,
+                        "error_type": response.error_type,
+                    },
+                    created_at=created_at,
+                )
+            )
+
+        if response.is_error:
+            events.append(
+                SessionEventModel(
+                    id=None,
+                    session_id=session_id,
+                    event_type="error",
+                    event_data={
+                        "message_id": message_id,
+                        "error_type": response.error_type,
+                        "content": clipped_response,
+                    },
+                    created_at=created_at,
+                )
+            )
+
+        return events
+
+    @staticmethod
+    def _clip_text(text: str, max_chars: int = 4000) -> str:
+        """Clip long text payloads to control session event row size."""
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars]

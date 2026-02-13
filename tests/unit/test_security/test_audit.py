@@ -1,10 +1,19 @@
 """Tests for security audit logging."""
 
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
-from src.security.audit import AuditEvent, AuditLogger, InMemoryAuditStorage
+from src.security.audit import (
+    AuditEvent,
+    AuditLogger,
+    InMemoryAuditStorage,
+    SQLiteAuditStorage,
+)
+from src.storage.database import DatabaseManager
+from src.storage.repositories import AuditLogRepository
 
 
 class TestAuditEvent:
@@ -245,6 +254,110 @@ class TestInMemoryAuditStorage:
         assert events[0].timestamp == times[2]  # Most recent
         assert events[1].timestamp == times[1]
         assert events[2].timestamp == times[0]  # Oldest
+
+
+class TestSQLiteAuditStorage:
+    """Test SQLite-backed audit storage."""
+
+    @pytest.fixture
+    async def storage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "audit.db"
+            db_manager = DatabaseManager(f"sqlite:///{db_path}")
+            await db_manager.initialize()
+            try:
+                async with db_manager.get_connection() as conn:
+                    for user_id in (1, 42, 321):
+                        await conn.execute(
+                            "INSERT INTO users (user_id) VALUES (?)",
+                            (user_id,),
+                        )
+                    await conn.commit()
+                repo = AuditLogRepository(db_manager)
+                yield SQLiteAuditStorage(repo)
+            finally:
+                await db_manager.close()
+
+    async def test_store_and_get_event_roundtrip(self, storage):
+        """Stored event should be queryable with original key fields."""
+        now = datetime.utcnow()
+        event = AuditEvent(
+            timestamp=now,
+            user_id=321,
+            event_type="command",
+            success=True,
+            details={"command": "ls"},
+            session_id="session-abc",
+            risk_level="medium",
+        )
+        await storage.store_event(event)
+
+        events = await storage.get_events(user_id=321)
+        assert len(events) == 1
+        loaded = events[0]
+        assert loaded.user_id == 321
+        assert loaded.event_type == "command"
+        assert loaded.details["command"] == "ls"
+        assert loaded.session_id == "session-abc"
+        assert loaded.risk_level == "medium"
+
+    async def test_get_events_filters(self, storage):
+        """SQLite storage should honor event type and time filters."""
+        now = datetime.utcnow()
+        await storage.store_event(
+            AuditEvent(
+                timestamp=now - timedelta(hours=2),
+                user_id=1,
+                event_type="auth_attempt",
+                success=True,
+                details={},
+            )
+        )
+        await storage.store_event(
+            AuditEvent(
+                timestamp=now,
+                user_id=1,
+                event_type="command",
+                success=True,
+                details={"command": "echo"},
+            )
+        )
+
+        events = await storage.get_events(
+            user_id=1,
+            event_type="command",
+            start_time=now - timedelta(minutes=30),
+            limit=10,
+        )
+        assert len(events) == 1
+        assert events[0].event_type == "command"
+
+    async def test_get_security_violations(self, storage):
+        """Security-violation query should return violation events only."""
+        await storage.store_event(
+            AuditEvent(
+                timestamp=datetime.utcnow(),
+                user_id=42,
+                event_type="command",
+                success=True,
+                details={"command": "ls"},
+            )
+        )
+        await storage.store_event(
+            AuditEvent(
+                timestamp=datetime.utcnow(),
+                user_id=42,
+                event_type="security_violation",
+                success=False,
+                details={"violation_type": "path_traversal"},
+                risk_level="high",
+            )
+        )
+
+        violations = await storage.get_security_violations(user_id=42)
+        assert len(violations) == 1
+        assert violations[0].event_type == "security_violation"
+        assert violations[0].details["violation_type"] == "path_traversal"
 
 
 class TestAuditLogger:

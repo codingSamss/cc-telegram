@@ -10,14 +10,17 @@ from src.storage.database import DatabaseManager
 from src.storage.models import (
     AuditLogModel,
     MessageModel,
+    SessionEventModel,
     SessionModel,
     ToolUsageModel,
     UserModel,
 )
 from src.storage.repositories import (
+    ApprovalRequestRepository,
     AnalyticsRepository,
     AuditLogRepository,
     MessageRepository,
+    SessionEventRepository,
     SessionRepository,
     ToolUsageRepository,
     UserRepository,
@@ -63,6 +66,18 @@ async def tool_repo(db_manager):
 async def audit_repo(db_manager):
     """Create audit log repository."""
     return AuditLogRepository(db_manager)
+
+
+@pytest.fixture
+async def approval_repo(db_manager):
+    """Create approval request repository."""
+    return ApprovalRequestRepository(db_manager)
+
+
+@pytest.fixture
+async def session_event_repo(db_manager):
+    """Create session event repository."""
+    return SessionEventRepository(db_manager)
 
 
 @pytest.fixture
@@ -380,6 +395,287 @@ class TestToolUsageRepository:
         assert read_stats["usage_count"] == 3
         assert read_stats["success_count"] == 3
         assert read_stats["error_count"] == 0
+
+
+class TestApprovalRequestRepository:
+    """Test approval request repository."""
+
+    async def test_create_and_resolve_request(self, approval_repo, db_manager):
+        """Pending request should transition once and remain idempotent."""
+        request_id = "req-1234"
+        created_at = datetime.utcnow()
+
+        await approval_repo.create_request(
+            request_id=request_id,
+            user_id=12356,
+            session_id="session-a",
+            tool_name="Bash",
+            tool_input={"command": "pytest"},
+            expires_at=created_at + timedelta(minutes=2),
+        )
+
+        resolved = await approval_repo.resolve_request(
+            request_id=request_id,
+            status="approved",
+            decision="allow",
+            resolved_at=created_at + timedelta(seconds=10),
+        )
+        assert resolved is True
+
+        resolved_again = await approval_repo.resolve_request(
+            request_id=request_id,
+            status="denied",
+            decision="deny",
+            resolved_at=created_at + timedelta(seconds=20),
+        )
+        assert resolved_again is False
+
+        async with db_manager.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT status, decision, tool_name
+                FROM approval_requests
+                WHERE request_id = ?
+                """,
+                (request_id,),
+            )
+            row = await cursor.fetchone()
+
+        assert row is not None
+        assert row["status"] == "approved"
+        assert row["decision"] == "allow"
+        assert row["tool_name"] == "Bash"
+
+    async def test_expire_all_pending(self, approval_repo, db_manager):
+        """Startup recovery should expire only pending rows."""
+        now = datetime.utcnow()
+        await approval_repo.create_request(
+            request_id="req-pending",
+            user_id=12357,
+            session_id="session-b",
+            tool_name="Write",
+            tool_input={"file_path": "a.py"},
+            expires_at=now + timedelta(minutes=2),
+        )
+        await approval_repo.create_request(
+            request_id="req-approved",
+            user_id=12357,
+            session_id="session-b",
+            tool_name="Read",
+            tool_input={"file_path": "a.py"},
+            expires_at=now + timedelta(minutes=2),
+        )
+        await approval_repo.resolve_request(
+            request_id="req-approved",
+            status="approved",
+            decision="allow",
+            resolved_at=now + timedelta(seconds=1),
+        )
+
+        expired_count = await approval_repo.expire_all_pending(resolved_at=now)
+        assert expired_count == 1
+
+        async with db_manager.get_connection() as conn:
+            pending_cursor = await conn.execute(
+                "SELECT status FROM approval_requests WHERE request_id = ?",
+                ("req-pending",),
+            )
+            pending_row = await pending_cursor.fetchone()
+            approved_cursor = await conn.execute(
+                "SELECT status FROM approval_requests WHERE request_id = ?",
+                ("req-approved",),
+            )
+            approved_row = await approved_cursor.fetchone()
+
+        assert pending_row["status"] == "expired"
+        assert approved_row["status"] == "approved"
+
+
+class TestSessionEventRepository:
+    """Test session event repository."""
+
+    async def test_save_and_query_session_events(
+        self,
+        session_event_repo,
+        session_repo,
+        user_repo,
+    ):
+        """Session events should be persisted and queryable by type."""
+        now = datetime.utcnow()
+        await user_repo.create_user(
+            UserModel(
+                user_id=12358,
+                telegram_username="event_user",
+                first_seen=now,
+                last_active=now,
+                is_allowed=True,
+            )
+        )
+        await session_repo.create_session(
+            SessionModel(
+                session_id="event-session",
+                user_id=12358,
+                project_path="/test/events",
+                created_at=now,
+                last_used=now,
+            )
+        )
+
+        await session_event_repo.save_event(
+            SessionEventModel(
+                id=None,
+                session_id="event-session",
+                event_type="command_exec",
+                event_data={"prompt": "run tests"},
+                created_at=now,
+            )
+        )
+        await session_event_repo.save_events(
+            [
+                SessionEventModel(
+                    id=None,
+                    session_id="event-session",
+                    event_type="tool_call",
+                    event_data={"tool_name": "Bash"},
+                    created_at=now + timedelta(seconds=1),
+                ),
+                SessionEventModel(
+                    id=None,
+                    session_id="event-session",
+                    event_type="tool_result",
+                    event_data={"tool_name": "Bash", "success": True},
+                    created_at=now + timedelta(seconds=2),
+                ),
+            ]
+        )
+
+        all_events = await session_event_repo.get_session_events(
+            "event-session",
+            limit=10,
+        )
+        assert len(all_events) == 3
+        assert all_events[0].event_type == "tool_result"
+        assert all_events[-1].event_type == "command_exec"
+
+        tool_events = await session_event_repo.get_session_events(
+            "event-session",
+            event_types=["tool_call", "tool_result"],
+            limit=10,
+        )
+        assert len(tool_events) == 2
+        assert {e.event_type for e in tool_events} == {"tool_call", "tool_result"}
+
+
+class TestAuditLogRepository:
+    """Test audit log repository filters."""
+
+    async def test_get_events_with_filters(self, audit_repo, user_repo):
+        """Repository should support combined user/type/time filtering."""
+        now = datetime.utcnow()
+        await user_repo.create_user(
+            UserModel(
+                user_id=9001,
+                telegram_username="audit_u1",
+                first_seen=now,
+                last_active=now,
+                is_allowed=True,
+            )
+        )
+        await user_repo.create_user(
+            UserModel(
+                user_id=9002,
+                telegram_username="audit_u2",
+                first_seen=now,
+                last_active=now,
+                is_allowed=True,
+            )
+        )
+
+        await audit_repo.log_event(
+            AuditLogModel(
+                id=None,
+                user_id=9001,
+                event_type="auth_attempt",
+                event_data={"method": "token"},
+                success=False,
+                timestamp=now - timedelta(hours=2),
+                ip_address=None,
+            )
+        )
+        await audit_repo.log_event(
+            AuditLogModel(
+                id=None,
+                user_id=9001,
+                event_type="command",
+                event_data={"command": "ls"},
+                success=True,
+                timestamp=now,
+                ip_address=None,
+            )
+        )
+        await audit_repo.log_event(
+            AuditLogModel(
+                id=None,
+                user_id=9002,
+                event_type="command",
+                event_data={"command": "pwd"},
+                success=True,
+                timestamp=now,
+                ip_address=None,
+            )
+        )
+
+        events = await audit_repo.get_events(
+            user_id=9001,
+            event_type="command",
+            start_time=now - timedelta(minutes=30),
+            limit=20,
+        )
+        assert len(events) == 1
+        assert events[0].user_id == 9001
+        assert events[0].event_type == "command"
+        assert events[0].event_data["command"] == "ls"
+
+    async def test_get_security_violations(self, audit_repo, user_repo):
+        """Security-violation query should filter by event_type."""
+        now = datetime.utcnow()
+        await user_repo.create_user(
+            UserModel(
+                user_id=9003,
+                telegram_username="audit_u3",
+                first_seen=now,
+                last_active=now,
+                is_allowed=True,
+            )
+        )
+
+        await audit_repo.log_event(
+            AuditLogModel(
+                id=None,
+                user_id=9003,
+                event_type="command",
+                event_data={"command": "echo"},
+                success=True,
+                timestamp=now,
+                ip_address=None,
+            )
+        )
+        await audit_repo.log_event(
+            AuditLogModel(
+                id=None,
+                user_id=9003,
+                event_type="security_violation",
+                event_data={"violation_type": "injection"},
+                success=False,
+                timestamp=now,
+                ip_address=None,
+            )
+        )
+
+        violations = await audit_repo.get_security_violations(user_id=9003, limit=10)
+        assert len(violations) == 1
+        assert violations[0].event_type == "security_violation"
+        assert violations[0].event_data["violation_type"] == "injection"
 
 
 class TestAnalyticsRepository:

@@ -1,7 +1,6 @@
 """Command handlers for bot operations."""
 
 import asyncio
-import re
 import sys
 from pathlib import Path
 
@@ -14,12 +13,12 @@ from ...claude.task_registry import TaskRegistry
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
+from ...services.session_interaction_service import SessionInteractionService
+from ...services.session_lifecycle_service import SessionLifecycleService
+from ...services.session_service import SessionService
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.scope_state import get_scope_state_from_update
-from ..utils.status_usage import (
-    build_model_usage_status_lines,
-    build_precise_context_status_lines,
-)
+from ..utils.ui_adapter import build_reply_markup_from_spec
 from .message import build_permission_handler
 
 logger = structlog.get_logger()
@@ -37,263 +36,10 @@ def _is_context_full_mode(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 def _split_status_text(text: str, max_length: int = 3900) -> list[str]:
     """Split long status text into Telegram-safe chunks."""
-    if len(text) <= max_length:
-        return [text]
-
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > max_length:
-        split_at = remaining.rfind("\n", 0, max_length)
-        if split_at <= 0:
-            split_at = max_length
-        chunks.append(remaining[:split_at])
-        remaining = remaining[split_at:].lstrip("\n")
-
-    if remaining:
-        chunks.append(remaining)
-    return chunks
-
-
-def _parse_token_count(value: str | None) -> int | None:
-    """Parse token string such as `1.4k`, `33,600`, `2k`."""
-    if not value:
-        return None
-
-    normalized = str(value).strip().lower().replace(",", "").replace("_", "")
-    if not normalized:
-        return None
-
-    match = re.search(r"(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>[kmb])?", normalized)
-    if not match:
-        return None
-
-    number = float(match.group("num"))
-    if number < 0:
-        return None
-
-    unit = match.group("unit") or ""
-    multiplier = 1
-    if unit == "k":
-        multiplier = 1_000
-    elif unit == "m":
-        multiplier = 1_000_000
-    elif unit == "b":
-        multiplier = 1_000_000_000
-
-    return int(round(number * multiplier))
-
-
-def _parse_percent_value(value: str | None) -> float | None:
-    """Parse percent text like `17%` or `33.7 %`."""
-    if not value:
-        return None
-    match = re.search(r"(\d+(?:\.\d+)?)\s*%", str(value))
-    if not match:
-        return None
-    return float(match.group(1))
-
-
-def _split_markdown_row(line: str) -> list[str]:
-    """Split a markdown table row into cells."""
-    raw = line.strip()
-    if not raw.startswith("|") or not raw.endswith("|"):
-        return []
-    return [cell.strip() for cell in raw.strip("|").split("|")]
-
-
-def _is_markdown_separator_row(cells: list[str]) -> bool:
-    """Check whether cells are markdown table separator (--- style)."""
-    if not cells:
-        return False
-    for cell in cells:
-        marker = cell.replace("-", "").replace(":", "").replace(" ", "")
-        if marker:
-            return False
-    return True
-
-
-def _extract_context_table_sections(raw_text: str) -> dict[str, list[dict[str, str]]]:
-    """Extract markdown table rows grouped by `###` section title."""
-    sections: dict[str, list[dict[str, str]]] = {}
-    lines = [line.rstrip() for line in str(raw_text or "").splitlines()]
-    current_section = "General"
-    idx = 0
-    while idx < len(lines):
-        line = lines[idx].strip()
-        if line.startswith("### "):
-            current_section = line[4:].strip() or "General"
-            idx += 1
-            continue
-
-        if idx + 1 < len(lines) and line.startswith("|"):
-            headers = _split_markdown_row(line)
-            separators = _split_markdown_row(lines[idx + 1].strip())
-            if (
-                headers
-                and separators
-                and len(headers) == len(separators)
-                and _is_markdown_separator_row(separators)
-            ):
-                rows: list[dict[str, str]] = []
-                idx += 2
-                while idx < len(lines):
-                    row_line = lines[idx].strip()
-                    if not row_line.startswith("|"):
-                        break
-                    cells = _split_markdown_row(row_line)
-                    if len(cells) != len(headers):
-                        break
-                    rows.append({headers[i]: cells[i] for i in range(len(headers))})
-                    idx += 1
-
-                if rows:
-                    sections.setdefault(current_section, []).extend(rows)
-                continue
-
-        idx += 1
-
-    return sections
-
-
-def _find_section_rows(
-    sections: dict[str, list[dict[str, str]]],
-    expected_name: str,
-) -> list[dict[str, str]]:
-    """Find section rows by name, case-insensitive."""
-    target = expected_name.strip().lower()
-    for section_name, rows in sections.items():
-        if section_name.strip().lower() == target:
-            return rows
-    return []
-
-
-def _build_context_table_summary_lines(raw_text: str) -> list[str]:
-    """Build concise summary lines from `/context` markdown tables."""
-    sections = _extract_context_table_sections(raw_text)
-    if not sections:
-        return []
-
-    lines: list[str] = []
-
-    category_rows = _find_section_rows(sections, "Estimated usage by category")
-    if category_rows:
-        entries: list[dict[str, object]] = []
-        for row in category_rows:
-            entries.append(
-                {
-                    "name": (row.get("Category") or "unknown").strip(),
-                    "tokens_raw": (row.get("Tokens") or "").strip(),
-                    "tokens": _parse_token_count(row.get("Tokens")),
-                    "percent_raw": (row.get("Percentage") or "").strip(),
-                    "percent": _parse_percent_value(row.get("Percentage")),
-                }
-            )
-
-        entries = sorted(
-            entries,
-            key=lambda item: int(item.get("tokens") or 0),
-            reverse=True,
-        )
-        top_entries = entries[:8]
-        lines.append("[Estimated Usage by Category]")
-        for entry in top_entries:
-            token_value = entry.get("tokens")
-            token_display = (
-                f"{int(token_value):,}"
-                if isinstance(token_value, int)
-                else entry["tokens_raw"] or "n/a"
-            )
-            percent_value = entry.get("percent")
-            percent_display = (
-                f"{float(percent_value):.1f}%"
-                if isinstance(percent_value, float)
-                else entry["percent_raw"] or "n/a"
-            )
-            lines.append(f"- {entry['name']}: {token_display} ({percent_display})")
-        if len(entries) > len(top_entries):
-            lines.append(f"... and {len(entries) - len(top_entries)} more categories")
-
-    mcp_rows = _find_section_rows(sections, "MCP Tools")
-    if mcp_rows:
-        entries: list[dict[str, object]] = []
-        server_totals: dict[str, dict[str, int]] = {}
-        for row in mcp_rows:
-            tool = (row.get("Tool") or "unknown").strip()
-            server = (row.get("Server") or "unknown").strip()
-            token_raw = (row.get("Tokens") or "").strip()
-            token_value = _parse_token_count(token_raw)
-            entries.append(
-                {
-                    "tool": tool,
-                    "server": server,
-                    "tokens_raw": token_raw,
-                    "tokens": token_value,
-                }
-            )
-            stats = server_totals.setdefault(server, {"tokens": 0, "count": 0})
-            stats["count"] += 1
-            if isinstance(token_value, int):
-                stats["tokens"] += token_value
-
-        entries = sorted(
-            entries,
-            key=lambda item: int(item.get("tokens") or 0),
-            reverse=True,
-        )
-        top_tools = entries[:10]
-        top_servers = sorted(
-            server_totals.items(),
-            key=lambda item: (item[1]["tokens"], item[1]["count"]),
-            reverse=True,
-        )[:6]
-
-        if lines:
-            lines.append("")
-        lines.append("[MCP Tools Summary]")
-        lines.append(f"tool_count: {len(entries)}")
-        lines.append(f"server_count: {len(server_totals)}")
-        lines.append("top_servers:")
-        for server, stats in top_servers:
-            lines.append(
-                f"- {server}: {stats['tokens']:,} tokens / {stats['count']} tools"
-            )
-        lines.append("top_tools:")
-        for item in top_tools:
-            token_value = item.get("tokens")
-            token_display = (
-                f"{int(token_value):,}"
-                if isinstance(token_value, int)
-                else item["tokens_raw"] or "n/a"
-            )
-            lines.append(f"- {item['tool']} ({item['server']}): {token_display}")
-        if len(entries) > len(top_tools):
-            lines.append(f"... and {len(entries) - len(top_tools)} more tools")
-
-    excluded_sections = {"Estimated usage by category", "MCP Tools"}
-    extra_sections: list[tuple[str, int, int]] = []
-    for section_name, rows in sections.items():
-        if section_name in excluded_sections or not rows:
-            continue
-        if "Tokens" not in rows[0]:
-            continue
-        total_tokens = 0
-        for row in rows:
-            parsed = _parse_token_count(row.get("Tokens"))
-            if isinstance(parsed, int):
-                total_tokens += parsed
-        extra_sections.append((section_name, len(rows), total_tokens))
-
-    if extra_sections:
-        extra_sections.sort(key=lambda item: item[2], reverse=True)
-        if lines:
-            lines.append("")
-        lines.append("[Other Token Sections]")
-        for section_name, row_count, total_tokens in extra_sections:
-            lines.append(
-                f"- {section_name}: {row_count} rows, approx {total_tokens:,} tokens"
-            )
-
-    return lines
+    return SessionInteractionService.split_context_full_text(
+        text=text,
+        max_length=max_length,
+    )
 
 
 def _build_status_full_payload(
@@ -306,146 +52,19 @@ def _build_status_full_payload(
     resumable_payload: dict | None,
 ) -> dict:
     """Build full status payload."""
-    return {
-        "mode": "full",
-        "directory": f"{relative_path}/",
-        "model": current_model or "default",
-        "session": {
-            "active": bool(claude_session_id),
-            "id": claude_session_id,
-            "id_short": f"{claude_session_id[:8]}..." if claude_session_id else None,
-        },
-        "context_payload": precise_context,
-        "session_info": info,
-        "resumable": resumable_payload,
-    }
-
-
-def _render_model_usage_lines(model_usage: dict | None) -> list[str]:
-    """Render model usage breakdown for full status output."""
-    if not isinstance(model_usage, dict) or not model_usage:
-        return ["model_usage: none"]
-
-    lines: list[str] = []
-    for model_name, usage in model_usage.items():
-        if not isinstance(usage, dict):
-            lines.append(f"- {model_name}: {usage}")
-            continue
-
-        input_tokens = int(usage.get("inputTokens", 0) or 0)
-        output_tokens = int(usage.get("outputTokens", 0) or 0)
-        cache_read = int(usage.get("cacheReadInputTokens", 0) or 0)
-        cache_create = int(usage.get("cacheCreationInputTokens", 0) or 0)
-        total_tokens = input_tokens + output_tokens + cache_read + cache_create
-        context_window = int(usage.get("contextWindow", 0) or 0)
-        window_source = usage.get("contextWindowSource")
-
-        lines.append(f"- {model_name}")
-        lines.append(f"  resolved_model: {usage.get('resolvedModel') or 'n/a'}")
-        lines.append(f"  input_tokens: {input_tokens:,}")
-        lines.append(f"  output_tokens: {output_tokens:,}")
-        lines.append(f"  cache_read_input_tokens: {cache_read:,}")
-        lines.append(f"  cache_creation_input_tokens: {cache_create:,}")
-        lines.append(f"  total_tokens: {total_tokens:,}")
-
-        if context_window > 0:
-            used_percent = total_tokens / context_window * 100
-            remaining = max(context_window - total_tokens, 0)
-            lines.append(f"  context_window: {context_window:,}")
-            lines.append(f"  context_window_source: {window_source or 'unknown'}")
-            lines.append(f"  usage_percent: {used_percent:.2f}%")
-            lines.append(f"  remaining_tokens: {remaining:,}")
-        else:
-            lines.append("  context_window: n/a")
-            lines.append(f"  context_window_source: {window_source or 'n/a'}")
-
-        if "costUSD" in usage:
-            lines.append(f"  cost_usd: {usage.get('costUSD')}")
-        if "maxOutputTokens" in usage:
-            lines.append(f"  max_output_tokens: {usage.get('maxOutputTokens')}")
-
-    return lines
+    return SessionInteractionService.build_context_full_payload(
+        relative_path=relative_path,
+        current_model=current_model,
+        claude_session_id=claude_session_id,
+        precise_context=precise_context,
+        info=info,
+        resumable_payload=resumable_payload,
+    )
 
 
 def _render_status_full_text(payload: dict) -> str:
     """Render readable full status plus raw payload JSON."""
-    session = payload.get("session") if isinstance(payload.get("session"), dict) else {}
-    context_payload = (
-        payload.get("context_payload")
-        if isinstance(payload.get("context_payload"), dict)
-        else None
-    )
-    session_info = (
-        payload.get("session_info")
-        if isinstance(payload.get("session_info"), dict)
-        else None
-    )
-
-    lines = [
-        "Session Status (full)",
-        "",
-        "[Summary]",
-        f"directory: {payload.get('directory')}",
-        f"model: {payload.get('model')}",
-        f"session_active: {session.get('active')}",
-        f"session_id: {session.get('id') or 'none'}",
-        f"session_id_short: {session.get('id_short') or 'none'}",
-    ]
-
-    if context_payload:
-        lines.extend(
-            [
-                "",
-                "[Context Payload]",
-                f"used_tokens: {int(context_payload.get('used_tokens', 0) or 0):,}",
-                f"total_tokens: {int(context_payload.get('total_tokens', 0) or 0):,}",
-                f"remaining_tokens: {int(context_payload.get('remaining_tokens', 0) or 0):,}",
-                f"used_percent: {float(context_payload.get('used_percent', 0.0) or 0.0):.2f}%",
-                f"cached: {bool(context_payload.get('cached', False))}",
-                f"context_session_id: {context_payload.get('session_id') or 'n/a'}",
-            ]
-        )
-
-        raw_text = str(context_payload.get("raw_text") or "")
-        if raw_text:
-            structured_lines = _build_context_table_summary_lines(raw_text)
-            if structured_lines:
-                lines.extend(["", "[/context Structured Summary]", *structured_lines])
-            else:
-                lines.extend(
-                    [
-                        "",
-                        "[/context Structured Summary]",
-                        "No markdown table summary detected in /context output.",
-                    ]
-                )
-    else:
-        lines.extend(["", "[Context Payload]", "context_payload: none"])
-
-    if session_info:
-        tools_used = session_info.get("tools_used")
-        tools_count = len(tools_used) if isinstance(tools_used, list) else 0
-        lines.extend(
-            [
-                "",
-                "[Session Info]",
-                f"project: {session_info.get('project')}",
-                f"created: {session_info.get('created')}",
-                f"last_used: {session_info.get('last_used')}",
-                f"cost_usd: {session_info.get('cost')}",
-                f"turns: {session_info.get('turns')}",
-                f"messages: {session_info.get('messages')}",
-                f"expired: {session_info.get('expired')}",
-                f"tools_used_count: {tools_count}",
-                "",
-                "[Model Usage]",
-            ]
-        )
-        lines.extend(_render_model_usage_lines(session_info.get("model_usage")))
-    else:
-        lines.extend(["", "[Session Info]", "session_info: none"])
-
-    return "\n".join(lines)
+    return SessionInteractionService.render_context_full_text(payload)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -461,7 +80,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• `/ls` - List files in current directory\n"
         f"• `/cd <dir>` - Change directory\n"
         f"• `/projects` - Show available projects\n"
-        f"• `/context [full]` - Show session status\n"
+        f"• `/context [full]` - Show session context\n"
         f"• `/actions` - Show quick actions\n"
         f"• `/git` - Git repository commands\n"
         f"• `/codexdiag` - Diagnose codex MCP status\n\n"
@@ -483,7 +102,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ],
         [
             InlineKeyboardButton("🆕 New Session", callback_data="action:new_session"),
-            InlineKeyboardButton("📊 Check Context", callback_data="action:status"),
+            InlineKeyboardButton("📊 Check Context", callback_data="action:context"),
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -513,7 +132,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/new` - Clear context and start a fresh session\n"
         "• `/continue [message]` - Explicitly continue last session\n"
         "• `/end` - End current session and clear context\n"
-        "• `/context [full]` - Show session and usage status\n"
+        "• `/context [full]` - Show session context and usage\n"
         "• `/export` - Export session history\n"
         "• `/actions` - Show context-aware quick actions\n"
         "• `/git` - Git repository information\n\n"
@@ -562,45 +181,29 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Get current directory (default to approved directory)
     current_dir = scope_state.get("current_directory", settings.approved_directory)
-    relative_path = current_dir.relative_to(settings.approved_directory)
 
-    # Track what was cleared for user feedback
-    old_session_id = scope_state.get("claude_session_id")
-
-    # Clear existing session data - this is the explicit way to reset context
-    scope_state["claude_session_id"] = None
-    scope_state["session_started"] = True
-    scope_state["force_new_session"] = True
-
-    cleared_info = ""
-    if old_session_id:
-        cleared_info = f"\n🗑️ Previous session `{old_session_id[:8]}...` cleared."
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📝 Start Coding", callback_data="action:start_coding"
-            ),
-            InlineKeyboardButton(
-                "📁 Change Project", callback_data="action:show_projects"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📋 Quick Actions", callback_data="action:quick_actions"
-            ),
-            InlineKeyboardButton("❓ Help", callback_data="action:help"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+        SessionLifecycleService(
+            permission_manager=context.bot_data.get("permission_manager")
+        )
+    )
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
+    reset_result = session_lifecycle.start_new_session(scope_state)
+    old_session_id = reset_result.old_session_id
+    session_message = session_interaction.build_new_session_message(
+        current_dir=current_dir,
+        approved_directory=settings.approved_directory,
+        previous_session_id=old_session_id,
+        for_callback=False,
+    )
 
     await update.message.reply_text(
-        f"🆕 **New Claude Code Session**\n\n"
-        f"📂 Working directory: `{relative_path}/`{cleared_info}\n\n"
-        f"Context has been cleared. Send a message to start fresh, "
-        f"or use the buttons below:",
+        session_message.text,
         parse_mode="Markdown",
-        reply_markup=reply_markup,
+        reply_markup=build_reply_markup_from_spec(session_message.keyboard),
     )
 
 
@@ -615,6 +218,15 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+        SessionLifecycleService(
+            permission_manager=context.bot_data.get("permission_manager")
+        )
+    )
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
 
     # Parse optional prompt from command arguments
     # If no prompt provided, use a default to continue the conversation
@@ -626,55 +238,43 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         if not claude_integration:
             await update.message.reply_text(
-                "❌ **Claude Integration Not Available**\n\n"
-                "Claude integration is not properly configured."
+                session_interaction.get_integration_unavailable_text()
             )
             return
 
         # Check if there's an existing session in user context
-        claude_session_id = scope_state.get("claude_session_id")
+        claude_session_id = session_lifecycle.get_active_session_id(scope_state)
+        permission_handler = build_permission_handler(
+            bot=context.bot,
+            chat_id=update.effective_chat.id,
+            settings=settings,
+        )
 
-        if claude_session_id:
-            # We have a session in context, continue it directly
-            status_msg = await update.message.reply_text(
-                f"🔄 **Continuing Session**\n\n"
-                f"Session ID: `{claude_session_id[:8]}...`\n"
-                f"Directory: `{current_dir.relative_to(settings.approved_directory)}/`\n\n"
-                f"{'Processing your message...' if prompt else 'Continuing where you left off...'}",
-                parse_mode="Markdown",
-            )
+        status_msg_text = session_interaction.build_continue_progress_text(
+            existing_session_id=claude_session_id,
+            current_dir=current_dir,
+            approved_directory=settings.approved_directory,
+            prompt=prompt,
+        )
+        status_msg = await update.message.reply_text(
+            status_msg_text,
+            parse_mode="Markdown",
+        )
 
-            # Continue with the existing session
-            # Use default prompt if none provided (Claude CLI requires a prompt)
-            claude_response = await claude_integration.run_command(
-                prompt=prompt or default_prompt,
-                working_directory=current_dir,
-                user_id=user_id,
-                session_id=claude_session_id,
-                permission_handler=build_permission_handler(
-                    bot=context.bot,
-                    chat_id=update.effective_chat.id,
-                    settings=settings,
-                ),
-            )
-        else:
-            # No session in context, try to find the most recent session
-            status_msg = await update.message.reply_text(
-                "🔍 **Looking for Recent Session**\n\n"
-                "Searching for your most recent session in this directory...",
-                parse_mode="Markdown",
-            )
+        continue_result = await session_lifecycle.continue_session(
+            user_id=user_id,
+            scope_state=scope_state,
+            current_dir=current_dir,
+            claude_integration=claude_integration,
+            prompt=prompt,
+            default_prompt=default_prompt,
+            permission_handler=permission_handler,
+            use_empty_prompt_when_existing=False,
+            allow_none_prompt_when_discover=False,
+        )
+        claude_response = continue_result.response
 
-            # Use default prompt if none provided
-            claude_response = await claude_integration.continue_session(
-                user_id=user_id,
-                working_directory=current_dir,
-                prompt=prompt or default_prompt,
-            )
-
-        if claude_response:
-            # Update session ID in context
-            scope_state["claude_session_id"] = claude_response.session_id
+        if continue_result.status == "continued" and claude_response:
 
             # Delete status message and send response
             await status_msg.delete()
@@ -703,29 +303,21 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     success=True,
                 )
 
-        else:
+        elif continue_result.status == "not_found":
             # No session found to continue
+            not_found_message = session_interaction.build_continue_not_found_message(
+                current_dir=current_dir,
+                approved_directory=settings.approved_directory,
+                for_callback=False,
+            )
             await status_msg.edit_text(
-                "❌ **No Session Found**\n\n"
-                f"No recent Claude session found in this directory.\n"
-                f"Directory: `{current_dir.relative_to(settings.approved_directory)}/`\n\n"
-                f"**What you can do:**\n"
-                f"• Use `/new` to start a fresh session\n"
-                f"• Use `/context` to check your sessions\n"
-                f"• Navigate to a different directory with `/cd`",
+                not_found_message.text,
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                "🆕 New Session", callback_data="action:new_session"
-                            ),
-                            InlineKeyboardButton(
-                                "📊 Context", callback_data="action:status"
-                            ),
-                        ]
-                    ]
-                ),
+                reply_markup=build_reply_markup_from_spec(not_found_message.keyboard),
+            )
+        else:
+            await status_msg.edit_text(
+                session_interaction.get_integration_unavailable_text(),
             )
 
     except Exception as e:
@@ -741,13 +333,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         # Send error response
         await update.message.reply_text(
-            f"❌ **Error Continuing Session**\n\n"
-            f"An error occurred while trying to continue your session:\n\n"
-            f"`{error_msg}`\n\n"
-            f"**Suggestions:**\n"
-            f"• Try starting a new session with `/new`\n"
-            f"• Check your session status with `/context`\n"
-            f"• Contact support if the issue persists",
+            session_interaction.build_continue_command_error_text(error_msg),
             parse_mode="Markdown",
         )
 
@@ -936,34 +522,24 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Update current directory in user data
         scope_state["current_directory"] = resolved_path
 
-        # Look up existing session for the new directory instead of clearing
-        claude_integration: ClaudeIntegration = context.bot_data.get(
-            "claude_integration"
-        )
-        resumed_session_info = ""
-        if claude_integration:
-            existing_session = await claude_integration._find_resumable_session(
-                user_id, resolved_path
-            )
-            if existing_session:
-                scope_state["claude_session_id"] = existing_session.session_id
-                resumed_session_info = (
-                    f"\n🔄 Resumed session `{existing_session.session_id[:8]}...` "
-                    f"({existing_session.message_count} messages)"
-                )
-            else:
-                # No session for this directory - clear the current one
-                scope_state["claude_session_id"] = None
-                resumed_session_info = (
-                    "\n🆕 No existing session. Send a message to start a new one."
-                )
+        # Clear session when changing directory to prevent cross-topic session
+        # leakage.  The user can explicitly resume via /continue or /resume.
+        old_session_id = scope_state.get("claude_session_id")
+        scope_state["claude_session_id"] = None
+        scope_state["force_new_session"] = True
+        if old_session_id:
+            permission_manager = context.bot_data.get("permission_manager")
+            if permission_manager:
+                permission_manager.clear_session(old_session_id)
+
+        session_info = "\n🆕 Session cleared. Send a message to start a new one."
 
         # Send confirmation
         relative_path = resolved_path.relative_to(settings.approved_directory)
         await update.message.reply_text(
             f"✅ **Directory Changed**\n\n"
             f"📂 Current directory: `{relative_path}/`"
-            f"{resumed_session_info}",
+            f"{session_info}",
             parse_mode="Markdown",
         )
 
@@ -1084,99 +660,58 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         update=update,
         default_directory=settings.approved_directory,
     )
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
     full_mode = _is_context_full_mode(context)
-    status_msg = await update.message.reply_text("⏳ 正在获取会话状态，请稍候...")
+    view_spec = session_interaction.build_context_view_spec(
+        for_callback=False,
+        full_mode=full_mode,
+    )
+    loading_kwargs = {}
+    if view_spec.loading_parse_mode:
+        loading_kwargs["parse_mode"] = view_spec.loading_parse_mode
+    status_msg = await update.message.reply_text(
+        view_spec.loading_text,
+        **loading_kwargs,
+    )
 
     try:
-        claude_session_id = scope_state.get("claude_session_id")
-        current_dir = scope_state.get("current_directory", settings.approved_directory)
-        relative_path = current_dir.relative_to(settings.approved_directory)
-        current_model = scope_state.get("claude_model")
-
-        status_lines = [
-            "**Session Status**\n",
-            f"Directory: `{relative_path}/`",
-            f"Model: `{current_model or 'default'}`",
-        ]
+        session_service = context.bot_data.get("session_service")
         claude_integration: ClaudeIntegration = context.bot_data.get(
             "claude_integration"
         )
-        precise_context = None
-        info = None
-        resumable_payload = None
-
-        if claude_session_id:
-            status_lines.append(f"Session: `{claude_session_id[:8]}...`")
-            if claude_integration:
-                precise_context = await claude_integration.get_precise_context_usage(
-                    session_id=claude_session_id,
-                    working_directory=current_dir,
-                    model=current_model,
-                )
-                if precise_context:
-                    status_lines.extend(
-                        build_precise_context_status_lines(precise_context)
-                    )
-
-                info = await claude_integration.get_session_info(claude_session_id)
-                if info:
-                    status_lines.append(f"Messages: {info.get('messages', 0)}")
-                    status_lines.append(f"Turns: {info.get('turns', 0)}")
-                    status_lines.append(f"Cost: `${info.get('cost', 0.0):.4f}`")
-
-                    # Model usage details
-                    model_usage = info.get("model_usage")
-                    if model_usage and not precise_context:
-                        status_lines.extend(
-                            build_model_usage_status_lines(
-                                model_usage=model_usage,
-                                current_model=current_model,
-                                allow_estimated_ratio=True,
-                            )
-                        )
-        else:
-            status_lines.append("Session: none")
-
-            # Check for resumable session
-            if claude_integration:
-                existing = await claude_integration._find_resumable_session(
-                    user_id, current_dir
-                )
-                if existing:
-                    resumable_payload = {
-                        "session_id": existing.session_id,
-                        "message_count": existing.message_count,
-                    }
-                    status_lines.append(
-                        f"Resumable: `{existing.session_id[:8]}...` "
-                        f"({existing.message_count} msgs)"
-                    )
-
-        if full_mode:
-            payload = _build_status_full_payload(
-                relative_path=relative_path,
-                current_model=current_model,
-                claude_session_id=claude_session_id,
-                precise_context=precise_context,
-                info=info,
-                resumable_payload=resumable_payload,
-            )
-            full_text = _render_status_full_text(payload)
-            chunks = _split_status_text(full_text)
-            await status_msg.edit_text(chunks[0], parse_mode=None)
-            for extra_chunk in chunks[1:]:
-                await update.message.reply_text(extra_chunk, parse_mode=None)
-        else:
-            await status_msg.edit_text(
-                "\n".join(status_lines),
-                parse_mode="Markdown",
+        snapshot = await SessionService.build_scope_context_snapshot(
+            user_id=user_id,
+            scope_state=scope_state,
+            approved_directory=settings.approved_directory,
+            claude_integration=claude_integration,
+            session_service=session_service,
+            include_resumable=view_spec.include_resumable,
+            include_event_summary=view_spec.include_event_summary,
+        )
+        render_result = session_interaction.build_context_render_result(
+            snapshot=snapshot,
+            scope_state=scope_state,
+            approved_directory=settings.approved_directory,
+            full_mode=full_mode,
+        )
+        await status_msg.edit_text(
+            render_result.primary_text,
+            parse_mode=render_result.parse_mode,
+        )
+        for extra_text in render_result.extra_texts:
+            await update.message.reply_text(
+                extra_text,
+                parse_mode=render_result.parse_mode,
             )
     except Exception as e:
-        logger.error("Error in status command", error=str(e), user_id=user_id)
+        logger.error("Error in context command", error=str(e), user_id=user_id)
         try:
-            await status_msg.edit_text("❌ 获取状态失败，请稍后重试。")
+            await status_msg.edit_text(view_spec.error_text)
         except Exception:
-            await update.message.reply_text("❌ 获取状态失败，请稍后重试。")
+            await update.message.reply_text(view_spec.error_text)
 
 
 async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1189,55 +724,43 @@ async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         default_directory=settings.approved_directory,
     )
     features = context.bot_data.get("features")
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
 
     # Check if session export is available
     session_exporter = features.get_session_export() if features else None
 
     if not session_exporter:
         await update.message.reply_text(
-            "📤 **Export Session**\n\n"
-            "Session export functionality is not available.\n\n"
-            "**Planned features:**\n"
-            "• Export conversation history\n"
-            "• Save session state\n"
-            "• Share conversations\n"
-            "• Create session backups"
+            session_interaction.build_export_unavailable_text(for_callback=False)
         )
         return
 
+    session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+        SessionLifecycleService(
+            permission_manager=context.bot_data.get("permission_manager")
+        )
+    )
+
     # Get current session
-    claude_session_id = scope_state.get("claude_session_id")
+    claude_session_id = session_lifecycle.get_active_session_id(scope_state)
 
     if not claude_session_id:
         await update.message.reply_text(
-            "❌ **No Active Session**\n\n"
-            "There's no active Claude session to export.\n\n"
-            "**What you can do:**\n"
-            "• Start a new session with `/new`\n"
-            "• Continue an existing session with `/continue`\n"
-            "• Check your status with `/context`"
+            session_interaction.build_export_no_active_session_text()
         )
         return
 
-    # Create export format selection keyboard
-    keyboard = [
-        [
-            InlineKeyboardButton("📝 Markdown", callback_data="export:markdown"),
-            InlineKeyboardButton("🌐 HTML", callback_data="export:html"),
-        ],
-        [
-            InlineKeyboardButton("📋 JSON", callback_data="export:json"),
-            InlineKeyboardButton("❌ Cancel", callback_data="export:cancel"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    export_selector = session_interaction.build_export_selector_message(
+        claude_session_id
+    )
 
     await update.message.reply_text(
-        "📤 **Export Session**\n\n"
-        f"Ready to export session: `{claude_session_id[:8]}...`\n\n"
-        "**Choose export format:**",
+        export_selector.text,
         parse_mode="Markdown",
-        reply_markup=reply_markup,
+        reply_markup=build_reply_markup_from_spec(export_selector.keyboard),
     )
 
 
@@ -1251,60 +774,47 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         default_directory=settings.approved_directory,
     )
 
-    # Check if there's an active session
-    claude_session_id = scope_state.get("claude_session_id")
+    session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+        SessionLifecycleService(
+            permission_manager=context.bot_data.get("permission_manager")
+        )
+    )
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
+    end_result = session_lifecycle.end_session(scope_state)
 
-    if not claude_session_id:
+    if not end_result.had_active_session:
+        no_active_message = session_interaction.build_end_no_active_message(
+            for_callback=False
+        )
         await update.message.reply_text(
-            "ℹ️ **No Active Session**\n\n"
-            "There's no active Claude session to end.\n\n"
-            "**What you can do:**\n"
-            "• Use `/new` to start a new session\n"
-            "• Use `/context` to check your session status\n"
-            "• Send any message to start a conversation"
+            no_active_message.text,
+            reply_markup=build_reply_markup_from_spec(no_active_message.keyboard),
         )
         return
 
     # Get current directory for display
     current_dir = scope_state.get("current_directory", settings.approved_directory)
-    relative_path = current_dir.relative_to(settings.approved_directory)
-
-    # Clear session data
-    scope_state["claude_session_id"] = None
-    scope_state["session_started"] = False
-    scope_state["last_message"] = None
-
-    # Create quick action buttons
-    keyboard = [
-        [
-            InlineKeyboardButton("🆕 New Session", callback_data="action:new_session"),
-            InlineKeyboardButton(
-                "📁 Change Project", callback_data="action:show_projects"
-            ),
-        ],
-        [
-            InlineKeyboardButton("📊 Context", callback_data="action:status"),
-            InlineKeyboardButton("❓ Help", callback_data="action:help"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        "✅ **Session Ended**\n\n"
-        f"Your Claude session has been terminated.\n\n"
-        f"**Current Status:**\n"
-        f"• Directory: `{relative_path}/`\n"
-        f"• Session: None\n"
-        f"• Ready for new commands\n\n"
-        f"**Next Steps:**\n"
-        f"• Start a new session with `/new`\n"
-        f"• Check status with `/context`\n"
-        f"• Send any message to begin a new conversation",
-        parse_mode="Markdown",
-        reply_markup=reply_markup,
+    end_message = session_interaction.build_end_success_message(
+        current_dir=current_dir,
+        approved_directory=settings.approved_directory,
+        for_callback=False,
+        title="Session Ended",
     )
 
-    logger.info("Session ended by user", user_id=user_id, session_id=claude_session_id)
+    await update.message.reply_text(
+        end_message.text,
+        parse_mode="Markdown",
+        reply_markup=build_reply_markup_from_spec(end_message.keyboard),
+    )
+
+    logger.info(
+        "Session ended by user",
+        user_id=user_id,
+        session_id=end_result.ended_session_id,
+    )
 
 
 async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

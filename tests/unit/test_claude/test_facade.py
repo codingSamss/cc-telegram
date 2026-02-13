@@ -128,23 +128,23 @@ class TestClaudeIntegrationFacade:
         assert result is fallback_response
         process_manager.execute_command.assert_awaited_once()
 
-    async def test_text_request_with_permission_callback_still_uses_query_mode(
+    async def test_text_request_with_permission_callback_uses_client_mode(
         self, tmp_path
     ):
-        """When SDK is enabled, stability mode should bypass SDKClient path."""
+        """Permission callback must use SDK client mode for tool approval."""
         config = _build_config(tmp_path, use_sdk=True)
 
-        query_response = ClaudeResponse(
-            content="query ok",
-            session_id="query-session",
+        client_response = ClaudeResponse(
+            content="client ok",
+            session_id="client-session",
             cost=0.0,
             duration_ms=12,
             num_turns=1,
         )
 
         sdk_manager = MagicMock()
-        sdk_manager.execute_command = AsyncMock(return_value=query_response)
-        sdk_manager.execute_with_client = AsyncMock()
+        sdk_manager.execute_command = AsyncMock()
+        sdk_manager.execute_with_client = AsyncMock(return_value=client_response)
 
         process_manager = MagicMock()
         process_manager.execute_command = AsyncMock()
@@ -153,16 +153,50 @@ class TestClaudeIntegrationFacade:
             config=config, sdk_manager=sdk_manager, process_manager=process_manager
         )
 
+        permission_callback = AsyncMock()
         result = await facade._execute_with_fallback(
             prompt="hello",
             working_directory=tmp_path,
-            permission_callback=AsyncMock(),
+            permission_callback=permission_callback,
             images=None,
         )
 
-        assert result is query_response
-        sdk_manager.execute_command.assert_awaited_once()
-        sdk_manager.execute_with_client.assert_not_awaited()
+        assert result is client_response
+        sdk_manager.execute_with_client.assert_awaited_once()
+        sdk_manager.execute_command.assert_not_awaited()
+        process_manager.execute_command.assert_not_awaited()
+
+    async def test_permission_callback_retryable_sdk_error_denies_subprocess_fallback(
+        self, tmp_path
+    ):
+        """Permission-gated failures should deny by default instead of bypassing approval."""
+        config = _build_config(tmp_path, use_sdk=True)
+
+        sdk_manager = MagicMock()
+        sdk_manager.execute_command = AsyncMock()
+        sdk_manager.execute_with_client = AsyncMock(
+            side_effect=ClaudeTimeoutError("SDK timeout")
+        )
+
+        process_manager = MagicMock()
+        process_manager.execute_command = AsyncMock()
+
+        facade = _build_facade(
+            config=config, sdk_manager=sdk_manager, process_manager=process_manager
+        )
+
+        with pytest.raises(ClaudeProcessError) as exc_info:
+            await facade._execute_with_fallback(
+                prompt="hello",
+                working_directory=tmp_path,
+                permission_callback=AsyncMock(),
+                images=None,
+            )
+
+        assert "denied by default" in str(exc_info.value)
+        sdk_manager.execute_with_client.assert_awaited_once()
+        sdk_manager.execute_command.assert_not_awaited()
+        process_manager.execute_command.assert_not_awaited()
 
     async def test_get_precise_context_usage_parses_and_uses_cache(self, tmp_path):
         """Exact context probe should parse /context output and cache by session."""
@@ -346,7 +380,9 @@ class TestClaudeIntegrationFacade:
         assert payload["total_tokens"] == 200_000
         assert payload["remaining_tokens"] == 167_464
 
-    def test_parse_context_usage_text_can_infer_total_from_used_and_percent(self, tmp_path):
+    def test_parse_context_usage_text_can_infer_total_from_used_and_percent(
+        self, tmp_path
+    ):
         """Parser should infer totals when only used+percent are provided."""
         config = _build_config(tmp_path, use_sdk=False)
         facade = _build_facade(config, sdk_manager=None, process_manager=MagicMock())

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.bot.features.session_export import ExportFormat, ExportedSession
+from src.bot.features.session_export import ExportedSession, ExportFormat
 from src.bot.handlers.callback import _handle_export_action, handle_export_callback
 
 
@@ -29,11 +29,20 @@ def _build_query(user_id: int = 1001):
     return query
 
 
-def _build_context(exporter, session_id: str | None = "session-abc-123"):
+def _build_context(
+    exporter,
+    session_id: str | None = "session-abc-123",
+    *,
+    user_id: int = 1001,
+):
     """Build a minimal callback context stub."""
+    scope_key = f"{user_id}:{user_id}:0"
+    scope_state = {}
+    if session_id is not None:
+        scope_state["claude_session_id"] = session_id
     return SimpleNamespace(
         bot_data={"features": _FakeFeatures(exporter)},
-        user_data={"claude_session_id": session_id},
+        user_data={"scope_state": {scope_key: scope_state}},
     )
 
 
@@ -52,7 +61,7 @@ async def test_handle_export_callback_calls_exporter_with_correct_signature():
         )
     )
     query = _build_query(user_id=42)
-    context = _build_context(exporter, session_id="session-xyz")
+    context = _build_context(exporter, session_id="session-xyz", user_id=42)
 
     await handle_export_callback(query, "markdown", context)
 
@@ -98,4 +107,3 @@ async def test_handle_export_action_shows_format_keyboard_for_active_session():
     assert keyboard[0][1].callback_data == "export:html"
     assert keyboard[1][0].callback_data == "export:json"
     assert keyboard[1][1].callback_data == "export:cancel"
-

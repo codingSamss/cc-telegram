@@ -59,6 +59,11 @@ class TestStorageFacade:
         updated_user = await storage.users.get_user(12346)
         assert updated_user.session_count == 1
 
+        # Session semantic event should be recorded
+        events = await storage.session_events.get_session_events("test-session-123")
+        assert len(events) == 1
+        assert events[0].event_type == "session_created"
+
     async def test_save_claude_interaction(self, storage):
         """Test saving Claude interaction."""
         # Setup user and session
@@ -95,6 +100,14 @@ class TestStorageFacade:
         tool_usage = await storage.tools.get_session_tool_usage("claude-session")
         assert len(tool_usage) == 1
         assert tool_usage[0].tool_name == "Read"
+
+        # Check semantic session events were saved
+        events = await storage.session_events.get_session_events("claude-session")
+        event_types = {event.event_type for event in events}
+        assert "command_exec" in event_types
+        assert "assistant_text" in event_types
+        assert "tool_call" in event_types
+        assert "tool_result" in event_types
 
         # Check user stats were updated
         updated_user = await storage.users.get_user(12347)
@@ -188,6 +201,7 @@ class TestStorageFacade:
         assert history is not None
         assert len(history["messages"]) == 2
         assert len(history["tool_usage"]) == 1  # Only first message had tools
+        assert len(history["events"]) >= 1
         assert history["session"]["session_id"] == "history-session"
 
     async def test_log_security_event(self, storage):

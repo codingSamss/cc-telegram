@@ -210,6 +210,39 @@ class AuditLogModel:
 
 
 @dataclass
+class SessionEventModel:
+    """Session event model for semantic timeline replay."""
+
+    session_id: str
+    event_type: str
+    event_data: Dict[str, Any]
+    created_at: datetime
+    id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        data = asdict(self)
+        if data["created_at"]:
+            data["created_at"] = data["created_at"].isoformat()
+        return data
+
+    @classmethod
+    def from_row(cls, row: aiosqlite.Row) -> "SessionEventModel":
+        """Create from database row."""
+        data = dict(row)
+
+        if data.get("created_at"):
+            data["created_at"] = datetime.fromisoformat(data["created_at"])
+
+        try:
+            data["event_data"] = json.loads(data["event_data"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            data["event_data"] = {}
+
+        return cls(**data)
+
+
+@dataclass
 class CostTrackingModel:
     """Cost tracking data model."""
 
