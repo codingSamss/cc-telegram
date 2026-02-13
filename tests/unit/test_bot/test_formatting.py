@@ -188,6 +188,62 @@ class TestResponseFormatter:
         # Code block content should not be escaped
         assert "code_with_underscores" in result
 
+    def test_normalize_headings(self, formatter):
+        """Test Markdown headings are converted to bold text."""
+        text = "# Title\n## Subtitle\n### Section\nNormal text"
+        result = formatter._normalize_markdown_outside_code(text)
+
+        assert "*Title*" in result
+        assert "*Subtitle*" in result
+        assert "*Section*" in result
+        assert "Normal text" in result
+        # Hash signs should be removed
+        assert "# Title" not in result
+        assert "## Subtitle" not in result
+        assert "### Section" not in result
+
+    def test_normalize_headings_in_code_block_preserved(self, formatter):
+        """Test headings inside code blocks are not converted."""
+        text = "```\n# This is a comment\n## Another comment\n```"
+        result = formatter._normalize_markdown_outside_code(text)
+
+        assert "# This is a comment" in result
+        assert "## Another comment" in result
+
+    def test_normalize_horizontal_rule(self, formatter):
+        """Test horizontal rules are converted to visual separators."""
+        for rule in ["---", "***", "___", "-----"]:
+            result = formatter._normalize_markdown_outside_code(
+                f"Above\n{rule}\nBelow"
+            )
+            assert "———" in result
+            assert rule not in result
+
+    def test_normalize_horizontal_rule_in_code_block_preserved(self, formatter):
+        """Test horizontal rules inside code blocks are not converted."""
+        text = "```\n---\n```"
+        result = formatter._normalize_markdown_outside_code(text)
+
+        assert "---" in result
+        assert "———" not in result
+
+    def test_normalize_strikethrough(self, formatter):
+        """Test strikethrough ~~text~~ is converted to ~text~."""
+        text = "This is ~~deleted~~ text"
+        result = formatter._normalize_markdown_outside_code(text)
+
+        assert "~deleted~" in result
+        assert "~~deleted~~" not in result
+
+    def test_normalize_heading_with_bold(self, formatter):
+        """Test heading containing bold text is handled correctly."""
+        text = "### **Important Title**"
+        result = formatter._normalize_markdown_outside_code(text)
+
+        # Heading converted to bold; inner ** also normalized
+        assert "#" not in result
+        assert "Important Title" in result
+
     def test_truncate_long_code_block(self, formatter):
         """Test truncation of very long code blocks."""
         long_code = "x" * 4000

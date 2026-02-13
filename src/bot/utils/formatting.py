@@ -442,6 +442,8 @@ class ResponseFormatter:
         """Normalize common Markdown markers outside of code blocks.
 
         Telegram legacy Markdown uses `*bold*` instead of `**bold**`.
+        Also converts Markdown elements that Telegram does not support
+        (headings, horizontal rules, strikethrough) into compatible formats.
         """
 
         def _normalize_segment(segment: str) -> str:
@@ -451,7 +453,36 @@ class ResponseFormatter:
                 r"*\1*",
                 segment,
             )
+            # Convert strikethrough ~~text~~ to Telegram-compatible ~text~
+            # (supported in Telegram legacy Markdown parse mode).
+            segment = re.sub(
+                r"~~(?=\S)(.+?)(?<=\S)~~",
+                r"~\1~",
+                segment,
+            )
             return segment
+
+        def _normalize_line(line: str) -> str:
+            """Normalize a single non-code-block line."""
+            stripped = line.strip()
+
+            # Convert Markdown headings (# / ## / ### etc.) to bold text.
+            heading_match = re.match(r"^(\s*)(#{1,6})\s+(.+)$", line)
+            if heading_match:
+                indent = heading_match.group(1)
+                content = heading_match.group(3).rstrip()
+                return f"{indent}*{content}*"
+
+            # Convert horizontal rules (---, ***, ___) to a visual separator.
+            if re.match(r"^\s*[-*_]{3,}\s*$", stripped):
+                return "———"
+
+            # Preserve inline code blocks while normalizing plain text.
+            line_parts = line.split("`")
+            for i, part in enumerate(line_parts):
+                if i % 2 == 0:
+                    line_parts[i] = _normalize_segment(part)
+            return "`".join(line_parts)
 
         parts = []
         in_code_block = False
@@ -463,12 +494,7 @@ class ResponseFormatter:
             elif in_code_block:
                 parts.append(line)
             else:
-                # Preserve inline code blocks while normalizing plain text.
-                line_parts = line.split("`")
-                for i, part in enumerate(line_parts):
-                    if i % 2 == 0:
-                        line_parts[i] = _normalize_segment(part)
-                parts.append("`".join(line_parts))
+                parts.append(_normalize_line(line))
 
         return "\n".join(parts)
 
