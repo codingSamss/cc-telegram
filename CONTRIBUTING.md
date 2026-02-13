@@ -1,121 +1,121 @@
-# Contributing to Claude Code Telegram Bot
+# 贡献指南 - Claude Code Telegram Bot
 
-Thank you for your interest in contributing! This document provides guidelines for contributing to the project.
+感谢你有兴趣为本项目做贡献！本文档提供了参与贡献的指引。
 
-## Development Status
+## 开发状态
 
-This project is currently under active development with the following status:
+本项目目前正在积极开发中，当前进度：
 
-- ✅ **Project Structure & Configuration** (Complete)
-- ✅ **Authentication & Security** (Complete)
-- ✅ **Bot Core & Integration** (TODO-4, TODO-5, Complete)
-- ✅ **Storage Layer** (TODO-6, Complete)
-- 🚧 **Advanced Features** (TODO-7, Next)
+- **项目结构与配置**（完成）
+- **认证与安全**（完成）
+- **Bot 核心与集成**（TODO-4、TODO-5，完成）
+- **存储层**（TODO-6，完成）
+- **高级功能**（TODO-7，下一步）
 
-## Getting Started
+## 快速上手
 
-### Prerequisites
+### 前置条件
 
-- Python 3.9 or higher
-- Poetry for dependency management
-- Git for version control
+- Python 3.9 或更高版本
+- Poetry 依赖管理工具
+- Git 版本控制
 
-### Setting Up Development Environment
+### 配置开发环境
 
-1. **Fork and clone the repository**:
+1. **Fork 并克隆仓库**：
    ```bash
    git clone https://github.com/your-username/claude-code-telegram.git
    cd claude-code-telegram
    ```
 
-2. **Install dependencies**:
+2. **安装依赖**：
    ```bash
    make dev
    ```
 
-3. **Set up configuration**:
+3. **配置环境**：
    ```bash
    cp .env.example .env
-   # Edit .env with your development settings
+   # 编辑 .env 填写你的开发配置
    ```
 
-4. **Verify setup**:
+4. **验证配置**：
    ```bash
    make test
    make lint
    ```
 
-## Development Workflow
+## 开发流程
 
-### Before Starting Work
+### 开始工作前
 
-1. **Check existing issues** for similar work
-2. **Create an issue** if none exists
-3. **Comment on the issue** to indicate you're working on it
-4. **Create a feature branch** from main
+1. **查看已有 issue**，看是否有类似工作
+2. 如果没有，**创建一个 issue**
+3. **在 issue 下评论**表示你正在处理
+4. 从 main 分支**创建功能分支**
 
-### Making Changes
+### 进行修改
 
-1. **Follow the project structure**:
+1. **遵循项目结构**：
    ```
    src/
-   ├── config/     # Configuration (✅ Complete)
-   ├── security/   # Authentication & Security (✅ Complete)
-   ├── bot/        # Telegram bot (✅ Complete - TODO-4)  
-   ├── claude/     # Claude integration (✅ Complete - TODO-5)
-   └── storage/    # Database (✅ Complete - TODO-6)
+   ├── config/     # 配置（完成）
+   ├── security/   # 认证与安全（完成）
+   ├── bot/        # Telegram bot（完成 - TODO-4）
+   ├── claude/     # Claude 集成（完成 - TODO-5）
+   └── storage/    # 数据库（完成 - TODO-6）
    ```
 
-2. **Write tests** for new functionality:
+2. **为新功能编写测试**：
    ```bash
-   # Add tests in tests/unit/ or tests/integration/
+   # 在 tests/unit/ 或 tests/integration/ 中添加测试
    make test
    ```
 
-3. **Follow code standards**:
+3. **遵循代码规范**：
    ```bash
-   make format  # Auto-format code
-   make lint    # Check code quality
+   make format  # 自动格式化代码
+   make lint    # 检查代码质量
    ```
 
-4. **Update documentation** as needed
+4. 按需**更新文档**
 
-### Code Standards
+### 代码规范
 
-#### Type Hints
+#### 类型标注
 
-All code must include comprehensive type hints:
+所有代码必须包含完整的类型标注：
 
 ```python
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
 async def process_data(
-    items: List[Dict[str, Any]], 
+    items: List[Dict[str, Any]],
     config: Optional[Path] = None
 ) -> bool:
-    """Process data with optional config."""
-    # Implementation
+    """使用可选配置处理数据。"""
+    # 实现
     return True
 ```
 
-#### Error Handling
+#### 错误处理
 
-Use the custom exception hierarchy:
+使用自定义异常层级：
 
 ```python
 from src.exceptions import ConfigurationError, SecurityError
 
 try:
-    # Some operation
+    # 某些操作
     pass
 except ValueError as e:
-    raise ConfigurationError(f"Invalid configuration: {e}") from e
+    raise ConfigurationError(f"无效配置: {e}") from e
 ```
 
-#### Logging
+#### 日志
 
-Use structured logging:
+使用结构化日志：
 
 ```python
 import structlog
@@ -124,12 +124,12 @@ logger = structlog.get_logger()
 
 def some_function():
     logger.info("Operation started", operation="example", user_id=123)
-    # Implementation
+    # 实现
 ```
 
-#### Testing
+#### 测试
 
-Write comprehensive tests:
+编写全面的测试：
 
 ```python
 import pytest
@@ -137,213 +137,213 @@ from src.config import create_test_config
 
 @pytest.mark.asyncio
 async def test_feature():
-    """Test feature functionality."""
+    """测试功能。"""
     config = create_test_config(debug=True)
-    # Test implementation
+    # 测试实现
     assert config.debug is True
 ```
 
-## Contribution Types
+## 贡献类型
 
-### High Priority (Current TODOs)
+### 高优先级（当前 TODO）
 
-#### TODO-7: Advanced Features (Next Priority)
-- File upload handling with security validation
-- Git integration for repository operations
-- Quick actions system for common workflows
-- Session export features (Markdown, JSON, HTML)
-- Image/screenshot support and processing
+#### TODO-7: 高级功能（当前优先）
+- 带安全验证的文件上传处理
+- 仓库操作的 Git 集成
+- 常用工作流的快捷操作系统
+- 会话导出功能（Markdown、JSON、HTML）
+- 图片/截图支持与处理
 
-**Files to create/modify**:
+**需要创建/修改的文件**：
 - `src/bot/handlers/file.py`
 - `src/git/integration.py`
 - `src/features/quick_actions.py`
 - `src/features/export.py`
 - `tests/unit/test_features.py`
 
-### Recently Completed ✅
+### 近期已完成
 
-#### TODO-4: Telegram Bot Core
-- ✅ Bot connection and handler registration
-- ✅ Command routing system
-- ✅ Message parsing and formatting
-- ✅ Inline keyboard support
-- ✅ Error handling middleware
+#### TODO-4: Telegram Bot 核心
+- Bot 连接和处理器注册
+- 命令路由系统
+- 消息解析和格式化
+- 内联键盘支持
+- 错误处理中间件
 
-#### TODO-5: Claude Code Integration
-- ✅ Subprocess management for Claude CLI
-- ✅ Response streaming and parsing
-- ✅ Session state persistence
-- ✅ Timeout handling
-- ✅ Tool usage monitoring
+#### TODO-5: Claude Code 集成
+- Claude CLI 子进程管理
+- 响应流式传输和解析
+- 会话状态持久化
+- 超时处理
+- 工具使用监控
 
-#### TODO-6: Storage Layer
-- ✅ SQLite database schema
-- ✅ Repository pattern implementation
-- ✅ Migration system
-- ✅ Analytics and reporting
+#### TODO-6: 存储层
+- SQLite 数据库模式
+- 仓储模式实现
+- 迁移系统
+- 分析与报告
 
-### Documentation Improvements
+### 文档改进
 
-- API documentation
-- User guides
-- Deployment guides
-- Architecture documentation
+- API 文档
+- 用户指南
+- 部署指南
+- 架构文档
 
-### Testing Improvements
+### 测试改进
 
-- Integration tests
-- End-to-end tests
-- Performance tests
-- Security tests
+- 集成测试
+- 端到端测试
+- 性能测试
+- 安全测试
 
-## Submitting Changes
+## 提交变更
 
-### Pull Request Process
+### Pull Request 流程
 
-1. **Ensure tests pass**:
+1. **确保测试通过**：
    ```bash
    make test
    make lint
    ```
 
-2. **Update documentation** if needed
+2. 按需**更新文档**
 
-3. **Create pull request** with:
-   - Clear title and description
-   - Reference to related issue
-   - List of changes made
-   - Screenshots if UI-related
+3. **创建 Pull Request** 并包含：
+   - 清晰的标题和描述
+   - 关联的 issue
+   - 变更列表
+   - 如涉及 UI 则附截图
 
-4. **Respond to review feedback** promptly
+4. **及时回应审查反馈**
 
-### Commit Message Format
+### 提交信息格式
 
-Use conventional commits:
+使用约定式提交：
 
 ```
 feat: add rate limiting functionality
-fix: resolve configuration validation issue  
+fix: resolve configuration validation issue
 docs: update development guide
 test: add tests for authentication system
 refactor: reorganize bot handlers
 ```
 
-### Pull Request Template
+### Pull Request 模板
 
 ```markdown
-## Description
-Brief description of changes made.
+## 描述
+简要描述所做的变更。
 
-## Related Issue
+## 关联 Issue
 Fixes #123
 
-## Type of Change
-- [ ] Bug fix
-- [ ] New feature  
-- [ ] Breaking change
-- [ ] Documentation update
+## 变更类型
+- [ ] Bug 修复
+- [ ] 新功能
+- [ ] 破坏性变更
+- [ ] 文档更新
 
-## Testing
-- [ ] Tests added/updated
-- [ ] All tests pass
-- [ ] Manual testing completed
+## 测试
+- [ ] 已添加/更新测试
+- [ ] 所有测试通过
+- [ ] 已完成手动测试
 
-## Checklist
-- [ ] Code follows project style guidelines
-- [ ] Self-review completed
-- [ ] Documentation updated
-- [ ] No breaking changes (or clearly documented)
+## 检查清单
+- [ ] 代码遵循项目风格指南
+- [ ] 已完成自查
+- [ ] 文档已更新
+- [ ] 无破坏性变更（或已明确记录）
 ```
 
-## Code Review Guidelines
+## 代码审查指南
 
-### For Contributors
+### 对贡献者
 
-- **Self-review** your code before submitting
-- **Write clear commit messages** and PR descriptions
-- **Respond promptly** to review feedback
-- **Keep PRs focused** on a single change
-- **Add tests** for new functionality
+- 提交前**自查**代码
+- **编写清晰的提交信息**和 PR 描述
+- **及时回应**审查反馈
+- **保持 PR 聚焦**于单一变更
+- 为新功能**添加测试**
 
-### For Reviewers
+### 对审查者
 
-- **Be constructive** and helpful in feedback
-- **Test functionality** when possible
-- **Check for security implications**
-- **Verify documentation updates**
-- **Ensure tests are comprehensive**
+- 提供**建设性**和有帮助的反馈
+- 尽可能**测试功能**
+- **检查安全影响**
+- **验证文档更新**
+- **确保测试全面**
 
-## Issue Guidelines
+## Issue 指南
 
-### Bug Reports
+### Bug 报告
 
 ```markdown
-**Describe the bug**
-A clear description of what the bug is.
+**描述 Bug**
+清晰描述这个 Bug 是什么。
 
-**To Reproduce**
-Steps to reproduce the behavior.
+**复现步骤**
+复现该行为的步骤。
 
-**Expected behavior**
-What you expected to happen.
+**期望行为**
+你期望发生什么。
 
-**Environment**
-- OS: [e.g. macOS, Linux]
-- Python version: [e.g. 3.9]
-- Poetry version: [e.g. 1.7.1]
+**环境**
+- 操作系统：[如 macOS、Linux]
+- Python 版本：[如 3.9]
+- Poetry 版本：[如 1.7.1]
 
-**Additional context**
-Any other context about the problem.
+**补充说明**
+关于该问题的其他上下文。
 ```
 
-### Feature Requests
+### 功能请求
 
 ```markdown
-**Is your feature request related to a problem?**
-A clear description of what the problem is.
+**你的功能请求是否与某个问题相关？**
+清晰描述该问题是什么。
 
-**Describe the solution you'd like**
-A clear description of what you want to happen.
+**描述你期望的解决方案**
+清晰描述你希望实现什么。
 
-**Describe alternatives you've considered**
-Alternative solutions or features you've considered.
+**描述你考虑过的替代方案**
+你考虑过的替代解决方案或功能。
 
-**Additional context**
-Any other context about the feature request.
+**补充说明**
+关于该功能请求的其他上下文。
 ```
 
-## Security
+## 安全
 
-### Reporting Security Issues
+### 报告安全问题
 
-**Do not** create public issues for security vulnerabilities.
+**不要**为安全漏洞创建公开的 issue。
 
-Instead:
-1. Email security concerns to [maintainer email]
-2. Include detailed description of the vulnerability
-3. Wait for acknowledgment before public disclosure
+请：
+1. 将安全问题发送至 [维护者邮箱]
+2. 包含漏洞的详细描述
+3. 在公开披露前等待确认
 
-### Security Guidelines
+### 安全指南
 
-- **Never commit secrets** or credentials
-- **Validate all inputs** thoroughly
-- **Use parameterized queries** for database operations
-- **Follow principle of least privilege**
-- **Log security-relevant events**
+- **永远不要提交**密钥或凭据
+- **彻底验证所有输入**
+- 数据库操作**使用参数化查询**
+- **遵循最小权限原则**
+- **记录安全相关事件**
 
-## Development Environment
+## 开发环境
 
-### Required Tools
+### 必需工具
 
-- **Poetry**: Dependency management
-- **Black**: Code formatting  
-- **isort**: Import sorting
-- **flake8**: Linting
-- **mypy**: Type checking
-- **pytest**: Testing
+- **Poetry**：依赖管理
+- **Black**：代码格式化
+- **isort**：导入排序
+- **flake8**：代码检查
+- **mypy**：类型检查
+- **pytest**：测试
 
-### Recommended IDE Setup
+### 推荐的 IDE 配置
 
 #### VS Code
 ```json
@@ -357,50 +357,50 @@ Instead:
 ```
 
 #### PyCharm
-- Configure Poetry interpreter
-- Enable Black formatting
-- Enable flake8 and mypy inspections
+- 配置 Poetry 解释器
+- 启用 Black 格式化
+- 启用 flake8 和 mypy 检查
 
-## Community Guidelines
+## 社区指南
 
-### Code of Conduct
+### 行为准则
 
-- **Be respectful** and inclusive
-- **Welcome newcomers** and help them get started
-- **Give constructive feedback**
-- **Focus on the code**, not the person
-- **Assume good intentions**
+- **尊重**他人并包容
+- **欢迎新人**并帮助他们入门
+- 提供**建设性反馈**
+- **聚焦于代码**，而非个人
+- **假设善意**
 
-### Communication
+### 沟通
 
-- **Use clear, concise language**
-- **Provide context** in issues and PRs
-- **Ask questions** when unsure
-- **Share knowledge** and help others
+- 使用**清晰、简洁的语言**
+- 在 issue 和 PR 中**提供上下文**
+- 不确定时**提出问题**
+- **分享知识**并帮助他人
 
-## Getting Help
+## 获取帮助
 
-### Documentation
-- Check `docs/` directory for guides
-- Review existing code for patterns
-- Read the configuration guide
+### 文档
+- 查看 `docs/` 目录中的指南
+- 查看现有代码了解模式
+- 阅读配置指南
 
-### Asking Questions
-- Search existing issues first
-- Provide context and examples
-- Include relevant environment details
-- Be specific about what you've tried
+### 提问
+- 先搜索已有 issue
+- 提供上下文和示例
+- 包含相关环境信息
+- 具体说明你尝试过什么
 
-### Debugging
-- Use `make run-debug` for detailed logging
-- Check test output with `make test`
-- Run type checking with `poetry run mypy src`
+### 调试
+- 使用 `make run-debug` 获取详细日志
+- 用 `make test` 检查测试输出
+- 运行 `poetry run mypy src` 进行类型检查
 
-## Recognition
+## 致谢
 
-Contributors will be recognized in:
-- `CHANGELOG.md` for their contributions
-- Project documentation
-- Release notes
+贡献者将在以下位置获得致谢：
+- `CHANGELOG.md` 中记录其贡献
+- 项目文档
+- 发布说明
 
-Thank you for contributing to Claude Code Telegram Bot! 🚀
+感谢你为 Claude Code Telegram Bot 做出贡献！

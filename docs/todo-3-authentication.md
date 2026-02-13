@@ -1,45 +1,45 @@
-# TODO-3: Authentication & Security Framework
+# TODO-3: 认证与安全框架
 
-## Objective
-Implement a comprehensive security system that protects against unauthorized access, directory traversal attacks, and resource abuse while maintaining a smooth user experience.
+## 目标
+实现一套全面的安全体系，防范未授权访问、目录遍历攻击和资源滥用，同时保持流畅的用户体验。
 
-## Security Architecture
+## 安全架构
 
-### Multi-Layer Security Model
+### 多层安全模型
 ```
-1. User Authentication (Who are you?)
-   ├── Whitelist-based (Telegram User IDs)
-   └── Token-based (Generated access tokens)
+1. 用户认证（你是谁？）
+   ├── 白名单机制（Telegram 用户 ID）
+   └── 令牌机制（生成的访问令牌）
 
-2. Authorization (What can you do?)
-   ├── Directory boundaries
-   ├── Command permissions
-   └── Resource limits
+2. 授权（你能做什么？）
+   ├── 目录边界
+   ├── 命令权限
+   └── 资源限制
 
-3. Rate Limiting (How much can you do?)
-   ├── Request rate limiting
-   ├── Cost-based limiting
-   └── Concurrent session limits
+3. 限流（你能做多少？）
+   ├── 请求频率限制
+   ├── 费用限制
+   └── 并发会话限制
 
-4. Input Validation (Is this safe?)
-   ├── Path traversal prevention
-   ├── Command injection prevention
-   └── File type validation
+4. 输入校验（这安全吗？）
+   ├── 路径遍历防护
+   ├── 命令注入防护
+   └── 文件类型校验
 ```
 
-## Authentication Implementation
+## 认证实现
 
-### Authentication Manager
+### 认证管理器
 ```python
 # src/security/auth.py
 """
-Authentication system supporting multiple methods
+支持多种认证方式的认证系统
 
-Features:
-- Telegram ID whitelist
-- Token-based authentication
-- Session management
-- Audit logging
+功能特性：
+- Telegram ID 白名单
+- 令牌认证
+- 会话管理
+- 审计日志
 """
 
 from abc import ABC, abstractmethod
@@ -49,82 +49,82 @@ import secrets
 import hashlib
 
 class AuthProvider(ABC):
-    """Base authentication provider"""
-    
+    """认证提供者基类"""
+
     @abstractmethod
     async def authenticate(self, user_id: int, credentials: Dict[str, Any]) -> bool:
-        """Verify user credentials"""
+        """验证用户凭据"""
         pass
-    
+
     @abstractmethod
     async def get_user_info(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """Get user information"""
+        """获取用户信息"""
         pass
 
 class WhitelistAuthProvider(AuthProvider):
-    """Whitelist-based authentication"""
-    
+    """基于白名单的认证"""
+
     def __init__(self, allowed_users: List[int]):
         self.allowed_users = set(allowed_users)
-    
+
     async def authenticate(self, user_id: int, credentials: Dict[str, Any]) -> bool:
         return user_id in self.allowed_users
-    
+
     async def get_user_info(self, user_id: int) -> Optional[Dict[str, Any]]:
         if user_id in self.allowed_users:
             return {"user_id": user_id, "auth_type": "whitelist"}
         return None
 
 class TokenAuthProvider(AuthProvider):
-    """Token-based authentication"""
-    
+    """基于令牌的认证"""
+
     def __init__(self, secret: str, storage: 'TokenStorage'):
         self.secret = secret
         self.storage = storage
-    
+
     async def authenticate(self, user_id: int, credentials: Dict[str, Any]) -> bool:
         token = credentials.get('token')
         if not token:
             return False
-        
+
         stored_token = await self.storage.get_user_token(user_id)
         return stored_token and self._verify_token(token, stored_token)
-    
+
     async def generate_token(self, user_id: int) -> str:
-        """Generate new authentication token"""
+        """生成新的认证令牌"""
         token = secrets.token_urlsafe(32)
         hashed = self._hash_token(token)
         await self.storage.store_token(user_id, hashed)
         return token
-    
+
     def _hash_token(self, token: str) -> str:
-        """Hash token for storage"""
+        """对令牌进行哈希用于存储"""
         return hashlib.sha256(f"{token}{self.secret}".encode()).hexdigest()
-    
+
     def _verify_token(self, token: str, stored_hash: str) -> bool:
-        """Verify token against stored hash"""
+        """对比令牌与存储的哈希"""
         return self._hash_token(token) == stored_hash
 
 class AuthenticationManager:
-    """Main authentication manager"""
-    
+    """主认证管理器"""
+
     def __init__(self, providers: List[AuthProvider]):
         self.providers = providers
         self.sessions: Dict[int, 'UserSession'] = {}
-    
+
     async def authenticate_user(self, user_id: int, credentials: Optional[Dict[str, Any]] = None) -> bool:
-        """Try authentication with all providers"""
+        """使用所有提供者尝试认证"""
         credentials = credentials or {}
-        
+
         for provider in self.providers:
             if await provider.authenticate(user_id, credentials):
                 await self._create_session(user_id, provider)
                 return True
-        
+
         return False
-    
+
     async def _create_session(self, user_id: int, provider: AuthProvider):
-        """Create authenticated session"""
+        """创建认证会话"""
         user_info = await provider.get_user_info(user_id)
         self.sessions[user_id] = UserSession(
             user_id=user_id,
@@ -132,28 +132,28 @@ class AuthenticationManager:
             created_at=datetime.utcnow(),
             user_info=user_info
         )
-    
+
     def is_authenticated(self, user_id: int) -> bool:
-        """Check if user has active session"""
+        """检查用户是否有活跃会话"""
         session = self.sessions.get(user_id)
         return session and not session.is_expired()
-    
+
     def get_session(self, user_id: int) -> Optional['UserSession']:
-        """Get user session"""
+        """获取用户会话"""
         return self.sessions.get(user_id)
 ```
 
-### Rate Limiting
+### 限流
 ```python
 # src/security/rate_limiter.py
 """
-Rate limiting implementation with multiple strategies
+多策略限流实现
 
-Features:
-- Token bucket algorithm
-- Cost-based limiting
-- Per-user tracking
-- Burst handling
+功能特性：
+- 令牌桶算法
+- 基于费用的限制
+- 按用户追踪
+- 突发处理
 """
 
 from collections import defaultdict
@@ -163,87 +163,87 @@ import asyncio
 
 @dataclass
 class RateLimitBucket:
-    """Token bucket for rate limiting"""
+    """用于限流的令牌桶"""
     capacity: int
     tokens: float
     last_update: datetime
-    
+
     def consume(self, tokens: int = 1) -> bool:
-        """Try to consume tokens"""
+        """尝试消耗令牌"""
         self._refill()
         if self.tokens >= tokens:
             self.tokens -= tokens
             return True
         return False
-    
+
     def _refill(self):
-        """Refill tokens based on time passed"""
+        """根据经过的时间补充令牌"""
         now = datetime.utcnow()
         elapsed = (now - self.last_update).total_seconds()
         self.tokens = min(self.capacity, self.tokens + elapsed)
         self.last_update = now
 
 class RateLimiter:
-    """Main rate limiting system"""
-    
+    """主限流系统"""
+
     def __init__(self, config: 'Settings'):
         self.config = config
         self.request_buckets: Dict[int, RateLimitBucket] = {}
         self.cost_tracker: Dict[int, float] = defaultdict(float)
         self.locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
-    
+
     async def check_rate_limit(self, user_id: int, cost: float = 1.0) -> Tuple[bool, Optional[str]]:
-        """Check if request is allowed"""
+        """检查请求是否被允许"""
         async with self.locks[user_id]:
-            # Check request rate
+            # 检查请求频率
             if not self._check_request_rate(user_id):
                 return False, "Rate limit exceeded. Please wait before making more requests."
-            
-            # Check cost limit
+
+            # 检查费用限制
             if not self._check_cost_limit(user_id, cost):
                 remaining = self.config.claude_max_cost_per_user - self.cost_tracker[user_id]
                 return False, f"Cost limit exceeded. Remaining budget: ${remaining:.2f}"
-            
+
             return True, None
-    
+
     def _check_request_rate(self, user_id: int) -> bool:
-        """Check request rate limit"""
+        """检查请求频率限制"""
         if user_id not in self.request_buckets:
             self.request_buckets[user_id] = RateLimitBucket(
                 capacity=self.config.rate_limit_burst,
                 tokens=self.config.rate_limit_burst,
                 last_update=datetime.utcnow()
             )
-        
+
         return self.request_buckets[user_id].consume()
-    
+
     def _check_cost_limit(self, user_id: int, cost: float) -> bool:
-        """Check cost-based limit"""
+        """检查基于费用的限制"""
         if self.cost_tracker[user_id] + cost > self.config.claude_max_cost_per_user:
             return False
-        
+
         self.cost_tracker[user_id] += cost
         return True
-    
+
     async def reset_user_limits(self, user_id: int):
-        """Reset limits for a user"""
+        """重置用户的限制"""
         async with self.locks[user_id]:
             self.cost_tracker[user_id] = 0
             if user_id in self.request_buckets:
                 self.request_buckets[user_id].tokens = self.config.rate_limit_burst
 ```
 
-### Directory Security
+### 目录安全
 ```python
 # src/security/validators.py
 """
-Input validation and security checks
+输入校验与安全检查
 
-Features:
-- Path traversal prevention
-- Command injection prevention
-- File type validation
-- Input sanitization
+功能特性：
+- 路径遍历防护
+- 命令注入防护
+- 文件类型校验
+- 输入清洗
 """
 
 import os
@@ -252,110 +252,110 @@ from pathlib import Path
 from typing import Optional, List
 
 class SecurityValidator:
-    """Security validation for user inputs"""
-    
-    # Dangerous patterns
+    """用户输入的安全校验"""
+
+    # 危险模式
     DANGEROUS_PATTERNS = [
-        r'\.\.',           # Parent directory
-        r'~',              # Home directory
-        r'\$',             # Variable expansion
-        r'`',              # Command substitution
-        r';',              # Command chaining
-        r'&&',             # Command chaining
-        r'\|\|',           # Command chaining
-        r'>',              # Redirection
-        r'<',              # Redirection
-        r'\|',             # Piping
+        r'\.\.',           # 父目录
+        r'~',              # 主目录
+        r'\$',             # 变量展开
+        r'`',              # 命令替换
+        r';',              # 命令链接
+        r'&&',             # 命令链接
+        r'\|\|',           # 命令链接
+        r'>',              # 重定向
+        r'<',              # 重定向
+        r'\|',             # 管道
     ]
-    
-    # Allowed file extensions
+
+    # 允许的文件扩展名
     ALLOWED_EXTENSIONS = {
         '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c',
         '.h', '.hpp', '.cs', '.go', '.rs', '.rb', '.php', '.swift',
         '.kt', '.md', '.txt', '.json', '.yml', '.yaml', '.toml',
         '.xml', '.html', '.css', '.scss', '.sql', '.sh', '.bash'
     }
-    
+
     def __init__(self, approved_directory: Path):
         self.approved_directory = approved_directory.resolve()
-    
+
     def validate_path(self, user_path: str, current_dir: Path) -> Tuple[bool, Optional[Path], Optional[str]]:
-        """Validate and resolve user-provided path"""
+        """校验并解析用户提供的路径"""
         try:
-            # Check for dangerous patterns
+            # 检查危险模式
             for pattern in self.DANGEROUS_PATTERNS:
                 if re.search(pattern, user_path):
                     return False, None, f"Invalid path: contains forbidden pattern"
-            
-            # Resolve path
+
+            # 解析路径
             if user_path.startswith('/'):
-                # Absolute path within approved directory
+                # 批准目录内的绝对路径
                 target = self.approved_directory / user_path.lstrip('/')
             else:
-                # Relative path
+                # 相对路径
                 target = current_dir / user_path
-            
-            # Resolve and check boundaries
+
+            # 解析并检查边界
             target = target.resolve()
-            
-            # Must be within approved directory
+
+            # 必须在批准目录内
             if not self._is_within_directory(target, self.approved_directory):
                 return False, None, "Access denied: path outside approved directory"
-            
+
             return True, target, None
-            
+
         except Exception as e:
             return False, None, f"Invalid path: {str(e)}"
-    
+
     def _is_within_directory(self, path: Path, directory: Path) -> bool:
-        """Check if path is within directory"""
+        """检查路径是否在目录内"""
         try:
             path.relative_to(directory)
             return True
         except ValueError:
             return False
-    
+
     def validate_filename(self, filename: str) -> Tuple[bool, Optional[str]]:
-        """Validate uploaded filename"""
-        # Check for path traversal in filename
+        """校验上传的文件名"""
+        # 检查文件名中的路径遍历
         if '/' in filename or '\\' in filename:
             return False, "Invalid filename: contains path separators"
-        
-        # Check extension
+
+        # 检查扩展名
         ext = Path(filename).suffix.lower()
         if ext not in self.ALLOWED_EXTENSIONS:
             return False, f"File type not allowed: {ext}"
-        
-        # Check for hidden files
+
+        # 检查隐藏文件
         if filename.startswith('.'):
             return False, "Hidden files not allowed"
-        
+
         return True, None
-    
+
     def sanitize_command_input(self, text: str) -> str:
-        """Sanitize text input for commands"""
-        # Remove potentially dangerous characters
+        """清洗命令输入文本"""
+        # 移除潜在危险字符
         sanitized = re.sub(r'[`$;|&<>]', '', text)
-        
-        # Limit length
+
+        # 限制长度
         max_length = 1000
         if len(sanitized) > max_length:
             sanitized = sanitized[:max_length]
-        
+
         return sanitized.strip()
 ```
 
-### Audit Logging
+### 审计日志
 ```python
 # src/security/audit.py
 """
-Security audit logging
+安全审计日志
 
-Features:
-- All authentication attempts
-- Command execution
-- File access
-- Security violations
+功能特性：
+- 所有认证尝试
+- 命令执行
+- 文件访问
+- 安全违规
 """
 
 @dataclass
@@ -368,13 +368,13 @@ class AuditEvent:
     ip_address: Optional[str] = None
 
 class AuditLogger:
-    """Security audit logger"""
-    
+    """安全审计日志记录器"""
+
     def __init__(self, storage: 'AuditStorage'):
         self.storage = storage
-    
+
     async def log_auth_attempt(self, user_id: int, success: bool, method: str, reason: Optional[str] = None):
-        """Log authentication attempt"""
+        """记录认证尝试"""
         await self.storage.store_event(AuditEvent(
             timestamp=datetime.utcnow(),
             user_id=user_id,
@@ -385,9 +385,9 @@ class AuditLogger:
                 'reason': reason
             }
         ))
-    
+
     async def log_command(self, user_id: int, command: str, args: List[str], success: bool):
-        """Log command execution"""
+        """记录命令执行"""
         await self.storage.store_event(AuditEvent(
             timestamp=datetime.utcnow(),
             user_id=user_id,
@@ -398,9 +398,9 @@ class AuditLogger:
                 'args': args
             }
         ))
-    
+
     async def log_security_violation(self, user_id: int, violation_type: str, details: str):
-        """Log security violation"""
+        """记录安全违规"""
         await self.storage.store_event(AuditEvent(
             timestamp=datetime.utcnow(),
             user_id=user_id,
@@ -413,25 +413,25 @@ class AuditLogger:
         ))
 ```
 
-## Middleware Implementation
+## 中间件实现
 
-### Authentication Middleware
+### 认证中间件
 ```python
 # src/bot/middleware/auth.py
 """
-Telegram bot authentication middleware
+Telegram Bot 认证中间件
 """
 
 async def auth_middleware(handler, event, data):
-    """Check authentication before processing"""
+    """处理前检查认证"""
     user_id = event.from_user.id
-    
-    # Get auth manager from context
+
+    # 从上下文获取认证管理器
     auth_manager = data['auth_manager']
-    
-    # Check authentication
+
+    # 检查认证状态
     if not auth_manager.is_authenticated(user_id):
-        # Try to authenticate
+        # 尝试认证
         if not await auth_manager.authenticate_user(user_id):
             await event.reply_text(
                 "🔒 Authentication required.\n"
@@ -439,47 +439,47 @@ async def auth_middleware(handler, event, data):
                 "Contact the administrator for access."
             )
             return
-    
-    # Update session activity
+
+    # 更新会话活动时间
     session = auth_manager.get_session(user_id)
     session.last_activity = datetime.utcnow()
-    
-    # Continue to handler
+
+    # 继续到处理器
     return await handler(event, data)
 ```
 
-### Rate Limiting Middleware
+### 限流中间件
 ```python
 # src/bot/middleware/rate_limit.py
 """
-Rate limiting middleware
+限流中间件
 """
 
 async def rate_limit_middleware(handler, event, data):
-    """Check rate limits before processing"""
+    """处理前检查限流"""
     user_id = event.from_user.id
     rate_limiter = data['rate_limiter']
-    
-    # Check rate limit (default cost of 1)
+
+    # 检查限流（默认费用为 1）
     allowed, message = await rate_limiter.check_rate_limit(user_id)
-    
+
     if not allowed:
         await event.reply_text(f"⏱️ {message}")
         return
-    
+
     return await handler(event, data)
 ```
 
-## Testing Security
+## 安全测试
 
-### Security Test Cases
+### 安全测试用例
 ```python
 # tests/test_security.py
 """
-Security testing
+安全测试
 """
 
-# Path traversal attempts
+# 路径遍历尝试
 test_paths = [
     "../../../etc/passwd",
     "~/.ssh/id_rsa",
@@ -489,7 +489,7 @@ test_paths = [
     "project%2F..%2F..%2F",
 ]
 
-# Command injection attempts
+# 命令注入尝试
 test_commands = [
     "test; rm -rf /",
     "test && cat /etc/passwd",
@@ -498,7 +498,7 @@ test_commands = [
     "test $(pwd)",
 ]
 
-# File upload tests
+# 文件上传测试
 test_files = [
     "malicious.exe",
     "../../../.bashrc",
@@ -507,16 +507,16 @@ test_files = [
 ]
 ```
 
-## Success Criteria
+## 验收标准
 
-- [ ] Whitelist authentication working
-- [ ] Token-based authentication implemented
-- [ ] Rate limiting prevents abuse
-- [ ] Cost tracking enforced
-- [ ] Path traversal attempts blocked
-- [ ] Command injection prevented
-- [ ] File type validation working
-- [ ] Audit logging captures all events
-- [ ] Middleware properly intercepts requests
-- [ ] All security tests pass
-- [ ] No security vulnerabilities in OWASP top 10
+- [ ] 白名单认证正常工作
+- [ ] 令牌认证已实现
+- [ ] 限流能够防止滥用
+- [ ] 费用追踪已实施
+- [ ] 路径遍历尝试被阻止
+- [ ] 命令注入已防护
+- [ ] 文件类型校验正常工作
+- [ ] 审计日志捕获所有事件
+- [ ] 中间件正确拦截请求
+- [ ] 所有安全测试通过
+- [ ] 不存在 OWASP Top 10 安全漏洞

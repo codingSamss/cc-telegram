@@ -1,301 +1,301 @@
-# Security Policy
+# 安全策略
 
-## Supported Versions
+## 支持的版本
 
-This project is currently in development. Security updates will be provided for:
+本项目目前处于开发阶段。安全更新将为以下版本提供：
 
-| Version | Supported          |
+| 版本 | 支持状态 |
 | ------- | ------------------ |
-| 0.1.x   | ✅ Current development |
+| 0.1.x   | 当前开发版本 |
 
-## Security Model
+## 安全模型
 
-The Claude Code Telegram Bot implements a defense-in-depth security model with multiple layers:
+Claude Code Telegram Bot 实现了纵深防御的安全模型，包含多个层次：
 
-### 1. Authentication & Authorization (TODO-3)
-- **User Whitelist**: Only pre-approved Telegram user IDs can access the bot
-- **Token-Based Auth**: Optional token-based authentication for additional security
-- **Session Management**: Secure session handling with timeout and cleanup
+### 1. 认证与授权（TODO-3）
+- **用户白名单**：仅预先批准的 Telegram 用户 ID 可以访问 bot
+- **基于令牌的认证**：可选的令牌认证作为额外安全层
+- **会话管理**：安全的会话处理，带超时和清理
 
-### 2. Directory Boundaries (TODO-3)
-- **Approved Directory**: All operations confined to a pre-configured directory tree
-- **Path Validation**: Prevents directory traversal attacks (../../../etc/passwd)
-- **Permission Checks**: Validates file system permissions before operations
+### 2. 目录边界（TODO-3）
+- **已批准目录**：所有操作限制在预配置的目录树内
+- **路径验证**：防止目录遍历攻击（../../../etc/passwd）
+- **权限检查**：操作前验证文件系统权限
 
-### 3. Input Validation (TODO-3)
-- **Command Sanitization**: All user inputs sanitized to prevent injection attacks
-- **File Type Validation**: Only allowed file types can be uploaded
-- **Path Sanitization**: Removes dangerous characters and patterns
+### 3. 输入验证（TODO-3）
+- **命令清理**：所有用户输入经过清理以防止注入攻击
+- **文件类型验证**：仅允许的文件类型可以上传
+- **路径清理**：移除危险字符和模式
 
-### 4. Rate Limiting (TODO-3)
-- **Request Rate Limiting**: Prevents abuse with configurable request limits
-- **Cost-Based Limiting**: Tracks and limits Claude usage costs per user
-- **Burst Protection**: Token bucket algorithm prevents burst attacks
+### 4. 限流（TODO-3）
+- **请求限流**：可配置的请求限制防止滥用
+- **基于费用的限制**：跟踪和限制每用户的 Claude 使用费用
+- **突发保护**：令牌桶算法防止突发攻击
 
-### 5. Audit Logging (TODO-3)
-- **Authentication Events**: All login attempts and auth failures logged
-- **Command Execution**: All commands and file operations logged
-- **Security Violations**: Path traversal attempts and other violations logged
+### 5. 审计日志（TODO-3）
+- **认证事件**：记录所有登录尝试和认证失败
+- **命令执行**：记录所有命令和文件操作
+- **安全违规**：记录路径遍历尝试和其他违规
 
-## Current Security Status
+## 当前安全状态
 
-### ✅ Implemented Security Features
+### 已实现的安全功能
 
-#### Configuration Security
-- **Environment Variable Protection**: Sensitive values (tokens, secrets) handled as SecretStr
-- **Validation**: All configuration values validated with proper error messages
-- **Path Security**: Approved directory must exist and be accessible
+#### 配置安全
+- **环境变量保护**：敏感值（令牌、密钥）使用 SecretStr 处理
+- **验证**：所有配置值经过验证并带有正确的错误消息
+- **路径安全**：已批准的目录必须存在且可访问
 
-#### Input Validation Foundation
-- **Type Safety**: Full mypy compliance ensures type safety
-- **Validation Framework**: Pydantic validators for all configuration inputs
-- **Error Handling**: Comprehensive exception hierarchy for security errors
+#### 输入验证基础
+- **类型安全**：完全符合 mypy 确保类型安全
+- **验证框架**：Pydantic 验证器处理所有配置输入
+- **错误处理**：全面的安全错误异常层级
 
-#### Development Security
-- **No Secrets in Code**: All sensitive data via environment variables
-- **Secure Defaults**: Production defaults favor security over convenience
-- **Audit Trail**: Structured logging captures all configuration and validation events
+#### 开发安全
+- **代码中无密钥**：所有敏感数据通过环境变量传递
+- **安全默认值**：生产默认值优先考虑安全而非便利
+- **审计追踪**：结构化日志记录所有配置和验证事件
 
-### 🚧 Planned Security Features (TODO-3)
+### 已规划的安全功能（TODO-3）
 
-#### Authentication System
+#### 认证系统
 ```python
-# Planned implementation
+# 已规划的实现
 class AuthenticationManager:
     async def authenticate_user(self, user_id: int) -> bool
     async def check_permissions(self, user_id: int, action: str) -> bool
     async def create_session(self, user_id: int) -> Session
 ```
 
-#### Path Validation
+#### 路径验证
 ```python
-# Planned implementation  
+# 已规划的实现
 class SecurityValidator:
     def validate_path(self, path: str) -> Tuple[bool, Path, Optional[str]]
     def sanitize_command_input(self, text: str) -> str
     def validate_filename(self, filename: str) -> Tuple[bool, Optional[str]]
 ```
 
-#### Rate Limiting
+#### 限流
 ```python
-# Planned implementation
+# 已规划的实现
 class RateLimiter:
     async def check_rate_limit(self, user_id: int, cost: float) -> Tuple[bool, Optional[str]]
     async def track_usage(self, user_id: int, cost: float) -> None
 ```
 
-## Security Configuration
+## 安全配置
 
-### Required Security Settings
+### 必需的安全设置
 
 ```bash
-# Base directory for all operations (CRITICAL)
+# 所有操作的基础目录（关键）
 APPROVED_DIRECTORY=/path/to/approved/projects
 
-# User access control
-ALLOWED_USERS=123456789,987654321  # Telegram user IDs
+# 用户访问控制
+ALLOWED_USERS=123456789,987654321  # Telegram 用户 ID
 
-# Optional: Token-based authentication
+# 可选：基于令牌的认证
 ENABLE_TOKEN_AUTH=true
-AUTH_TOKEN_SECRET=your-secret-here  # Generate with: openssl rand -hex 32
+AUTH_TOKEN_SECRET=your-secret-here  # 生成方法: openssl rand -hex 32
 ```
 
-### Recommended Security Settings
+### 推荐的安全设置
 
 ```bash
-# Strict rate limiting for production
+# 生产环境严格限流
 RATE_LIMIT_REQUESTS=5
 RATE_LIMIT_WINDOW=60
 RATE_LIMIT_BURST=10
 
-# Cost controls
+# 费用控制
 CLAUDE_MAX_COST_PER_USER=5.0
 
-# Security features
-ENABLE_TELEMETRY=true  # For security monitoring
-LOG_LEVEL=INFO         # Capture security events
+# 安全功能
+ENABLE_TELEMETRY=true  # 用于安全监控
+LOG_LEVEL=INFO         # 捕获安全事件
 
-# Environment
-ENVIRONMENT=production  # Enables strict security defaults
+# 环境
+ENVIRONMENT=production  # 启用严格安全默认值
 ```
 
-## Security Best Practices
+## 安全最佳实践
 
-### For Administrators
+### 对管理员
 
-1. **Directory Configuration**
+1. **目录配置**
    ```bash
-   # Use minimal necessary permissions
+   # 使用最小必要权限
    chmod 755 /path/to/approved/projects
-   
-   # Avoid sensitive directories
-   # ❌ Don't use: /, /home, /etc, /var
-   # ✅ Use: /home/user/projects, /opt/bot-projects
+
+   # 避免敏感目录
+   # 不要使用: /, /home, /etc, /var
+   # 应该使用: /home/user/projects, /opt/bot-projects
    ```
 
-2. **Token Management**
+2. **令牌管理**
    ```bash
-   # Generate secure secrets
+   # 生成安全密钥
    openssl rand -hex 32
-   
-   # Store in environment, never in code
+
+   # 存储在环境变量中，永远不要放在代码里
    export AUTH_TOKEN_SECRET="generated-secret"
    ```
 
-3. **User Management**
+3. **用户管理**
    ```bash
-   # Get Telegram User ID: message @userinfobot
-   # Add to whitelist
+   # 获取 Telegram 用户 ID：给 @userinfobot 发消息
+   # 添加到白名单
    export ALLOWED_USERS="123456789,987654321"
    ```
 
-4. **Monitoring**
+4. **监控**
    ```bash
-   # Enable logging and monitoring
+   # 启用日志和监控
    export LOG_LEVEL=INFO
    export ENABLE_TELEMETRY=true
-   
-   # Monitor logs for security events
+
+   # 监控日志中的安全事件
    tail -f bot.log | grep -i "security\|auth\|violation"
    ```
 
-### For Developers
+### 对开发者
 
-1. **Never Commit Secrets**
+1. **永远不要提交密钥**
    ```bash
-   # Add to .gitignore
+   # 添加到 .gitignore
    .env
    *.key
    *.pem
    config/secrets.yml
    ```
 
-2. **Use Type Safety**
+2. **使用类型安全**
    ```python
-   # Always use type hints
+   # 始终使用类型标注
    def validate_path(path: str) -> Tuple[bool, Optional[str]]:
        pass
    ```
 
-3. **Validate All Inputs**
+3. **验证所有输入**
    ```python
-   # Use the security validator
+   # 使用安全验证器
    from src.security.validators import SecurityValidator
-   
+
    validator = SecurityValidator(approved_dir)
    valid, resolved_path, error = validator.validate_path(user_input)
    ```
 
-4. **Log Security Events**
+4. **记录安全事件**
    ```python
-   # Use structured logging
-   logger.warning("Security violation", 
-                 user_id=user_id, 
+   # 使用结构化日志
+   logger.warning("Security violation",
+                 user_id=user_id,
                  violation_type="path_traversal",
                  attempted_path=user_input)
    ```
 
-## Threat Model
+## 威胁模型
 
-### Threats We Protect Against
+### 防护的威胁
 
-1. **Directory Traversal** (High Priority)
-   - Attempts to access files outside approved directory
-   - Path traversal attacks (../, ~/, etc.)
-   - Symbolic link attacks
+1. **目录遍历**（高优先级）
+   - 尝试访问已批准目录之外的文件
+   - 路径遍历攻击（../、~/等）
+   - 符号链接攻击
 
-2. **Command Injection** (High Priority)
-   - Shell command injection through user inputs
-   - Environment variable injection
-   - Process substitution attacks
+2. **命令注入**（高优先级）
+   - 通过用户输入进行 shell 命令注入
+   - 环境变量注入
+   - 进程替换攻击
 
-3. **Unauthorized Access** (Medium Priority)
-   - Access by non-whitelisted users
-   - Token theft and replay attacks
-   - Session hijacking
+3. **未授权访问**（中优先级）
+   - 非白名单用户的访问
+   - 令牌窃取和重放攻击
+   - 会话劫持
 
-4. **Resource Abuse** (Medium Priority)
-   - Rate limiting bypass attempts
-   - Cost limit violations
-   - Denial of service attacks
+4. **资源滥用**（中优先级）
+   - 限流绕过尝试
+   - 费用限制违规
+   - 拒绝服务攻击
 
-5. **Information Disclosure** (Low Priority)
-   - Sensitive file exposure
-   - Configuration information leakage
-   - Error message information leakage
+5. **信息泄露**（低优先级）
+   - 敏感文件暴露
+   - 配置信息泄漏
+   - 错误消息中的信息泄漏
 
-### Threats Outside Scope
+### 超出范围的威胁
 
-- Network-level attacks (handled by hosting infrastructure)
-- Telegram API vulnerabilities (handled by Telegram)
-- Host OS security (handled by system administration)
-- Physical access to servers (handled by hosting infrastructure)
+- 网络层攻击（由托管基础设施处理）
+- Telegram API 漏洞（由 Telegram 处理）
+- 主机操作系统安全（由系统管理处理）
+- 服务器物理访问（由托管基础设施处理）
 
-## Reporting a Vulnerability
+## 报告漏洞
 
-### Security Contact
+### 安全联系方式
 
-**Do not create public GitHub issues for security vulnerabilities.**
+**不要为安全漏洞创建公开的 GitHub issue。**
 
-For security issues, please email: [Insert security contact email]
+安全问题请发送邮件至：[请填写安全联系邮箱]
 
-### Report Format
+### 报告格式
 
-Please include:
+请包含：
 
-1. **Description** of the vulnerability
-2. **Steps to reproduce** the issue
-3. **Potential impact** assessment
-4. **Suggested mitigation** if known
-5. **Disclosure timeline** preferences
+1. 漏洞**描述**
+2. **复现步骤**
+3. **潜在影响**评估
+4. **建议的缓解措施**（如有）
+5. **披露时间线**偏好
 
-### Response Process
+### 响应流程
 
-1. **Acknowledgment** within 48 hours
-2. **Initial assessment** within 1 week
-3. **Fix development** as soon as possible
-4. **Security advisory** published after fix
-5. **Credit** to reporter (if desired)
+1. 48 小时内**确认收到**
+2. 1 周内**初步评估**
+3. 尽快**修复开发**
+4. 修复后发布**安全公告**
+5. 向报告者致**谢**（如本人同意）
 
-## Security Checklist
+## 安全检查清单
 
-### For Each Release
+### 每次发布
 
-- [ ] All dependencies updated to latest secure versions
-- [ ] Security tests passing
-- [ ] No secrets committed to repository
-- [ ] Security documentation updated
-- [ ] Threat model reviewed
-- [ ] Security configuration validated
+- [ ] 所有依赖已更新至最新安全版本
+- [ ] 安全测试通过
+- [ ] 仓库中未提交密钥
+- [ ] 安全文档已更新
+- [ ] 威胁模型已审查
+- [ ] 安全配置已验证
 
-### For Production Deployment
+### 生产部署
 
-- [ ] APPROVED_DIRECTORY properly configured and restricted
-- [ ] ALLOWED_USERS whitelist configured
-- [ ] Rate limiting enabled and configured
-- [ ] Logging enabled and monitored
-- [ ] Authentication tokens properly secured
-- [ ] Environment variables properly configured
-- [ ] File permissions properly set
-- [ ] Network access properly restricted
+- [ ] APPROVED_DIRECTORY 已正确配置和限制
+- [ ] ALLOWED_USERS 白名单已配置
+- [ ] 限流已启用和配置
+- [ ] 日志已启用和监控
+- [ ] 认证令牌已妥善保管
+- [ ] 环境变量已正确配置
+- [ ] 文件权限已正确设置
+- [ ] 网络访问已正确限制
 
-## Security Resources
+## 安全资源
 
-### Tools and Libraries
+### 工具和库
 
-- **Pydantic**: Input validation and type safety
-- **structlog**: Secure, structured logging
-- **SecretStr**: Safe handling of sensitive strings
-- **pathlib**: Safe path manipulation
+- **Pydantic**：输入验证和类型安全
+- **structlog**：安全的结构化日志
+- **SecretStr**：敏感字符串的安全处理
+- **pathlib**：安全的路径操作
 
-### References
+### 参考资料
 
 - [OWASP Top 10](https://owasp.org/www-project-top-ten/)
 - [OWASP API Security Top 10](https://owasp.org/www-project-api-security/)
-- [Telegram Bot Security Best Practices](https://core.telegram.org/bots/faq#how-do-i-make-sure-that-webhook-requests-are-coming-from-telegram)
-- [Python Security Guide](https://python-security.readthedocs.io/)
+- [Telegram Bot 安全最佳实践](https://core.telegram.org/bots/faq#how-do-i-make-sure-that-webhook-requests-are-coming-from-telegram)
+- [Python 安全指南](https://python-security.readthedocs.io/)
 
 ---
 
-**Last Updated**: 2025-06-05  
-**Security Review**: TODO-3 Implementation Phase
+**最后更新**：2025-06-05
+**安全审查**：TODO-3 实现阶段

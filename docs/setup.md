@@ -1,365 +1,365 @@
-# Setup and Installation Guide
+# 安装与配置指南
 
-This guide provides comprehensive instructions for setting up the Claude Code Telegram Bot with both CLI and SDK integration modes.
+本指南提供 Claude Code Telegram Bot 的完整安装说明，涵盖 CLI 和 SDK 两种集成模式。
 
-## Quick Start
+## 快速开始
 
-### 1. Prerequisites
+### 1. 前置条件
 
-- **Python 3.9+** - [Download here](https://www.python.org/downloads/)
-- **Poetry** - Modern Python dependency management
-- **Telegram Bot Token** - Get one from [@BotFather](https://t.me/botfather)
-- **Claude Authentication** - Choose one method below
+- **Python 3.9+** - [点此下载](https://www.python.org/downloads/)
+- **Poetry** - 现代 Python 依赖管理工具
+- **Telegram Bot Token** - 从 [@BotFather](https://t.me/botfather) 获取
+- **Claude 认证** - 从下方选择一种方式
 
-### 2. Claude Authentication Setup
+### 2. Claude 认证配置
 
-The bot supports two Claude integration modes. Choose the one that fits your needs:
+Bot 支持两种 Claude 集成模式，请根据需求选择：
 
-#### Option A: SDK with CLI Authentication (Recommended)
+#### 方式 A：SDK + CLI 认证（推荐）
 
-This method uses the Python SDK for better performance while leveraging your existing Claude CLI authentication.
+此方式使用 Python SDK 获得更好的性能，同时复用已有的 Claude CLI 认证。
 
 ```bash
-# 1. Install Claude CLI
-# Visit https://claude.ai/code and follow installation instructions
+# 1. 安装 Claude CLI
+# 访问 https://claude.ai/code 并按照说明安装
 
-# 2. Authenticate with Claude
+# 2. 完成 Claude 认证
 claude auth login
 
-# 3. Verify authentication
+# 3. 验证认证状态
 claude auth status
-# Should show: "✓ You are authenticated"
+# 应显示："✓ You are authenticated"
 
-# 4. Configure bot (in step 4 below)
+# 4. 配置 bot（见下方第 4 步）
 USE_SDK=true
-# Leave ANTHROPIC_API_KEY empty - SDK will use CLI credentials
+# 不填 ANTHROPIC_API_KEY - SDK 会使用 CLI 凭据
 ```
 
-**Pros:**
-- Best performance with native async support
-- Uses your existing Claude CLI authentication
-- Better streaming and error handling
-- No need to manage API keys separately
+**优点：**
+- 性能最佳，原生异步支持
+- 使用已有的 Claude CLI 认证
+- 更好的流式传输和错误处理
+- 无需单独管理 API Key
 
-**Cons:**
-- Requires Claude CLI installation
+**缺点：**
+- 需要安装 Claude CLI
 
-#### Option B: SDK with Direct API Key
+#### 方式 B：SDK + 直接 API Key
 
-This method uses the Python SDK with a direct API key, bypassing the need for Claude CLI.
+此方式使用 Python SDK 配合直接 API Key，无需安装 Claude CLI。
 
 ```bash
-# 1. Get your API key from https://console.anthropic.com/
-# 2. Configure bot (in step 4 below)
+# 1. 从 https://console.anthropic.com/ 获取 API Key
+# 2. 配置 bot（见下方第 4 步）
 USE_SDK=true
 ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 ```
 
-**Pros:**
-- No Claude CLI installation required
-- Direct API integration
-- Good performance with async support
+**优点：**
+- 无需安装 Claude CLI
+- 直接 API 集成
+- 良好的异步支持性能
 
-**Cons:**
-- Need to manage API keys manually
-- API key management and rotation
+**缺点：**
+- 需要手动管理 API Key
+- 需处理 API Key 的管理与轮换
 
-#### Option C: CLI Subprocess Mode (Legacy)
+#### 方式 C：CLI 子进程模式（传统方式）
 
-This method uses the Claude CLI as a subprocess. Use this only if you need compatibility with older setups.
+此方式将 Claude CLI 作为子进程调用。仅在需要兼容旧有配置时使用。
 
 ```bash
-# 1. Install Claude CLI
-# Visit https://claude.ai/code and follow installation instructions
+# 1. 安装 Claude CLI
+# 访问 https://claude.ai/code 并按照说明安装
 
-# 2. Authenticate with Claude
+# 2. 完成 Claude 认证
 claude auth login
 
-# 3. Configure bot (in step 4 below)
+# 3. 配置 bot（见下方第 4 步）
 USE_SDK=false
-# ANTHROPIC_API_KEY not needed for CLI mode
+# CLI 模式不需要 ANTHROPIC_API_KEY
 ```
 
-**Pros:**
-- Uses official Claude CLI
-- Compatible with all CLI features
+**优点：**
+- 使用官方 Claude CLI
+- 兼容所有 CLI 功能
 
-**Cons:**
-- Slower than SDK integration
-- Subprocess overhead
-- Less reliable error handling
+**缺点：**
+- 比 SDK 集成慢
+- 子进程开销
+- 错误处理不够可靠
 
-### 3. Install the Bot
+### 3. 安装 Bot
 
 ```bash
-# Clone the repository
+# 克隆仓库
 git clone https://github.com/yourusername/claude-code-telegram.git
 cd claude-code-telegram
 
-# Install Poetry (if needed)
+# 安装 Poetry（如需要）
 curl -sSL https://install.python-poetry.org | python3 -
 
-# Install dependencies
+# 安装依赖
 make dev
 ```
 
-### 4. Configure Environment
+### 4. 配置环境变量
 
 ```bash
-# Copy the example configuration
+# 复制示例配置文件
 cp .env.example .env
 
-# Edit with your settings
+# 编辑配置
 nano .env
 ```
 
-**Required Configuration:**
+**必需的配置项：**
 
 ```bash
-# Telegram Bot Settings
+# Telegram Bot 设置
 TELEGRAM_BOT_TOKEN=1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TELEGRAM_BOT_USERNAME=your_bot_username
 
-# Security
+# 安全设置
 APPROVED_DIRECTORY=/path/to/your/projects
-ALLOWED_USERS=123456789  # Your Telegram user ID
+ALLOWED_USERS=123456789  # 你的 Telegram 用户 ID
 
-# Claude Integration (choose based on your authentication method above)
-USE_SDK=true                          # true for SDK, false for CLI
-ANTHROPIC_API_KEY=                    # Only needed for Option B above
+# Claude 集成（根据上方选择的认证方式配置）
+USE_SDK=true                          # true 使用 SDK，false 使用 CLI
+ANTHROPIC_API_KEY=                    # 仅在使用方式 B 时需要
 ```
 
-### 5. Get Your Telegram User ID
+### 5. 获取你的 Telegram 用户 ID
 
-To configure `ALLOWED_USERS`:
+配置 `ALLOWED_USERS` 的方法：
 
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. It will reply with your user ID number
-3. Add this number to your `ALLOWED_USERS` setting
+1. 在 Telegram 上向 [@userinfobot](https://t.me/userinfobot) 发送消息
+2. 它会回复你的用户 ID 数字
+3. 将此数字添加到 `ALLOWED_USERS` 配置中
 
-### 6. Run the Bot
+### 6. 运行 Bot
 
 ```bash
-# Start in debug mode (recommended for first run)
+# 以调试模式启动（首次运行推荐）
 make run-debug
 
-# Or for production
+# 或以生产模式启动
 make run
 ```
 
-### 7. Test the Bot
+### 7. 测试 Bot
 
-1. Find your bot on Telegram (search for your bot username)
-2. Send `/start` to begin
-3. Try a simple command like `/pwd` or `/ls`
-4. Test Claude integration with a simple question
+1. 在 Telegram 中搜索你的 bot 用户名
+2. 发送 `/start` 开始使用
+3. 尝试简单命令如 `/pwd` 或 `/ls`
+4. 用一个简单问题测试 Claude 集成
 
-## Advanced Configuration
+## 高级配置
 
-### Authentication Methods Comparison
+### 认证方式对比
 
-| Feature | SDK + CLI Auth | SDK + API Key | CLI Subprocess |
-|---------|----------------|---------------|----------------|
-| Performance | ✅ Best | ✅ Best | ❌ Slower |
-| Setup Complexity | 🟡 Medium | ✅ Easy | 🟡 Medium |
-| CLI Required | ✅ Yes | ❌ No | ✅ Yes |
-| API Key Management | ❌ No | ✅ Yes | ❌ No |
-| Streaming Support | ✅ Yes | ✅ Yes | 🟡 Limited |
-| Error Handling | ✅ Best | ✅ Best | 🟡 Basic |
+| 特性 | SDK + CLI 认证 | SDK + API Key | CLI 子进程 |
+|------|----------------|---------------|------------|
+| 性能 | 最佳 | 最佳 | 较慢 |
+| 配置复杂度 | 中等 | 简单 | 中等 |
+| 是否需要 CLI | 是 | 否 | 是 |
+| API Key 管理 | 否 | 是 | 否 |
+| 流式传输支持 | 是 | 是 | 有限 |
+| 错误处理 | 最佳 | 最佳 | 基础 |
 
-### Security Considerations
+### 安全注意事项
 
-#### Directory Isolation
+#### 目录隔离
 ```bash
-# Set this to a specific project directory, not your home directory
+# 设置为具体的项目目录，而非你的 home 目录
 APPROVED_DIRECTORY=/Users/yourname/projects
 
-# The bot can only access files within this directory
-# This prevents access to sensitive system files
+# Bot 只能访问此目录下的文件
+# 这可以防止访问敏感的系统文件
 ```
 
-#### User Access Control
+#### 用户访问控制
 ```bash
-# Option 1: Whitelist specific users (recommended)
+# 方式 1：白名单指定用户（推荐）
 ALLOWED_USERS=123456789,987654321
 
-# Option 2: Token-based authentication
+# 方式 2：令牌认证
 ENABLE_TOKEN_AUTH=true
-AUTH_TOKEN_SECRET=your-secret-key-here  # Generate with: openssl rand -hex 32
+AUTH_TOKEN_SECRET=your-secret-key-here  # 生成方式：openssl rand -hex 32
 ```
 
-### Rate Limiting Configuration
+### 限流配置
 
 ```bash
-# Prevent abuse with rate limiting
-RATE_LIMIT_REQUESTS=10          # Requests per window
-RATE_LIMIT_WINDOW=60            # Window in seconds
-RATE_LIMIT_BURST=20             # Burst capacity
+# 通过限流防止滥用
+RATE_LIMIT_REQUESTS=10          # 每个时间窗口的请求数
+RATE_LIMIT_WINDOW=60            # 时间窗口（秒）
+RATE_LIMIT_BURST=20             # 突发容量
 
-# Cost-based limiting
-CLAUDE_MAX_COST_PER_USER=10.0   # Max cost per user in USD
+# 基于费用的限制
+CLAUDE_MAX_COST_PER_USER=10.0   # 每用户最大费用（美元）
 ```
 
-### Development Setup
+### 开发环境配置
 
-For development work:
+用于开发工作：
 
 ```bash
-# Development-specific settings
+# 开发专用设置
 DEBUG=true
 DEVELOPMENT_MODE=true
 LOG_LEVEL=DEBUG
 ENVIRONMENT=development
 
-# More lenient rate limits for testing
+# 更宽松的限流，方便测试
 RATE_LIMIT_REQUESTS=100
 CLAUDE_TIMEOUT_SECONDS=600
 ```
 
-## Troubleshooting
+## 常见问题排查
 
-### Common Setup Issues
+### 常见配置问题
 
-#### Bot doesn't respond
+#### Bot 没有响应
 ```bash
-# Check your bot token
+# 检查 bot token
 echo $TELEGRAM_BOT_TOKEN
 
-# Verify user ID is correct
-# Message @userinfobot to get your ID
+# 验证用户 ID 是否正确
+# 向 @userinfobot 发消息获取你的 ID
 
-# Check bot logs
+# 查看 bot 日志
 make run-debug
 ```
 
-#### Claude authentication issues
+#### Claude 认证问题
 
-**For SDK + CLI Auth:**
+**SDK + CLI 认证模式：**
 ```bash
-# Check CLI authentication
+# 检查 CLI 认证状态
 claude auth status
 
-# Should show: "✓ You are authenticated"
-# If not, run: claude auth login
+# 应显示："✓ You are authenticated"
+# 如果不是，运行：claude auth login
 ```
 
-**For SDK + API Key:**
+**SDK + API Key 模式：**
 ```bash
-# Verify API key is set
+# 验证 API Key 已设置
 echo $ANTHROPIC_API_KEY
 
-# Should start with: sk-ant-api03-
-# Get a new key from: https://console.anthropic.com/
+# 应以 sk-ant-api03- 开头
+# 从 https://console.anthropic.com/ 获取新 Key
 ```
 
-**For CLI Mode:**
+**CLI 模式：**
 ```bash
-# Check CLI installation
+# 检查 CLI 安装
 claude --version
 
-# Check authentication
+# 检查认证状态
 claude auth status
 
-# Test CLI works
+# 测试 CLI 是否正常工作
 claude "Hello, can you help me?"
 ```
 
-#### Permission errors
+#### 权限错误
 ```bash
-# Check approved directory exists and is accessible
+# 检查受批准目录是否存在且可访问
 ls -la /path/to/your/projects
 
-# Verify bot process has read/write permissions
-# The directory should be owned by the user running the bot
+# 验证 bot 进程具有读写权限
+# 该目录应由运行 bot 的用户拥有
 ```
 
-### Performance Optimization
+### 性能优化
 
-#### For SDK Mode
+#### SDK 模式
 ```bash
-# Optimal settings for SDK integration
+# SDK 集成的最佳设置
 USE_SDK=true
 CLAUDE_TIMEOUT_SECONDS=300
 CLAUDE_MAX_TURNS=20
 ```
 
-#### For CLI Mode
+#### CLI 模式
 ```bash
-# If you must use CLI mode, optimize these settings
+# 如果必须使用 CLI 模式，优化以下设置
 USE_SDK=false
-CLAUDE_TIMEOUT_SECONDS=450      # Higher timeout for subprocess overhead
-CLAUDE_MAX_TURNS=10             # Lower turns to reduce subprocess calls
+CLAUDE_TIMEOUT_SECONDS=450      # 子进程开销需要更长超时
+CLAUDE_MAX_TURNS=10             # 减少轮数以降低子进程调用
 ```
 
-### Monitoring and Logging
+### 监控与日志
 
-#### Enable detailed logging
+#### 启用详细日志
 ```bash
 LOG_LEVEL=DEBUG
 DEBUG=true
 
-# Run with debug output
+# 以调试模式运行
 make run-debug
 ```
 
-#### Monitor usage and costs
+#### 监控使用量与费用
 ```bash
-# Check usage in Telegram
+# 在 Telegram 中查看使用情况
 /status
 
-# Monitor logs for cost tracking
+# 监控日志中的费用追踪
 tail -f logs/bot.log | grep -i cost
 ```
 
-## Production Deployment
+## 生产部署
 
-### Environment-specific settings
+### 环境特定设置
 
 ```bash
-# Production configuration
+# 生产配置
 ENVIRONMENT=production
 DEBUG=false
 LOG_LEVEL=INFO
 DEVELOPMENT_MODE=false
 
-# Stricter rate limits
+# 更严格的限流
 RATE_LIMIT_REQUESTS=5
 CLAUDE_MAX_COST_PER_USER=5.0
 SESSION_TIMEOUT_HOURS=12
 
-# Enable monitoring
+# 启用监控
 ENABLE_TELEMETRY=true
 SENTRY_DSN=https://your-sentry-dsn@sentry.io/project
 ```
 
-### Database configuration
+### 数据库配置
 
 ```bash
-# For production, use a persistent database location
+# 生产环境使用持久化的数据库路径
 DATABASE_URL=sqlite:///var/lib/claude-telegram/bot.db
 
-# Or use PostgreSQL for high-scale deployments
+# 或使用 PostgreSQL 用于大规模部署
 # DATABASE_URL=postgresql://user:pass@localhost/claude_telegram
 ```
 
-### Security hardening
+### 安全加固
 
 ```bash
-# Enable token authentication for additional security
+# 启用令牌认证以增强安全性
 ENABLE_TOKEN_AUTH=true
 AUTH_TOKEN_SECRET=your-very-secure-secret-key
 
-# Restrict to specific users only
+# 仅允许特定用户
 ALLOWED_USERS=123456789,987654321
 
-# Use a restricted project directory
+# 使用受限的项目目录
 APPROVED_DIRECTORY=/opt/projects
 ```
 
-## Getting Help
+## 获取帮助
 
-- **Documentation**: Check the main [README.md](../README.md)
-- **Configuration**: See [configuration.md](configuration.md) for all options
-- **Development**: See [development.md](development.md) for development setup
-- **Issues**: [Open an issue](https://github.com/yourusername/claude-code-telegram/issues)
-- **Security**: See [SECURITY.md](../SECURITY.md) for security concerns
+- **文档**：查看主 [README.md](../README.md)
+- **配置**：查看 [configuration.md](configuration.md) 了解所有选项
+- **开发**：查看 [development.md](development.md) 了解开发配置
+- **问题反馈**：[提交 Issue](https://github.com/yourusername/claude-code-telegram/issues)
+- **安全**：查看 [SECURITY.md](../SECURITY.md) 了解安全相关事项

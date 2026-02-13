@@ -1,9 +1,9 @@
-# TODO-1: Project Structure & Core Setup
+# TODO-1: 项目结构与基础搭建
 
-## Objective
-Establish a well-organized, maintainable project structure that supports both development and open-source contribution.
+## 目标
+建立一个组织良好、易于维护的项目结构，支持开发和开源贡献。
 
-## Directory Structure
+## 目录结构
 
 ```
 claude-code-telegram/
@@ -88,7 +88,7 @@ claude-code-telegram/
 └── Makefile                 # Common commands
 ```
 
-## Core Package Setup
+## 核心包配置
 
 ### pyproject.toml
 ```toml
@@ -122,28 +122,28 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 ```
 
-## Logging Infrastructure
+## 日志基础设施
 
-### Structured Logging Setup
+### 结构化日志配置
 ```python
 # src/utils/logging.py
 """
-Configure structured logging using structlog
-- JSON output for production
-- Pretty printing for development
-- Correlation IDs for request tracking
-- Performance metrics
+使用 structlog 配置结构化日志
+- 生产环境输出 JSON
+- 开发环境美化打印
+- 使用关联 ID 进行请求追踪
+- 性能指标
 """
 
-# Configuration based on environment
-# Development: Colorful, human-readable output
-# Production: JSON with full context
-# Include: timestamp, level, logger, correlation_id, user_id, event
+# 根据环境进行配置
+# 开发环境：彩色、易于阅读的输出
+# 生产环境：包含完整上下文的 JSON
+# 包含字段：timestamp、level、logger、correlation_id、user_id、event
 ```
 
-## Exception Hierarchy
+## 异常层级
 
-### Base Exceptions
+### 基础异常
 ```python
 # src/exceptions.py
 """
@@ -168,9 +168,9 @@ ClaudeCodeTelegramError (base)
 """
 ```
 
-## Development Environment
+## 开发环境
 
-### Makefile Commands
+### Makefile 命令
 ```makefile
 .PHONY: install dev test lint format clean
 
@@ -199,20 +199,20 @@ clean:
 	find . -type f -name "*.pyc" -delete
 ```
 
-## Initial Files to Create
+## 需要创建的初始文件
 
-1. **src/__init__.py**: Version and package info
-2. **src/main.py**: Entry point with basic argument parsing
-3. **src/config.py**: Empty configuration class
-4. **src/exceptions.py**: Complete exception hierarchy
-5. **src/utils/constants.py**: App-wide constants
-6. **.env.example**: Template with all required variables
-7. **requirements/base.txt**: Core dependencies only
-8. **README.md**: Basic project description
-9. **.gitignore**: Python-specific ignores
-10. **Makefile**: Development commands
+1. **src/__init__.py**：版本和包信息
+2. **src/main.py**：带有基本参数解析的入口文件
+3. **src/config.py**：空的配置类
+4. **src/exceptions.py**：完整的异常层级
+5. **src/utils/constants.py**：应用级常量
+6. **.env.example**：包含所有必需变量的模板
+7. **requirements/base.txt**：仅核心依赖
+8. **README.md**：基本项目描述
+9. **.gitignore**：Python 专用忽略规则
+10. **Makefile**：开发命令
 
-## Dependencies to Include
+## 需要包含的依赖
 
 ### requirements/base.txt
 ```
@@ -246,13 +246,13 @@ pytest-mock>=3.0
 factory-boy>=3.0
 ```
 
-## Success Criteria
+## 验收标准
 
-- [ ] All directories created with __init__.py files
-- [ ] Dependencies installed successfully
-- [ ] Basic logging works with structured output
-- [ ] Exception hierarchy implemented
-- [ ] Makefile commands functioning
-- [ ] Pre-commit hooks configured
-- [ ] Can run `make test` successfully (even with no tests)
-- [ ] Project installable with `pip install -e .`
+- [ ] 所有目录已创建并包含 __init__.py 文件
+- [ ] 依赖安装成功
+- [ ] 基本日志功能可以输出结构化内容
+- [ ] 异常层级已实现
+- [ ] Makefile 命令正常运行
+- [ ] Pre-commit 钩子已配置
+- [ ] 可以成功运行 `make test`（即使没有测试用例）
+- [ ] 项目可通过 `pip install -e .` 安装

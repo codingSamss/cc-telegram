@@ -1,192 +1,192 @@
-# Development Guide
+# 开发指南
 
-This document provides detailed information for developers working on the Claude Code Telegram Bot.
+本文档为参与 Claude Code Telegram Bot 开发的开发者提供详细信息。
 
-## Getting Started
+## 快速上手
 
-### Prerequisites
+### 前置条件
 
-- Python 3.9 or higher
-- Poetry for dependency management
-- Git for version control
-- Claude authentication (one of):
-  - Claude Code CLI installed and authenticated
-  - Anthropic API key for direct SDK usage
+- Python 3.9 或更高版本
+- Poetry 依赖管理工具
+- Git 版本控制
+- Claude 认证（以下任选其一）：
+  - 已安装并完成认证的 Claude Code CLI
+  - 用于直接调用 SDK 的 Anthropic API Key
 
-### Initial Setup
+### 初始配置
 
-1. **Clone the repository**:
+1. **克隆仓库**：
    ```bash
    git clone <repository-url>
    cd claude-code-telegram
    ```
 
-2. **Install Poetry** (if not already installed):
+2. **安装 Poetry**（如尚未安装）：
    ```bash
    pip install poetry
    ```
 
-3. **Install dependencies**:
+3. **安装依赖**：
    ```bash
    make dev
    ```
 
-4. **Set up pre-commit hooks** (optional but recommended):
+4. **配置 pre-commit 钩子**（可选但推荐）：
    ```bash
    poetry run pre-commit install
    ```
 
-5. **Create configuration file**:
+5. **创建配置文件**：
    ```bash
    cp .env.example .env
-   # Edit .env with your development settings
+   # 编辑 .env，填入你的开发环境配置
    ```
 
-## Development Workflow
+## 开发工作流
 
-### Daily Development
+### 日常开发
 
-1. **Activate the Poetry environment**:
+1. **激活 Poetry 环境**：
    ```bash
    poetry shell
    ```
 
-2. **Run tests continuously during development**:
+2. **在开发过程中持续运行测试**：
    ```bash
    make test
    ```
 
-3. **Format code before committing**:
+3. **提交前格式化代码**：
    ```bash
    make format
    ```
 
-4. **Check code quality**:
+4. **检查代码质量**：
    ```bash
    make lint
    ```
 
-### Available Make Commands
+### 可用的 Make 命令
 
 ```bash
-make help          # Show all available commands
-make install       # Install production dependencies only
-make dev           # Install all dependencies including dev tools
-make test          # Run full test suite with coverage
-make lint          # Run all code quality checks
-make format        # Auto-format all code
-make clean         # Clean up generated files
-make run           # Run the bot in normal mode
-make run-debug     # Run the bot with debug logging
+make help          # 显示所有可用命令
+make install       # 仅安装生产依赖
+make dev           # 安装所有依赖（含开发工具）
+make test          # 运行完整测试套件并统计覆盖率
+make lint          # 运行所有代码质量检查
+make format        # 自动格式化所有代码
+make clean         # 清理生成的文件
+make run           # 以正常模式运行 bot
+make run-debug     # 以调试日志模式运行 bot
 ```
 
-## Project Architecture
+## 项目架构
 
-### Package Structure
+### 包结构
 
 ```
 src/
-├── config/           # Configuration management (✅ Complete)
+├── config/           # 配置管理（已完成）
 │   ├── __init__.py
-│   ├── settings.py   # Pydantic Settings class
-│   ├── loader.py     # Environment detection and loading
-│   ├── environments.py # Environment-specific overrides
-│   └── features.py   # Feature flag management
-├── bot/              # Telegram bot implementation (✅ Complete)
+│   ├── settings.py   # Pydantic Settings 类
+│   ├── loader.py     # 环境检测与加载
+│   ├── environments.py # 环境特定覆盖配置
+│   └── features.py   # 功能开关管理
+├── bot/              # Telegram bot 实现（已完成）
 │   ├── __init__.py
-│   ├── core.py       # Main bot class
-│   ├── handlers/     # Command and message handlers
-│   ├── middleware/   # Authentication and rate limiting
-│   └── utils/        # Response formatting utilities
-├── claude/           # Claude Code integration (✅ Complete)
+│   ├── core.py       # Bot 主类
+│   ├── handlers/     # 命令与消息处理器
+│   ├── middleware/   # 认证与限流
+│   └── utils/        # 响应格式化工具
+├── claude/           # Claude Code 集成（已完成）
 │   ├── __init__.py
-│   ├── integration.py # Subprocess management
-│   ├── parser.py     # Output parsing and formatting
-│   ├── session.py    # Session management
-│   ├── monitor.py    # Tool usage monitoring
-│   ├── facade.py     # High-level integration API
-│   └── exceptions.py # Claude-specific exceptions
-├── storage/          # Database and persistence (✅ Complete)
+│   ├── integration.py # 子进程管理
+│   ├── parser.py     # 输出解析与格式化
+│   ├── session.py    # 会话管理
+│   ├── monitor.py    # 工具使用监控
+│   ├── facade.py     # 高层集成 API
+│   └── exceptions.py # Claude 专用异常
+├── storage/          # 数据库与持久化（已完成）
 │   ├── __init__.py
-│   ├── database.py   # Database connection and migrations
-│   ├── models.py     # Data models with type safety
-│   ├── repositories.py # Repository pattern data access
-│   ├── facade.py     # Storage facade interface
-│   └── session_storage.py # Persistent session storage
-├── security/         # Authentication and security (✅ Complete)
+│   ├── database.py   # 数据库连接与迁移
+│   ├── models.py     # 类型安全的数据模型
+│   ├── repositories.py # 仓储模式的数据访问
+│   ├── facade.py     # 存储门面接口
+│   └── session_storage.py # 持久化会话存储
+├── security/         # 认证与安全（已完成）
 │   ├── __init__.py
-│   ├── auth.py       # Authentication logic
-│   ├── validators.py # Input validation
-│   └── rate_limiter.py # Rate limiting
-├── utils/            # Utilities and constants (✅ Complete)
+│   ├── auth.py       # 认证逻辑
+│   ├── validators.py # 输入校验
+│   └── rate_limiter.py # 限流
+├── utils/            # 工具与常量（已完成）
 │   ├── __init__.py
-│   └── constants.py  # Application constants
-├── exceptions.py     # Custom exception hierarchy (✅ Complete)
-└── main.py          # Application entry point (✅ Complete)
+│   └── constants.py  # 应用常量
+├── exceptions.py     # 自定义异常层级（已完成）
+└── main.py          # 应用入口（已完成）
 ```
 
-### Testing Structure
+### 测试结构
 
 ```
 tests/
-├── unit/             # Unit tests (mirror src structure)
+├── unit/             # 单元测试（目录结构镜像 src）
 │   ├── test_config.py
 │   ├── test_environments.py
 │   ├── test_exceptions.py
-│   ├── test_bot/     # Bot component tests
-│   ├── test_claude/  # Claude integration tests
-│   ├── test_security/ # Security framework tests
-│   └── test_storage/ # Storage layer tests
-├── integration/      # Integration tests (🚧 TODO)
-├── fixtures/         # Test data and fixtures (🚧 TODO)
-└── conftest.py      # Pytest configuration
+│   ├── test_bot/     # Bot 组件测试
+│   ├── test_claude/  # Claude 集成测试
+│   ├── test_security/ # 安全框架测试
+│   └── test_storage/ # 存储层测试
+├── integration/      # 集成测试（待完成）
+├── fixtures/         # 测试数据与夹具（待完成）
+└── conftest.py      # Pytest 配置
 ```
 
-## Code Standards
+## 代码规范
 
-### Code Style
+### 代码风格
 
-We use strict code formatting and quality tools:
+我们使用严格的代码格式化与质量工具：
 
-- **Black**: Code formatting with 88-character line length
-- **isort**: Import sorting with Black compatibility
-- **flake8**: Linting with 88-character line length
-- **mypy**: Static type checking with strict settings
+- **Black**：代码格式化，行宽 88 字符
+- **isort**：导入排序，兼容 Black 配置
+- **flake8**：代码检查，行宽 88 字符
+- **mypy**：严格模式的静态类型检查
 
-### Type Hints
+### 类型标注
 
-All code must include comprehensive type hints:
+所有代码必须包含完整的类型标注：
 
 ```python
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
 def process_config(
-    settings: Settings, 
+    settings: Settings,
     overrides: Optional[Dict[str, Any]] = None
 ) -> Path:
-    """Process configuration with optional overrides."""
-    # Implementation
+    """处理配置，支持可选覆盖参数。"""
+    # 实现
     return Path("/example")
 ```
 
-### Error Handling
+### 错误处理
 
-Use the custom exception hierarchy defined in `src/exceptions.py`:
+使用 `src/exceptions.py` 中定义的自定义异常层级：
 
 ```python
 from src.exceptions import ConfigurationError, SecurityError
 
 try:
-    # Some operation
+    # 某些操作
     pass
 except ValueError as e:
     raise ConfigurationError(f"Invalid configuration: {e}") from e
 ```
 
-### Logging
+### 日志
 
-Use structured logging throughout:
+全局使用结构化日志：
 
 ```python
 import structlog
@@ -196,205 +196,205 @@ logger = structlog.get_logger()
 def some_function():
     logger.info("Operation started", operation="example", user_id=123)
     try:
-        # Some operation
+        # 某些操作
         logger.debug("Step completed", step="validation")
     except Exception as e:
         logger.error("Operation failed", error=str(e), operation="example")
         raise
 ```
 
-## Testing Guidelines
+## 测试指南
 
-### Test Organization
+### 测试组织
 
-- **Unit tests**: Test individual functions and classes in isolation
-- **Integration tests**: Test component interactions
-- **End-to-end tests**: Test complete workflows (planned)
+- **单元测试**：隔离测试单个函数和类
+- **集成测试**：测试组件间交互
+- **端到端测试**：测试完整工作流（规划中）
 
-### Writing Tests
+### 编写测试
 
 ```python
 import pytest
 from src.config import create_test_config
 
 def test_feature_with_config():
-    """Test feature with specific configuration."""
+    """测试特定配置下的功能。"""
     config = create_test_config(
         debug=True,
         claude_max_turns=5
     )
-    
-    # Test implementation
+
+    # 测试实现
     assert config.debug is True
     assert config.claude_max_turns == 5
 
 @pytest.mark.asyncio
 async def test_async_feature():
-    """Test async functionality."""
-    # Test async code
+    """测试异步功能。"""
+    # 测试异步代码
     result = await some_async_function()
     assert result is not None
 ```
 
-### Test Coverage
+### 测试覆盖率
 
-We aim for >80% test coverage. Current coverage:
+我们的目标是测试覆盖率大于 80%。当前覆盖率：
 
-- Configuration system: ~95%
-- Security framework: ~95%
-- Claude integration: ~75%
-- Storage layer: ~90%
-- Bot components: ~85%
-- Exception handling: 100%
-- Utilities: 100%
-- Overall: ~85%
+- 配置系统：约 95%
+- 安全框架：约 95%
+- Claude 集成：约 75%
+- 存储层：约 90%
+- Bot 组件：约 85%
+- 异常处理：100%
+- 工具模块：100%
+- 总体：约 85%
 
-## Implementation Status
+## 实现进度
 
-### ✅ Completed Components
+### 已完成的组件
 
-#### TODO-1: Project Structure
-- Complete package layout with proper Python packaging
-- Poetry dependency management with dev/test/prod separation  
-- Makefile with development commands
-- Exception hierarchy with proper inheritance
-- Structured logging with JSON output for production
-- Testing framework with pytest, coverage, and asyncio support
+#### TODO-1：项目结构
+- 完整的包布局与规范的 Python 打包
+- Poetry 依赖管理，区分开发/测试/生产依赖
+- Makefile 开发命令
+- 异常层级，正确使用继承
+- 结构化日志，生产环境支持 JSON 输出
+- 测试框架，支持 pytest、覆盖率统计和 asyncio
 
-#### TODO-2: Configuration System
-- **Pydantic Settings v2** with environment variable loading
-- **Environment-specific overrides** (development/testing/production)
-- **Feature flags system** for dynamic functionality control
-- **Cross-field validation** with proper error messages
-- **Type-safe configuration** with full mypy compliance
-- **Computed properties** for derived values
-- **Configuration loader** with environment detection
-- **Test utilities** for easy test configuration
+#### TODO-2：配置系统
+- **Pydantic Settings v2**，支持环境变量加载
+- **环境特定覆盖**（开发/测试/生产）
+- **功能开关系统**，支持动态功能控制
+- **跨字段校验**，提供清晰的错误信息
+- **类型安全配置**，完全通过 mypy 检查
+- **计算属性**，用于派生值
+- **配置加载器**，支持环境检测
+- **测试工具**，方便测试时使用配置
 
-#### TODO-3: Authentication & Security Framework
-- Multi-provider authentication system (whitelist and token-based)
-- Rate limiting with token bucket algorithm
-- Comprehensive input validation and path traversal prevention
-- Security audit logging with risk assessment
-- Bot middleware framework for security integration
+#### TODO-3：认证与安全框架
+- 多提供者认证系统（白名单和令牌认证）
+- 基于令牌桶算法的限流
+- 全面的输入校验和路径遍历防护
+- 安全审计日志，附带风险评估
+- Bot 中间件框架，集成安全功能
 
-#### TODO-4: Telegram Bot Core
-- Complete bot implementation with handler registration
-- Command routing system with comprehensive command set
-- Message parsing and intelligent response formatting
-- Inline keyboard support for user interactions
-- Error handling middleware with user-friendly messages
+#### TODO-4：Telegram Bot 核心
+- 完整的 bot 实现，支持处理器注册
+- 命令路由系统，覆盖全面的命令集
+- 消息解析与智能响应格式化
+- 内联键盘支持用户交互
+- 错误处理中间件，提供用户友好的错误信息
 
-#### TODO-5: Claude Code Integration
-- Async subprocess management for Claude CLI with timeout handling
-- Response streaming and parsing for real-time updates
-- Session state persistence with context maintenance
-- Tool usage monitoring and security validation
-- Cost tracking and usage analytics
+#### TODO-5：Claude Code 集成
+- 异步子进程管理 Claude CLI，支持超时处理
+- 响应流式传输与解析，支持实时更新
+- 会话状态持久化与上下文维护
+- 工具使用监控与安全校验
+- 费用追踪与使用量分析
 
-#### TODO-6: Storage Layer
-- SQLite database with complete schema and foreign key relationships
-- Repository pattern implementation with clean data access
-- Migration system with schema versioning
-- Analytics and reporting with user/admin dashboards
-- Persistent session storage replacing in-memory storage
+#### TODO-6：存储层
+- SQLite 数据库，完整的表结构与外键关系
+- 仓储模式实现，提供清晰的数据访问
+- 迁移系统，支持表结构版本管理
+- 分析与报表，支持用户/管理员仪表盘
+- 持久化会话存储，替代内存存储
 
-### 🚧 Next Implementation Steps
+### 下一步实现计划
 
-#### TODO-7: Advanced Features (Current Priority)
-- File upload handling with security validation
-- Git integration for repository operations
-- Quick actions system for common workflows
-- Session export features (Markdown, JSON, HTML)
-- Image/screenshot support and processing
+#### TODO-7：高级功能（当前优先）
+- 文件上传处理与安全校验
+- Git 集成，支持仓库操作
+- 快捷操作系统，覆盖常见工作流
+- 会话导出功能（Markdown、JSON、HTML）
+- 图片/截图支持与处理
 
-#### TODO-8: Complete Testing Suite
-- Integration tests for end-to-end workflows
-- Performance testing and benchmarking
-- Security testing and penetration testing
-- Load testing for concurrent users
+#### TODO-8：完整测试套件
+- 端到端工作流的集成测试
+- 性能测试与基准测试
+- 安全测试与渗透测试
+- 并发用户负载测试
 
-#### TODO-9: Deployment & Documentation
-- Docker configuration and containerization
-- Kubernetes manifests for production deployment
-- Complete user and admin documentation
-- API documentation and developer guides
+#### TODO-9：部署与文档
+- Docker 配置与容器化
+- Kubernetes 清单，用于生产部署
+- 完整的用户和管理员文档
+- API 文档与开发者指南
 
-## Development Environment Configuration
+## 开发环境配置
 
-### Required Environment Variables
+### 必需的环境变量
 
-For development, set these in your `.env` file:
+在开发环境中，请在 `.env` 文件中设置以下变量：
 
 ```bash
-# Required for basic functionality
+# 基本功能所需
 TELEGRAM_BOT_TOKEN=test_token_for_development
 TELEGRAM_BOT_USERNAME=test_bot
 APPROVED_DIRECTORY=/path/to/your/test/projects
 
-# Claude Integration (choose one authentication method)
-USE_SDK=true                      # Use SDK (recommended for development)
-# Option 1: Use existing Claude CLI auth (no API key needed)
-# Option 2: Direct API key
+# Claude 集成（选择一种认证方式）
+USE_SDK=true                      # 使用 SDK（推荐用于开发）
+# 方式一：使用已有的 Claude CLI 认证（无需 API Key）
+# 方式二：直接使用 API Key
 # ANTHROPIC_API_KEY=sk-ant-api03-your-development-key
 
-# Development settings
+# 开发设置
 DEBUG=true
 DEVELOPMENT_MODE=true
 LOG_LEVEL=DEBUG
 ENVIRONMENT=development
 
-# Optional for testing specific features
+# 可选，用于测试特定功能
 ENABLE_GIT_INTEGRATION=true
 ENABLE_FILE_UPLOADS=true
 ENABLE_QUICK_ACTIONS=true
 ```
 
-### Running in Development Mode
+### 以开发模式运行
 
 ```bash
-# Basic run with environment variables
+# 通过环境变量启动
 export TELEGRAM_BOT_TOKEN=test_token
-export TELEGRAM_BOT_USERNAME=test_bot  
+export TELEGRAM_BOT_USERNAME=test_bot
 export APPROVED_DIRECTORY=/tmp/test_projects
 make run-debug
 
-# Or with .env file
+# 或使用 .env 文件
 make run-debug
 ```
 
-The debug output will show:
-- Configuration loading steps
-- Environment overrides applied
-- Feature flags enabled
-- Validation results
+调试输出将显示：
+- 配置加载步骤
+- 已应用的环境覆盖配置
+- 已启用的功能开关
+- 校验结果
 
-## Contributing
+## 参与贡献
 
-### Before Submitting a PR
+### 提交 PR 前的检查清单
 
-1. **Run the full test suite**:
+1. **运行完整测试套件**：
    ```bash
    make test
    ```
 
-2. **Check code quality**:
+2. **检查代码质量**：
    ```bash
    make lint
    ```
 
-3. **Format code**:
+3. **格式化代码**：
    ```bash
    make format
    ```
 
-4. **Update documentation** if needed
+4. **如有需要，更新文档**
 
-5. **Add tests** for new functionality
+5. **为新功能添加测试**
 
-### Commit Message Format
+### 提交信息格式
 
-Use conventional commits:
+使用约定式提交（Conventional Commits）：
 
 ```
 feat: add rate limiting functionality
@@ -403,82 +403,82 @@ docs: update development guide
 test: add tests for authentication system
 ```
 
-### Code Review Guidelines
+### 代码评审准则
 
-- All code must pass linting and type checking
-- Test coverage should not decrease
-- New features require documentation updates
-- Security-related changes require extra review
+- 所有代码必须通过代码检查和类型检查
+- 测试覆盖率不应降低
+- 新功能需要同步更新文档
+- 安全相关变更需要额外评审
 
-## Common Development Tasks
+## 常见开发任务
 
-### Adding a New Configuration Option
+### 添加新配置项
 
-1. **Add to Settings class** in `src/config/settings.py`:
+1. **在 Settings 类中添加**，位于 `src/config/settings.py`：
    ```python
    new_setting: bool = Field(False, description="Description of new setting")
    ```
 
-2. **Add to .env.example** with documentation
+2. **添加到 `.env.example`** 并附带说明
 
-3. **Add validation** if needed
+3. **如有需要，添加校验逻辑**
 
-4. **Write tests** in `tests/unit/test_config.py`
+4. **编写测试**，位于 `tests/unit/test_config.py`
 
-5. **Update documentation** in `docs/configuration.md`
+5. **更新文档**，位于 `docs/configuration.md`
 
-### Adding a New Feature Flag
+### 添加新功能开关
 
-1. **Add property** to `FeatureFlags` class in `src/config/features.py`:
+1. **在 `FeatureFlags` 类中添加属性**，位于 `src/config/features.py`：
    ```python
    @property
    def new_feature_enabled(self) -> bool:
        return self.settings.enable_new_feature
    ```
 
-2. **Add to enabled features list**
+2. **添加到已启用功能列表**
 
-3. **Write tests**
+3. **编写测试**
 
-### Debugging Configuration Issues
+### 调试配置问题
 
-1. **Use debug logging**:
+1. **使用调试日志**：
    ```bash
    make run-debug
    ```
 
-2. **Check validation errors** in the logs
+2. **在日志中检查校验错误**
 
-3. **Verify environment variables**:
+3. **验证环境变量**：
    ```bash
    env | grep TELEGRAM
    env | grep CLAUDE
    ```
 
-4. **Test configuration loading**:
+4. **测试配置加载**：
    ```python
    from src.config import load_config
    config = load_config()
    print(config.model_dump())
    ```
 
-## Troubleshooting
+## 常见问题排查
 
-### Common Issues
+### 常见问题
 
-1. **Import errors**: Make sure you're in the Poetry environment (`poetry shell`)
+1. **导入错误**：确保你处于 Poetry 环境中（`poetry shell`）
 
-2. **Configuration validation errors**: Check that required environment variables are set
+2. **配置校验错误**：检查必需的环境变量是否已设置
 
-3. **Test failures**: Ensure test dependencies are installed (`make dev`)
+3. **测试失败**：确保测试依赖已安装（`make dev`）
 
-4. **Type checking errors**: Run `poetry run mypy src` to see detailed errors
+4. **类型检查错误**：运行 `poetry run mypy src` 查看详细错误
 
-5. **Poetry issues**: Try `poetry lock --no-update` to fix lock file issues
+5. **Poetry 相关问题**：尝试 `poetry lock --no-update` 修复 lock 文件问题
 
-### Getting Help
+### 获取帮助
 
-- Check the logs with `make run-debug`
-- Review test output with `make test`
-- Examine the implementation documentation in `docs/`
-- Look at existing code patterns in the completed modules
+- 使用 `make run-debug` 查看日志
+- 使用 `make test` 查看测试输出
+- 查阅 `docs/` 中的实现文档
+- 参考已完成模块中的代码模式

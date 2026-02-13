@@ -1,94 +1,94 @@
-# Claude Code Telegram Bot - Project Overview
+# Claude Code Telegram Bot - 项目概述
 
-## Project Description
+## 项目简介
 
-A Telegram bot that provides remote access to Claude Code, allowing developers to interact with their projects from anywhere. The bot offers a terminal-like interface through Telegram, enabling project navigation, file management, and Claude Code sessions with full context persistence.
+一个 Telegram bot，提供对 Claude Code 的远程访问，让开发者可以随时随地与项目交互。该 bot 通过 Telegram 提供类似终端的界面，支持项目导航、文件管理以及带完整上下文持久化的 Claude Code 会话。
 
-## Core Objectives
+## 核心目标
 
-1. **Remote Development Access**: Enable developers to use Claude Code when away from their primary development machine
-2. **Security-First Design**: Implement robust security boundaries to prevent unauthorized access
-3. **Intuitive Interface**: Provide familiar terminal commands within Telegram's chat interface
-4. **Session Persistence**: Maintain Claude Code context across conversations and project switches
-5. **Open Source Ready**: Build with community contribution and extensibility in mind
+1. **远程开发访问**：让开发者在离开主开发机器时也能使用 Claude Code
+2. **安全优先设计**：实现严格的安全边界，防止未授权访问
+3. **直观的界面**：在 Telegram 的聊天界面中提供熟悉的终端命令
+4. **会话持久化**：跨对话和项目切换保持 Claude Code 上下文
+5. **开源就绪**：面向社区贡献和扩展性进行构建
 
-## Target Users
+## 目标用户
 
-- Developers who need coding assistance while mobile
-- Teams wanting shared Claude Code access
-- Users who prefer chat-based interfaces for development tasks
-- Developers managing multiple projects remotely
+- 需要在移动端获取编码辅助的开发者
+- 需要共享 Claude Code 访问权限的团队
+- 偏好基于聊天界面进行开发任务的用户
+- 需要远程管理多个项目的开发者
 
-## Key Features
+## 核心功能
 
-### Navigation & File Management
-- Terminal-like commands (cd, ls, pwd)
-- Project quick-switching with visual selection
-- File upload and review capabilities
-- Git status integration
+### 导航与文件管理
+- 类终端命令（cd、ls、pwd）
+- 可视化选择的项目快速切换
+- 文件上传与审查功能
+- Git 状态集成
 
-### Claude Code Integration
-- Full Claude Code CLI integration
-- Session management per user/project
-- Streaming responses for long operations
-- Tool usage visibility
-- Cost tracking and limits
+### Claude Code 集成
+- 完整的 Claude Code CLI 集成
+- 按用户/项目维度的会话管理
+- 长时间操作的流式响应
+- 工具使用可见性
+- 费用追踪与限额
 
-### Security & Access Control
-- Approved directory boundaries
-- User authentication (whitelist and token-based)
-- Rate limiting per user
-- Cost caps to prevent overuse
-- Audit logging
+### 安全与访问控制
+- 受批准的目录边界
+- 用户认证（白名单和令牌认证）
+- 按用户限流
+- 费用上限，防止过度使用
+- 审计日志
 
-### User Experience
-- Inline keyboards for common actions
-- Progress indicators for long operations
-- Formatted code output with syntax highlighting
-- Session export and sharing
-- Quick action buttons
+### 用户体验
+- 常用操作的内联键盘
+- 长时间操作的进度指示器
+- 带语法高亮的格式化代码输出
+- 会话导出与分享
+- 快捷操作按钮
 
-## Technical Architecture
+## 技术架构
 
-### Components
+### 组件
 
-1. **Bot Core** (`bot.py`)
-   - Telegram bot interface
-   - Command handlers
-   - Message routing
+1. **Bot 核心**（`bot.py`）
+   - Telegram bot 接口
+   - 命令处理器
+   - 消息路由
 
-2. **Configuration** (`config.py`)
-   - Environment-based configuration
-   - Feature flags
-   - Security settings
+2. **配置**（`config.py`）
+   - 基于环境的配置
+   - 功能开关
+   - 安全设置
 
-3. **Authentication** (`auth.py`)
-   - User verification
-   - Token management
-   - Permission checking
+3. **认证**（`auth.py`）
+   - 用户验证
+   - 令牌管理
+   - 权限检查
 
-4. **Claude Integration** (`claude_integration.py`)
-   - Claude Code subprocess management
-   - Response parsing and streaming
-   - Session state management
+4. **Claude 集成**（`claude_integration.py`）
+   - Claude Code 子进程管理
+   - 响应解析与流式传输
+   - 会话状态管理
 
-5. **Storage Layer** (`storage/`)
-   - SQLite database with complete schema
-   - Repository pattern for data access
-   - Session persistence and analytics
-   - Cost tracking and audit logging
+5. **存储层**（`storage/`）
+   - SQLite 数据库，完整的表结构
+   - 仓储模式的数据访问
+   - 会话持久化与分析
+   - 费用追踪与审计日志
 
-6. **Security** (`security.py`)
-   - Directory traversal prevention
-   - Input sanitization
-   - Rate limiting
+6. **安全**（`security.py`）
+   - 目录遍历防护
+   - 输入净化
+   - 限流
 
-7. **Utilities** (`utils.py`)
-   - Message formatting
-   - File handling
-   - Error management
+7. **工具模块**（`utils.py`）
+   - 消息格式化
+   - 文件处理
+   - 错误管理
 
-### Data Flow
+### 数据流
 
 ```
 User Message → Telegram Bot → Auth Check → Command Parser
@@ -100,27 +100,27 @@ Storage ← Response Formatter ← Parse Output ←
 User Response
 ```
 
-### Security Model
+### 安全模型
 
-- **Directory Isolation**: All operations confined to approved directory tree
-- **User Authentication**: Whitelist or token-based access
-- **Rate Limiting**: Prevent abuse and control costs
-- **Audit Trail**: Log all operations for security review
-- **Input Validation**: Sanitize all user inputs
+- **目录隔离**：所有操作限制在受批准的目录树内
+- **用户认证**：白名单或令牌认证访问
+- **限流**：防止滥用并控制费用
+- **审计追踪**：记录所有操作以供安全审查
+- **输入校验**：净化所有用户输入
 
-## Development Principles
+## 开发原则
 
-1. **Security First**: Every feature must consider security implications
-2. **User Experience**: Terminal familiarity with chat convenience
-3. **Extensibility**: Plugin-ready architecture for community features
-4. **Testability**: Comprehensive test coverage
-5. **Documentation**: Clear docs for users and contributors
+1. **安全优先**：每个功能都必须考虑安全影响
+2. **用户体验**：终端的熟悉感与聊天的便利性
+3. **可扩展性**：面向社区功能的插件化架构
+4. **可测试性**：全面的测试覆盖
+5. **文档完善**：为用户和贡献者提供清晰的文档
 
-## Success Criteria
+## 成功标准
 
-- Zero security vulnerabilities in directory access
-- <2s response time for basic commands
-- 99%+ uptime for bot availability
-- Support for 10+ concurrent users
-- Complete feature parity with local Claude Code usage
-- Active open source community (10+ contributors in first year)
+- 目录访问零安全漏洞
+- 基础命令响应时间小于 2 秒
+- bot 可用性 99% 以上
+- 支持 10+ 并发用户
+- 与本地 Claude Code 使用完全功能对等
+- 活跃的开源社区（首年 10+ 贡献者）

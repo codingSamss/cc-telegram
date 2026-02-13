@@ -1,241 +1,241 @@
-# Changelog
+# 变更日志
 
-All notable changes to this project will be documented in this file.
+本文件记录本项目的所有重要变更。
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)，
+版本号遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
 ## [Unreleased]
 
-### Added
-- **Automatic Session Resumption**: Sessions are now automatically resumed per user+directory
-  - SDK integration now passes `resume` parameter to Claude Code for real session continuity
-  - Session IDs extracted from Claude's `ResultMessage` instead of generated locally
-  - `/cd` looks up and resumes existing sessions for the target directory
-  - Auto-resume from SQLite database survives bot restarts
-  - Graceful fallback to fresh session when resume fails (stale/expired sessions)
-  - `/new` and `/end` are the only ways to explicitly clear session context
-  - `/status` shows resumable sessions from the database
+### 新增
+- **会话自动恢复**：现在会按用户+目录自动恢复会话
+  - SDK 集成现向 Claude Code 传递 `resume` 参数以实现真正的会话连续性
+  - 会话 ID 从 Claude 的 `ResultMessage` 中提取，而非本地生成
+  - `/cd` 会查找并恢复目标目录的已有会话
+  - 基于 SQLite 数据库的自动恢复机制在 bot 重启后仍然有效
+  - 恢复失败时优雅降级为全新会话（过期/失效的会话）
+  - `/new` 和 `/end` 是唯一显式清除会话上下文的方式
+  - `/status` 显示数据库中可恢复的会话
 
-### In Progress
-- Advanced Features (TODO-7)
-- Complete Testing Suite (TODO-8)
-- Deployment & Documentation (TODO-9)
+### 进行中
+- 高级功能（TODO-7）
+- 完整测试套件（TODO-8）
+- 部署与文档（TODO-9）
 
-### Recently Completed
+### 近期完成
 
-#### Storage Layer Implementation (TODO-6) - 2025-06-06
-- **SQLite Database with Complete Schema**:
-  - 7 core tables: users, sessions, messages, tool_usage, audit_log, user_tokens, cost_tracking
-  - Foreign key relationships and proper indexing for performance
-  - Migration system with schema versioning and automatic upgrades
-  - Connection pooling for efficient database resource management
-- **Repository Pattern Data Access Layer**:
-  - UserRepository for user management and permissions
-  - SessionRepository for session lifecycle and cleanup
-  - MessageRepository for Claude interaction logging
-  - ToolUsageRepository for tool usage tracking and statistics
-  - AuditLogRepository for security event logging
-  - CostTrackingRepository for usage monitoring and billing
-  - AnalyticsRepository for comprehensive reporting and dashboards
-- **Persistent Session Management**:
-  - SQLiteSessionStorage replacing in-memory storage
-  - Session persistence across bot restarts and deployments
-  - Automatic session cleanup and expiry handling
-  - User session limits and concurrent session management
-- **Analytics and Reporting System**:
-  - User dashboards with usage statistics and cost tracking
-  - Admin dashboards with system-wide analytics
-  - Tool usage statistics and performance monitoring
-  - Daily activity reports and trend analysis
-- **Comprehensive Integration**:
-  - Updated main application to use persistent storage
-  - Message handlers now log all Claude interactions
-  - Cost tracking with daily limits and monitoring
-  - Audit logging for all security-relevant operations
-- **Complete Test Coverage**:
-  - 27 comprehensive tests for all storage components
-  - Database operations, repositories, and facade testing
-  - Test coverage: 88-96% for storage modules
-  - Integration testing with real database operations
+#### 存储层实现（TODO-6）- 2025-06-06
+- **SQLite 数据库与完整模式**：
+  - 7 张核心表：users、sessions、messages、tool_usage、audit_log、user_tokens、cost_tracking
+  - 外键关系和适当的性能索引
+  - 带模式版本控制和自动升级的迁移系统
+  - 用于高效管理数据库资源的连接池
+- **仓储模式数据访问层**：
+  - UserRepository 用于用户管理和权限
+  - SessionRepository 用于会话生命周期和清理
+  - MessageRepository 用于 Claude 交互日志
+  - ToolUsageRepository 用于工具使用跟踪和统计
+  - AuditLogRepository 用于安全事件记录
+  - CostTrackingRepository 用于用量监控和计费
+  - AnalyticsRepository 用于综合报告和仪表板
+- **持久化会话管理**：
+  - SQLiteSessionStorage 替换内存存储
+  - 会话在 bot 重启和部署后持久化
+  - 自动会话清理和过期处理
+  - 用户会话限制和并发会话管理
+- **分析与报告系统**：
+  - 用户仪表板，包含用量统计和费用跟踪
+  - 管理员仪表板，包含全系统分析
+  - 工具使用统计和性能监控
+  - 每日活动报告和趋势分析
+- **全面集成**：
+  - 更新主应用以使用持久化存储
+  - 消息处理器现在记录所有 Claude 交互
+  - 带每日限额和监控的费用跟踪
+  - 所有安全相关操作的审计日志
+- **完整测试覆盖**：
+  - 27 个全面测试覆盖所有存储组件
+  - 数据库操作、仓储和门面层测试
+  - 测试覆盖率：存储模块 88-96%
+  - 使用真实数据库操作的集成测试
 
-#### Telegram Bot Core (TODO-4) - 2025-06-06
-- **Complete Telegram Bot Implementation**:
-  - Bot connection and handler registration
-  - Command routing system with comprehensive command set
-  - Message parsing and intelligent response formatting
-  - Inline keyboard support for user interactions
-  - Error handling middleware with user-friendly messages
-- **Command Handlers**:
-  - Navigation commands: /cd, /ls, /pwd for directory management
-  - Session commands: /new, /continue, /status for Claude sessions
-  - Utility commands: /help, /version, /projects for user assistance
-  - Admin commands: /stats, /users for system monitoring
-- **Message Processing**:
-  - Text message handling for Claude prompts
-  - File upload support with security validation
-  - Photo upload handling (placeholder for future implementation)
-  - Progress indicators and streaming response support
-- **Response Formatting**:
-  - Code syntax highlighting and proper markdown formatting
-  - Message splitting for Telegram's 4096 character limit
-  - Progress bars and loading indicators
-  - Quick action buttons for common operations
+#### Telegram Bot 核心（TODO-4）- 2025-06-06
+- **完整的 Telegram Bot 实现**：
+  - Bot 连接和处理器注册
+  - 命令路由系统，包含完整命令集
+  - 消息解析和智能响应格式化
+  - 用于用户交互的内联键盘支持
+  - 带用户友好消息的错误处理中间件
+- **命令处理器**：
+  - 导航命令：/cd、/ls、/pwd 用于目录管理
+  - 会话命令：/new、/continue、/status 用于 Claude 会话
+  - 工具命令：/help、/version、/projects 用于用户辅助
+  - 管理命令：/stats、/users 用于系统监控
+- **消息处理**：
+  - 文本消息处理用于 Claude 提示
+  - 带安全验证的文件上传支持
+  - 图片上传处理（为未来实现预留）
+  - 进度指示器和流式响应支持
+- **响应格式化**：
+  - 代码语法高亮和正确的 markdown 格式
+  - 针对 Telegram 4096 字符限制的消息分割
+  - 进度条和加载指示器
+  - 常用操作的快捷按钮
 
-#### Claude Code Integration (TODO-5) - 2025-06-06
-- **Subprocess Management**:
-  - Async Claude Code process execution with timeout handling
-  - Process lifecycle management and cleanup
-  - Resource limits and memory protection
-  - Error recovery and robust error handling
-- **Session State Management**:
-  - Claude session persistence and context maintenance
-  - Session limits per user and automatic cleanup
-  - Session information tracking and analytics
-  - Cross-conversation session continuity
-- **Response Processing**:
-  - Streaming JSON output parsing for real-time updates
-  - Tool call extraction and validation
-  - Code block detection and formatting
-  - Cost tracking and usage monitoring
-- **Security and Monitoring**:
-  - Tool usage validation with security checks
-  - Dangerous command pattern detection
-  - Resource usage monitoring and limits
-  - Comprehensive audit logging
+#### Claude Code 集成（TODO-5）- 2025-06-06
+- **子进程管理**：
+  - 带超时处理的异步 Claude Code 进程执行
+  - 进程生命周期管理和清理
+  - 资源限制和内存保护
+  - 错误恢复和健壮的错误处理
+- **会话状态管理**：
+  - Claude 会话持久化和上下文维护
+  - 每用户会话限制和自动清理
+  - 会话信息跟踪和分析
+  - 跨对话会话连续性
+- **响应处理**：
+  - 流式 JSON 输出解析用于实时更新
+  - 工具调用提取和验证
+  - 代码块检测和格式化
+  - 费用跟踪和用量监控
+- **安全与监控**：
+  - 带安全检查的工具使用验证
+  - 危险命令模式检测
+  - 资源使用监控和限制
+  - 全面的审计日志
 
-#### Authentication & Security Framework (TODO-3) - 2025-06-05
-- **Multi-provider authentication system**:
-  - WhitelistAuthProvider for Telegram user ID validation
-  - TokenAuthProvider with secure token generation and validation
-  - AuthenticationManager coordinating multiple providers
-  - Session management with timeout and activity tracking
-- **Rate limiting with token bucket algorithm**:
-  - Request-based rate limiting per user
-  - Cost-based limiting for Claude usage control
-  - Configurable burst protection and auto-reset
-  - Per-user tracking with concurrent access support
-- **Comprehensive input validation**:
-  - Path traversal prevention with approved directory boundaries
-  - Command injection protection through sanitization
-  - File type validation with extension and pattern checking
-  - Hidden file protection and forbidden filename detection
-- **Security audit logging**:
-  - Event tracking for authentication, commands, file access
-  - Risk assessment with automatic severity classification
-  - Security violation logging with detailed context
-  - User activity summaries and security dashboards
-- **Bot middleware framework**:
-  - Authentication middleware for automatic user verification
-  - Rate limiting middleware with user-friendly messages
-  - Security middleware for input validation and threat detection
-  - Burst protection middleware for additional attack prevention
-- **Comprehensive test coverage**:
-  - 83 tests covering all security components (95%+ coverage)
-  - Security attack simulations and edge case testing
-  - Async test support and type safety validation
+#### 认证与安全框架（TODO-3）- 2025-06-05
+- **多提供者认证系统**：
+  - WhitelistAuthProvider 用于 Telegram 用户 ID 验证
+  - TokenAuthProvider 用于安全令牌生成和验证
+  - AuthenticationManager 协调多个提供者
+  - 带超时和活动跟踪的会话管理
+- **基于令牌桶算法的限流**：
+  - 每用户请求限流
+  - 基于费用的 Claude 使用控制
+  - 可配置的突发保护和自动重置
+  - 支持并发访问的每用户跟踪
+- **全面的输入验证**：
+  - 路径遍历防护，限定在已批准的目录边界内
+  - 通过清理实现命令注入防护
+  - 带扩展名和模式检查的文件类型验证
+  - 隐藏文件保护和禁止文件名检测
+- **安全审计日志**：
+  - 认证、命令、文件访问的事件跟踪
+  - 带自动严重性分类的风险评估
+  - 带详细上下文的安全违规记录
+  - 用户活动摘要和安全仪表板
+- **Bot 中间件框架**：
+  - 认证中间件用于自动用户验证
+  - 限流中间件带用户友好消息
+  - 安全中间件用于输入验证和威胁检测
+  - 突发保护中间件用于额外攻击防护
+- **全面的测试覆盖**：
+  - 83 个测试覆盖所有安全组件（95%+ 覆盖率）
+  - 安全攻击模拟和边界情况测试
+  - 异步测试支持和类型安全验证
 
 ## [0.1.0] - 2025-06-05
 
-### Added
+### 新增
 
-#### Project Foundation (TODO-1)
-- Complete project structure with proper Python packaging
-- Poetry dependency management with separate dev/test/prod dependencies
-- Comprehensive Makefile with development commands
-- Exception hierarchy with proper inheritance (`src/exceptions.py`)
-- Structured logging with JSON output for production
-- Testing framework with pytest, asyncio support, and coverage reporting
-- Code quality tools: Black, isort, flake8, mypy with strict settings
-- Development environment setup with pre-commit hooks
+#### 项目基础（TODO-1）
+- 完整的项目结构和规范的 Python 打包
+- Poetry 依赖管理，开发/测试/生产依赖分离
+- 包含开发命令的完整 Makefile
+- 带正确继承的异常层级（`src/exceptions.py`）
+- 结构化日志，生产环境 JSON 输出
+- 测试框架，包含 pytest、asyncio 支持和覆盖率报告
+- 代码质量工具：Black、isort、flake8、mypy 严格设置
+- 开发环境配置，包含 pre-commit 钩子
 
-#### Configuration System (TODO-2)
-- **Pydantic Settings v2** implementation with environment variable loading
-- **Environment-specific configuration** with automatic overrides:
-  - Development: Debug mode, verbose logging, relaxed rate limits
-  - Testing: In-memory database, fast timeouts, no telemetry  
-  - Production: Strict limits, structured logging, telemetry enabled
-- **Feature flags system** for dynamic functionality control:
-  - MCP (Model Context Protocol) support
-  - Git integration toggle
-  - File upload handling
-  - Quick action buttons
-  - Token-based authentication
-  - Webhook vs polling mode
-- **Comprehensive validation**:
-  - Cross-field dependency validation
-  - Path existence and permission checks
-  - Type safety with full mypy compliance
-  - Input sanitization and bounds checking
-- **Configuration management**:
-  - Environment detection and loading
-  - Computed properties for derived values
-  - Test utilities for easy test configuration
-  - Complete `.env.example` template with documentation
+#### 配置系统（TODO-2）
+- **Pydantic Settings v2** 实现，带环境变量加载
+- **环境特定配置**，带自动覆盖：
+  - 开发环境：调试模式、详细日志、宽松限流
+  - 测试环境：内存数据库、快速超时、无遥测
+  - 生产环境：严格限制、结构化日志、启用遥测
+- **功能开关系统**，用于动态功能控制：
+  - MCP（Model Context Protocol）支持
+  - Git 集成开关
+  - 文件上传处理
+  - 快捷按钮
+  - 基于令牌的认证
+  - Webhook 与轮询模式
+- **全面验证**：
+  - 跨字段依赖验证
+  - 路径存在性和权限检查
+  - 完全符合 mypy 的类型安全
+  - 输入清理和边界检查
+- **配置管理**：
+  - 环境检测和加载
+  - 派生值的计算属性
+  - 便于测试的测试工具
+  - 包含文档的完整 `.env.example` 模板
 
-#### Documentation
-- Comprehensive README with current implementation status
-- Configuration guide with all settings documented
-- Development guide with architecture and contributing guidelines
-- Project metadata with proper classifiers and URLs
+#### 文档
+- 包含当前实现状态的完整 README
+- 所有配置项的配置指南
+- 包含架构和贡献指南的开发指南
+- 项目元数据，包含正确的分类器和链接
 
-#### Testing & Quality
-- Unit tests for all completed components (95%+ coverage)
-- Automated code formatting and linting
-- Type checking with mypy (100% compliance)
-- Continuous integration ready
-- Test utilities for easy testing
+#### 测试与质量
+- 所有已完成组件的单元测试（95%+ 覆盖率）
+- 自动代码格式化和检查
+- mypy 类型检查（100% 合规）
+- 持续集成就绪
+- 便于测试的测试工具
 
-### Technical Details
+### 技术细节
 
-#### Dependencies
-- `python-telegram-bot` for Telegram API
-- `structlog` for structured logging  
-- `pydantic` and `pydantic-settings` for configuration management
-- `aiofiles` and `aiosqlite` for async file and database operations
-- Development tools: pytest, black, isort, flake8, mypy, pytest-cov
+#### 依赖
+- `python-telegram-bot` 用于 Telegram API
+- `structlog` 用于结构化日志
+- `pydantic` 和 `pydantic-settings` 用于配置管理
+- `aiofiles` 和 `aiosqlite` 用于异步文件和数据库操作
+- 开发工具：pytest、black、isort、flake8、mypy、pytest-cov
 
-#### Architecture
-- Modular package structure with clear separation of concerns
-- Async/await support throughout
-- Type-safe configuration system
-- Environment-aware deployment support
-- Extensible feature flag system
+#### 架构
+- 模块化包结构，清晰的关注点分离
+- 全面支持 async/await
+- 类型安全的配置系统
+- 环境感知的部署支持
+- 可扩展的功能开关系统
 
-#### Security Foundation
-- Input validation framework ready
-- Directory boundary preparation
-- Authentication framework planned
-- Audit logging structure prepared
+#### 安全基础
+- 输入验证框架就绪
+- 目录边界准备就绪
+- 认证框架已规划
+- 审计日志结构已准备
 
-### Developer Experience
-- Simple `make dev` setup
-- Comprehensive development commands
-- Real-time configuration validation
-- Detailed error messages and debugging
-- Auto-formatting and linting
-- Test coverage reporting
+### 开发体验
+- 简单的 `make dev` 配置
+- 完整的开发命令
+- 实时配置验证
+- 详细的错误消息和调试
+- 自动格式化和检查
+- 测试覆盖率报告
 
-## Development Status
+## 开发状态
 
-- ✅ **TODO-1**: Project Structure & Core Setup (Complete)
-- ✅ **TODO-2**: Configuration Management (Complete)  
-- ✅ **TODO-3**: Authentication & Security Framework (Complete)
-- ✅ **TODO-4**: Telegram Bot Core (Complete)
-- ✅ **TODO-5**: Claude Code Integration (Complete)
-- ✅ **TODO-6**: Storage & Persistence (Complete)
-- 🚧 **TODO-7**: Advanced Features (Next)
-- 🚧 **TODO-8**: Complete Testing Suite (Planned)
-- 🚧 **TODO-9**: Deployment & Documentation (Planned)
+- **TODO-1**：项目结构与核心配置（完成）
+- **TODO-2**：配置管理（完成）
+- **TODO-3**：认证与安全框架（完成）
+- **TODO-4**：Telegram Bot 核心（完成）
+- **TODO-5**：Claude Code 集成（完成）
+- **TODO-6**：存储与持久化（完成）
+- **TODO-7**：高级功能（下一步）
+- **TODO-8**：完整测试套件（已规划）
+- **TODO-9**：部署与文档（已规划）
 
-## Breaking Changes
+## 破坏性变更
 
-None yet - initial release.
+暂无 - 首次发布。
 
-## Migration Guide
+## 迁移指南
 
-Not applicable for initial release.
+首次发布不适用。
 
 ---
 
-**Note**: This project is under active development. The completed components (TODO-1 and TODO-2) provide a solid foundation with production-ready configuration management and development infrastructure.
+**注意**：本项目正在积极开发中。已完成的组件（TODO-1 和 TODO-2）提供了坚实的基础，包括生产就绪的配置管理和开发基础设施。

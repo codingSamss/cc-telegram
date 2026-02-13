@@ -1,68 +1,68 @@
-# TODO-2: Configuration Management
+# TODO-2: 配置管理
 
-## Objective
-Create a robust, environment-aware configuration system that supports development, testing, and production deployments with proper validation and security.
+## 目标
+创建一套健壮的、感知环境的配置系统，支持开发、测试和生产部署，并具备完善的校验与安全机制。
 
-## Configuration Structure
+## 配置结构
 
-### Environment Variables Schema
+### 环境变量模式
 ```
-# Bot Configuration
-TELEGRAM_BOT_TOKEN=             # Required: Bot token from BotFather
-TELEGRAM_BOT_USERNAME=          # Required: Bot username
+# Bot 配置
+TELEGRAM_BOT_TOKEN=             # 必填：来自 BotFather 的 Bot Token
+TELEGRAM_BOT_USERNAME=          # 必填：Bot 用户名
 
-# Security
-APPROVED_DIRECTORY=             # Required: Base directory for projects
-ALLOWED_USERS=                  # Optional: Comma-separated user IDs
-ENABLE_TOKEN_AUTH=false         # Optional: Enable token-based auth
-AUTH_TOKEN_SECRET=              # Required if ENABLE_TOKEN_AUTH=true
+# 安全
+APPROVED_DIRECTORY=             # 必填：项目的基础目录
+ALLOWED_USERS=                  # 可选：逗号分隔的用户 ID 列表
+ENABLE_TOKEN_AUTH=false         # 可选：启用令牌认证
+AUTH_TOKEN_SECRET=              # ENABLE_TOKEN_AUTH=true 时必填
 
-# Claude Configuration
-CLAUDE_MAX_TURNS=10             # Max conversation turns
-CLAUDE_TIMEOUT_SECONDS=300      # Timeout for Claude operations
-CLAUDE_MAX_COST_PER_USER=10.0   # Max cost per user in USD
+# Claude 配置
+CLAUDE_MAX_TURNS=10             # 最大对话轮数
+CLAUDE_TIMEOUT_SECONDS=300      # Claude 操作超时时间
+CLAUDE_MAX_COST_PER_USER=10.0   # 每用户最大费用（美元）
 
-# Rate Limiting
-RATE_LIMIT_REQUESTS=10          # Requests per window
-RATE_LIMIT_WINDOW=60            # Window in seconds
-RATE_LIMIT_BURST=20             # Burst capacity
+# 限流
+RATE_LIMIT_REQUESTS=10          # 每个时间窗口的请求数
+RATE_LIMIT_WINDOW=60            # 时间窗口（秒）
+RATE_LIMIT_BURST=20             # 突发容量
 
-# Storage
-DATABASE_URL=sqlite:///data/bot.db  # Database connection
-SESSION_TIMEOUT_HOURS=24            # Session expiry
-MAX_SESSIONS_PER_USER=5             # Concurrent sessions
+# 存储
+DATABASE_URL=sqlite:///data/bot.db  # 数据库连接
+SESSION_TIMEOUT_HOURS=24            # 会话过期时间
+MAX_SESSIONS_PER_USER=5             # 每用户并发会话数
 
-# Features
+# 功能开关
 ENABLE_MCP=false                # Model Context Protocol
-MCP_CONFIG_PATH=                # MCP configuration file
-ENABLE_GIT_INTEGRATION=true     # Git commands
-ENABLE_FILE_UPLOADS=true        # File upload handling
-ENABLE_QUICK_ACTIONS=true       # Quick action buttons
+MCP_CONFIG_PATH=                # MCP 配置文件路径
+ENABLE_GIT_INTEGRATION=true     # Git 命令
+ENABLE_FILE_UPLOADS=true        # 文件上传处理
+ENABLE_QUICK_ACTIONS=true       # 快捷操作按钮
 
-# Monitoring
-LOG_LEVEL=INFO                  # Logging level
-ENABLE_TELEMETRY=false          # Anonymous usage stats
-SENTRY_DSN=                     # Error tracking
+# 监控
+LOG_LEVEL=INFO                  # 日志级别
+ENABLE_TELEMETRY=false          # 匿名使用统计
+SENTRY_DSN=                     # 错误追踪
 
-# Development
-DEBUG=false                     # Debug mode
-DEVELOPMENT_MODE=false          # Development features
+# 开发
+DEBUG=false                     # 调试模式
+DEVELOPMENT_MODE=false          # 开发功能
 ```
 
-## Configuration Implementation
+## 配置实现
 
-### Main Config Class
+### 主配置类
 ```python
 # src/config.py
 """
-Configuration management using Pydantic Settings
+使用 Pydantic Settings 进行配置管理
 
-Features:
-- Environment variable loading
-- Type validation
-- Default values
-- Computed properties
-- Environment-specific settings
+功能特性：
+- 环境变量加载
+- 类型校验
+- 默认值
+- 计算属性
+- 环境特定配置
 """
 
 from pydantic import BaseSettings, validator, SecretStr, DirectoryPath
@@ -70,337 +70,337 @@ from typing import List, Optional, Dict
 from pathlib import Path
 
 class Settings(BaseSettings):
-    # Bot settings
+    # Bot 设置
     telegram_bot_token: SecretStr
     telegram_bot_username: str
-    
-    # Security
+
+    # 安全
     approved_directory: DirectoryPath
     allowed_users: Optional[List[int]] = None
     enable_token_auth: bool = False
     auth_token_secret: Optional[SecretStr] = None
-    
-    # Claude settings
+
+    # Claude 设置
     claude_max_turns: int = 10
     claude_timeout_seconds: int = 300
     claude_max_cost_per_user: float = 10.0
-    
-    # Rate limiting
+
+    # 限流
     rate_limit_requests: int = 10
     rate_limit_window: int = 60
     rate_limit_burst: int = 20
-    
-    # Storage
+
+    # 存储
     database_url: str = "sqlite:///data/bot.db"
     session_timeout_hours: int = 24
     max_sessions_per_user: int = 5
-    
-    # Features
+
+    # 功能开关
     enable_mcp: bool = False
     mcp_config_path: Optional[Path] = None
     enable_git_integration: bool = True
     enable_file_uploads: bool = True
     enable_quick_actions: bool = True
-    
-    # Monitoring
+
+    # 监控
     log_level: str = "INFO"
     enable_telemetry: bool = False
     sentry_dsn: Optional[str] = None
-    
-    # Development
+
+    # 开发
     debug: bool = False
     development_mode: bool = False
-    
+
     class Config:
         env_file = '.env'
         env_file_encoding = 'utf-8'
         case_sensitive = False
 ```
 
-### Validators and Computed Properties
+### 校验器与计算属性
 ```python
-# Validators
+# 校验器
 @validator('allowed_users', pre=True)
 def parse_allowed_users(cls, v):
-    """Parse comma-separated user IDs"""
+    """解析逗号分隔的用户 ID"""
     if isinstance(v, str):
         return [int(uid.strip()) for uid in v.split(',') if uid.strip()]
     return v
 
 @validator('auth_token_secret')
 def validate_auth_token(cls, v, values):
-    """Ensure token secret exists if token auth enabled"""
+    """确保启用令牌认证时提供了密钥"""
     if values.get('enable_token_auth') and not v:
         raise ValueError('auth_token_secret required when enable_token_auth is True')
     return v
 
 @validator('approved_directory')
 def validate_approved_directory(cls, v):
-    """Ensure approved directory exists and is absolute"""
+    """确保批准目录存在且为绝对路径"""
     path = Path(v).resolve()
     if not path.exists():
         raise ValueError(f'Approved directory does not exist: {path}')
     return path
 
-# Computed properties
+# 计算属性
 @property
 def is_production(self) -> bool:
     return not (self.debug or self.development_mode)
 
 @property
 def database_path(self) -> Path:
-    """Extract path from database URL"""
+    """从数据库 URL 中提取路径"""
     if self.database_url.startswith('sqlite:///'):
         return Path(self.database_url.replace('sqlite:///', ''))
     raise ValueError('Only SQLite supported in current version')
 ```
 
-### Environment-Specific Configurations
+### 环境特定配置
 ```python
 # src/config/environments.py
 """
-Environment-specific configuration overrides
+环境特定的配置覆盖
 """
 
 class DevelopmentConfig:
-    """Development environment overrides"""
+    """开发环境覆盖"""
     debug = True
     development_mode = True
     log_level = "DEBUG"
-    rate_limit_requests = 100  # More lenient for testing
-    
+    rate_limit_requests = 100  # 测试时更宽松
+
 class TestingConfig:
-    """Testing environment configuration"""
+    """测试环境配置"""
     database_url = "sqlite:///:memory:"
     approved_directory = "/tmp/test_projects"
     enable_telemetry = False
-    
+
 class ProductionConfig:
-    """Production environment configuration"""
+    """生产环境配置"""
     debug = False
     development_mode = False
     enable_telemetry = True
 ```
 
-### Feature Flags System
+### 功能开关系统
 ```python
 # src/config/features.py
 """
-Feature flag management
+功能开关管理
 """
 
 class FeatureFlags:
     def __init__(self, settings: Settings):
         self.settings = settings
-        
+
     @property
     def mcp_enabled(self) -> bool:
         return self.settings.enable_mcp and self.settings.mcp_config_path
-        
+
     @property
     def git_enabled(self) -> bool:
         return self.settings.enable_git_integration
-        
+
     @property
     def file_uploads_enabled(self) -> bool:
         return self.settings.enable_file_uploads
-        
+
     @property
     def quick_actions_enabled(self) -> bool:
         return self.settings.enable_quick_actions
-        
+
     def is_feature_enabled(self, feature_name: str) -> bool:
-        """Generic feature check"""
+        """通用功能检查"""
         return getattr(self, f"{feature_name}_enabled", False)
 ```
 
-### Configuration Loader
+### 配置加载器
 ```python
 # src/config/loader.py
 """
-Configuration loading with environment detection
+带有环境检测的配置加载
 """
 
 import os
 from typing import Optional
 
 def load_config(env: Optional[str] = None) -> Settings:
-    """Load configuration based on environment"""
+    """根据环境加载配置"""
     env = env or os.getenv('ENVIRONMENT', 'development')
-    
-    # Load base settings
+
+    # 加载基础设置
     settings = Settings()
-    
-    # Apply environment overrides
+
+    # 应用环境覆盖
     if env == 'development':
         settings = apply_overrides(settings, DevelopmentConfig)
     elif env == 'testing':
         settings = apply_overrides(settings, TestingConfig)
     elif env == 'production':
         settings = apply_overrides(settings, ProductionConfig)
-        
-    # Validate configuration
+
+    # 校验配置
     validate_config(settings)
-    
+
     return settings
 
 def validate_config(settings: Settings):
-    """Additional runtime validation"""
-    # Check file permissions
+    """额外的运行时校验"""
+    # 检查文件权限
     if not os.access(settings.approved_directory, os.R_OK | os.X_OK):
         raise ConfigurationError(f"Cannot access approved directory: {settings.approved_directory}")
-    
-    # Validate feature dependencies
+
+    # 校验功能依赖
     if settings.enable_mcp and not settings.mcp_config_path:
         raise ConfigurationError("MCP enabled but no config path provided")
 ```
 
-## .env.example Template
+## .env.example 模板
 ```bash
-# Claude Code Telegram Bot Configuration
+# Claude Code Telegram Bot 配置
 
-# === REQUIRED SETTINGS ===
-# Telegram Bot Token from @BotFather
+# === 必填项 ===
+# 来自 @BotFather 的 Telegram Bot Token
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 
-# Bot username (without @)
+# Bot 用户名（不含 @）
 TELEGRAM_BOT_USERNAME=your_bot_username
 
-# Base directory for project access (absolute path)
+# 项目访问的基础目录（绝对路径）
 APPROVED_DIRECTORY=/home/user/projects
 
-# === SECURITY SETTINGS ===
-# Comma-separated list of allowed Telegram user IDs (optional)
-# Leave empty to allow all users (not recommended for production)
+# === 安全设置 ===
+# 允许访问的 Telegram 用户 ID 列表，逗号分隔（可选）
+# 留空则允许所有用户（生产环境不建议）
 ALLOWED_USERS=123456789,987654321
 
-# Enable token-based authentication
+# 启用令牌认证
 ENABLE_TOKEN_AUTH=false
 
-# Secret for generating auth tokens (required if ENABLE_TOKEN_AUTH=true)
-# Generate with: openssl rand -hex 32
+# 生成认证令牌的密钥（ENABLE_TOKEN_AUTH=true 时必填）
+# 可用以下命令生成：openssl rand -hex 32
 AUTH_TOKEN_SECRET=
 
-# === CLAUDE SETTINGS ===
-# Maximum conversation turns before requiring new session
+# === Claude 设置 ===
+# 需要新建会话前的最大对话轮数
 CLAUDE_MAX_TURNS=10
 
-# Timeout for Claude operations (seconds)
+# Claude 操作超时时间（秒）
 CLAUDE_TIMEOUT_SECONDS=300
 
-# Maximum cost per user in USD
+# 每用户最大费用（美元）
 CLAUDE_MAX_COST_PER_USER=10.0
 
-# === RATE LIMITING ===
-# Number of requests allowed per window
+# === 限流设置 ===
+# 每个时间窗口允许的请求数
 RATE_LIMIT_REQUESTS=10
 
-# Rate limit window in seconds
+# 限流时间窗口（秒）
 RATE_LIMIT_WINDOW=60
 
-# Burst capacity for rate limiting
+# 限流突发容量
 RATE_LIMIT_BURST=20
 
-# === STORAGE SETTINGS ===
-# Database URL (SQLite by default)
+# === 存储设置 ===
+# 数据库 URL（默认使用 SQLite）
 DATABASE_URL=sqlite:///data/bot.db
 
-# Session timeout in hours
+# 会话超时时间（小时）
 SESSION_TIMEOUT_HOURS=24
 
-# Maximum concurrent sessions per user
+# 每用户最大并发会话数
 MAX_SESSIONS_PER_USER=5
 
-# === FEATURE FLAGS ===
-# Enable Model Context Protocol
+# === 功能开关 ===
+# 启用 Model Context Protocol
 ENABLE_MCP=false
 
-# Path to MCP configuration file
+# MCP 配置文件路径
 MCP_CONFIG_PATH=
 
-# Enable Git integration
+# 启用 Git 集成
 ENABLE_GIT_INTEGRATION=true
 
-# Enable file upload handling
+# 启用文件上传处理
 ENABLE_FILE_UPLOADS=true
 
-# Enable quick action buttons
+# 启用快捷操作按钮
 ENABLE_QUICK_ACTIONS=true
 
-# === MONITORING ===
-# Log level (DEBUG, INFO, WARNING, ERROR)
+# === 监控 ===
+# 日志级别（DEBUG, INFO, WARNING, ERROR）
 LOG_LEVEL=INFO
 
-# Enable anonymous telemetry
+# 启用匿名遥测
 ENABLE_TELEMETRY=false
 
-# Sentry DSN for error tracking (optional)
+# Sentry DSN 用于错误追踪（可选）
 SENTRY_DSN=
 
-# === DEVELOPMENT ===
-# Enable debug mode
+# === 开发 ===
+# 启用调试模式
 DEBUG=false
 
-# Enable development features
+# 启用开发功能
 DEVELOPMENT_MODE=false
 ```
 
-## Usage Examples
+## 使用示例
 ```python
-# Simple usage
+# 简单用法
 from src.config import load_config
 
 config = load_config()
 bot_token = config.telegram_bot_token.get_secret_value()
 
-# With feature flags
+# 配合功能开关
 from src.config import load_config, FeatureFlags
 
 config = load_config()
 features = FeatureFlags(config)
 
 if features.git_enabled:
-    # Enable git commands
+    # 启用 git 命令
     pass
 
-# Environment-specific
+# 指定环境
 config = load_config(env='production')
 
-# Access computed properties
+# 访问计算属性
 if config.is_production:
-    # Production-specific behavior
+    # 生产环境专用行为
     pass
 ```
 
-## Testing Configuration
+## 测试配置
 ```python
 # tests/test_config.py
 """
-Test configuration loading and validation
+测试配置加载与校验
 """
 
 def test_required_fields():
-    """Test that missing required fields raise errors"""
-    
+    """测试缺少必填字段时抛出错误"""
+
 def test_validator_allowed_users():
-    """Test parsing of comma-separated user IDs"""
-    
+    """测试逗号分隔的用户 ID 解析"""
+
 def test_environment_overrides():
-    """Test environment-specific configurations"""
-    
+    """测试环境特定配置"""
+
 def test_feature_flags():
-    """Test feature flag system"""
+    """测试功能开关系统"""
 ```
 
-## Success Criteria
+## 验收标准
 
-- [ ] Configuration loads from environment variables
-- [ ] Validation catches missing required fields
-- [ ] Environment-specific overrides work correctly
-- [ ] Feature flags properly control functionality
-- [ ] Sensitive values (tokens) are properly masked
-- [ ] Configuration can be loaded for different environments
-- [ ] All validators pass with valid input
-- [ ] Invalid configuration raises clear errors
-- [ ] .env.example includes all configuration options
-- [ ] Tests cover all configuration scenarios
+- [ ] 配置可以从环境变量加载
+- [ ] 校验能够捕获缺失的必填字段
+- [ ] 环境特定覆盖正常工作
+- [ ] 功能开关能够正确控制功能
+- [ ] 敏感值（Token 等）已正确脱敏
+- [ ] 配置可以针对不同环境加载
+- [ ] 所有校验器在合法输入下通过
+- [ ] 无效配置抛出清晰的错误信息
+- [ ] .env.example 包含所有配置选项
+- [ ] 测试覆盖所有配置场景

@@ -1,205 +1,205 @@
-# Configuration Guide
+# 配置指南
 
-This document provides comprehensive information about configuring the Claude Code Telegram Bot.
+本文档提供 Claude Code Telegram Bot 的完整配置说明。
 
-## Overview
+## 概述
 
-The bot uses a sophisticated configuration system built with Pydantic Settings v2 that provides:
+Bot 使用基于 Pydantic Settings v2 构建的精密配置系统，提供以下功能：
 
-- **Type Safety**: All configuration values are validated and type-checked
-- **Environment Support**: Automatic environment-specific overrides
-- **Feature Flags**: Dynamic enabling/disabling of functionality
-- **Validation**: Cross-field validation and runtime checks
-- **Documentation**: Self-documenting configuration with descriptions
+- **类型安全**：所有配置值均经过验证和类型检查
+- **环境支持**：自动进行环境特定的配置覆盖
+- **功能开关**：动态启用/禁用功能
+- **校验机制**：跨字段验证和运行时检查
+- **自文档化**：带描述信息的自文档化配置
 
-## Configuration Sources
+## 配置来源
 
-Configuration is loaded in this order (later sources override earlier ones):
+配置按以下顺序加载（后加载的来源会覆盖先前的）：
 
-1. **Default values** defined in the Settings class
-2. **Environment variables**
-3. **`.env` file** (if present)
-4. **Environment-specific overrides** (development/testing/production)
+1. Settings 类中定义的**默认值**
+2. **环境变量**
+3. **`.env` 文件**（如果存在）
+4. **环境特定覆盖**（development/testing/production）
 
-## Environment Variables
+## 环境变量
 
-### Required Settings
+### 必需设置
 
-These settings MUST be provided for the bot to start:
+以下设置必须提供，Bot 才能启动：
 
 ```bash
-# Telegram Bot Configuration
+# Telegram Bot 配置
 TELEGRAM_BOT_TOKEN=1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TELEGRAM_BOT_USERNAME=your_bot_name
 
-# Security
+# 安全配置
 APPROVED_DIRECTORY=/path/to/your/projects
 ```
 
-### Optional Settings
+### 可选设置
 
-#### User Access Control
+#### 用户访问控制
 
 ```bash
-# Comma-separated list of allowed Telegram user IDs
+# 逗号分隔的允许 Telegram 用户 ID 列表
 ALLOWED_USERS=123456789,987654321
 
-# Enable token-based authentication (requires AUTH_TOKEN_SECRET)
+# 启用基于令牌的认证（需要 AUTH_TOKEN_SECRET）
 ENABLE_TOKEN_AUTH=false
 AUTH_TOKEN_SECRET=your-secret-key-here
 ```
 
-#### Claude Configuration
+#### Claude 配置
 
 ```bash
-# Integration Method
-USE_SDK=true                          # Use Python SDK (default) or CLI subprocess
-ANTHROPIC_API_KEY=sk-ant-api03-...    # Optional: API key for SDK integration
+# 集成方式
+USE_SDK=true                          # 使用 Python SDK（默认）或 CLI 子进程
+ANTHROPIC_API_KEY=sk-ant-api03-...    # 可选：SDK 集成的 API 密钥
 
-# Maximum conversation turns before requiring new session
+# 需要新会话前的最大对话轮数
 CLAUDE_MAX_TURNS=10
 
-# Timeout for Claude operations in seconds
+# Claude 操作超时时间（秒）
 CLAUDE_TIMEOUT_SECONDS=300
 
-# Maximum cost per user in USD
+# 每用户最大费用限额（美元）
 CLAUDE_MAX_COST_PER_USER=10.0
 
-# Allowed Claude tools (comma-separated list)
+# 允许的 Claude 工具（逗号分隔列表）
 CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
 ```
 
-#### Rate Limiting
+#### 限流
 
 ```bash
-# Number of requests allowed per window
+# 每时间窗口允许的请求数
 RATE_LIMIT_REQUESTS=10
 
-# Rate limit window in seconds
+# 限流时间窗口（秒）
 RATE_LIMIT_WINDOW=60
 
-# Burst capacity for rate limiting
+# 限流突发容量
 RATE_LIMIT_BURST=20
 ```
 
-#### Storage & Database
+#### 存储与数据库
 
 ```bash
-# Database URL (SQLite by default)
+# 数据库 URL（默认使用 SQLite）
 DATABASE_URL=sqlite:///data/bot.db
 
-# Session management
-SESSION_TIMEOUT_HOURS=24           # Session timeout in hours
-MAX_SESSIONS_PER_USER=5            # Max concurrent sessions per user
+# 会话管理
+SESSION_TIMEOUT_HOURS=24           # 会话超时时间（小时）
+MAX_SESSIONS_PER_USER=5            # 每用户最大并发会话数
 
-# Database connection
-DATABASE_CONNECTION_POOL_SIZE=5    # Connection pool size
-DATABASE_TIMEOUT_SECONDS=30       # Database operation timeout
+# 数据库连接
+DATABASE_CONNECTION_POOL_SIZE=5    # 连接池大小
+DATABASE_TIMEOUT_SECONDS=30       # 数据库操作超时时间
 
-# Data retention
-DATA_RETENTION_DAYS=90            # Days to keep old data
-AUDIT_LOG_RETENTION_DAYS=365     # Days to keep audit logs
+# 数据保留
+DATA_RETENTION_DAYS=90            # 旧数据保留天数
+AUDIT_LOG_RETENTION_DAYS=365     # 审计日志保留天数
 ```
 
-#### Feature Flags
+#### 功能开关
 
 ```bash
-# Enable Model Context Protocol
+# 启用 Model Context Protocol
 ENABLE_MCP=false
 MCP_CONFIG_PATH=/path/to/mcp/config.json
 
-# Enable Git integration
+# 启用 Git 集成
 ENABLE_GIT_INTEGRATION=true
 
-# Enable file upload handling
+# 启用文件上传处理
 ENABLE_FILE_UPLOADS=true
 
-# Enable quick action buttons
+# 启用快捷操作按钮
 ENABLE_QUICK_ACTIONS=true
 ```
 
-#### Monitoring & Logging
+#### 监控与日志
 
 ```bash
-# Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+# 日志级别（DEBUG, INFO, WARNING, ERROR, CRITICAL）
 LOG_LEVEL=INFO
 
-# Enable anonymous telemetry
+# 启用匿名遥测
 ENABLE_TELEMETRY=false
 
-# Sentry DSN for error tracking
+# Sentry DSN 错误追踪
 SENTRY_DSN=https://your-sentry-dsn@sentry.io/project
 ```
 
-#### Development
+#### 开发配置
 
 ```bash
-# Enable debug mode
+# 启用调试模式
 DEBUG=false
 
-# Enable development features
+# 启用开发功能
 DEVELOPMENT_MODE=false
 
-# Environment override (development, testing, production)
+# 环境覆盖（development, testing, production）
 ENVIRONMENT=development
 ```
 
-#### Webhook (Optional)
+#### Webhook（可选）
 
 ```bash
-# Webhook URL for bot (leave empty for polling mode)
+# Bot 的 Webhook URL（留空则使用轮询模式）
 WEBHOOK_URL=https://your-domain.com/webhook
 
-# Webhook port
+# Webhook 端口
 WEBHOOK_PORT=8443
 
-# Webhook path
+# Webhook 路径
 WEBHOOK_PATH=/webhook
 ```
 
-## Environment-Specific Configuration
+## 环境特定配置
 
-The bot automatically applies different settings based on the environment:
+Bot 会根据环境自动应用不同的设置：
 
-### Development Environment
+### 开发环境
 
-Activated when `ENVIRONMENT=development` or when `DEBUG=true`:
+当 `ENVIRONMENT=development` 或 `DEBUG=true` 时激活：
 
 - `debug = true`
 - `development_mode = true`
 - `log_level = "DEBUG"`
-- `rate_limit_requests = 100` (more lenient)
-- `claude_timeout_seconds = 600` (longer timeout)
+- `rate_limit_requests = 100`（更宽松）
+- `claude_timeout_seconds = 600`（更长超时）
 - `enable_telemetry = false`
 
-### Testing Environment
+### 测试环境
 
-Activated when `ENVIRONMENT=testing`:
+当 `ENVIRONMENT=testing` 时激活：
 
 - `debug = true`
 - `development_mode = true`
-- `database_url = "sqlite:///:memory:"` (in-memory database)
+- `database_url = "sqlite:///:memory:"`（内存数据库）
 - `approved_directory = "/tmp/test_projects"`
 - `enable_telemetry = false`
-- `claude_timeout_seconds = 30` (faster timeout)
-- `rate_limit_requests = 1000` (no effective rate limiting)
-- `session_timeout_hours = 1` (short timeout)
+- `claude_timeout_seconds = 30`（更快超时）
+- `rate_limit_requests = 1000`（实质上无限流限制）
+- `session_timeout_hours = 1`（短超时）
 
-### Production Environment
+### 生产环境
 
-Activated when `ENVIRONMENT=production`:
+当 `ENVIRONMENT=production` 时激活：
 
 - `debug = false`
 - `development_mode = false`
 - `log_level = "INFO"`
 - `enable_telemetry = true`
-- `claude_max_cost_per_user = 5.0` (stricter cost limit)
-- `rate_limit_requests = 5` (stricter rate limiting)
-- `session_timeout_hours = 12` (shorter session timeout)
+- `claude_max_cost_per_user = 5.0`（更严格的费用限制）
+- `rate_limit_requests = 5`（更严格的限流）
+- `session_timeout_hours = 12`（更短的会话超时）
 
-## Feature Flags
+## 功能开关
 
-Feature flags allow you to enable or disable functionality dynamically:
+功能开关允许动态启用或禁用功能：
 
 ```python
 from src.config import load_config, FeatureFlags
@@ -208,206 +208,206 @@ config = load_config()
 features = FeatureFlags(config)
 
 if features.git_enabled:
-    # Enable git commands
+    # 启用 git 命令
     pass
 
 if features.mcp_enabled:
-    # Enable Model Context Protocol
+    # 启用 Model Context Protocol
     pass
 ```
 
-Available feature flags:
+可用的功能开关：
 
-- `mcp_enabled`: Model Context Protocol support
-- `git_enabled`: Git integration commands
-- `file_uploads_enabled`: File upload handling
-- `quick_actions_enabled`: Quick action buttons
-- `telemetry_enabled`: Anonymous usage telemetry
-- `token_auth_enabled`: Token-based authentication
-- `webhook_enabled`: Webhook mode (vs polling)
-- `development_features_enabled`: Development-only features
+- `mcp_enabled`：Model Context Protocol 支持
+- `git_enabled`：Git 集成命令
+- `file_uploads_enabled`：文件上传处理
+- `quick_actions_enabled`：快捷操作按钮
+- `telemetry_enabled`：匿名使用遥测
+- `token_auth_enabled`：基于令牌的认证
+- `webhook_enabled`：Webhook 模式（对比轮询模式）
+- `development_features_enabled`：仅开发环境可用的功能
 
-## Validation
+## 校验
 
-The configuration system performs extensive validation:
+配置系统会执行全面的校验：
 
-### Path Validation
+### 路径校验
 
-- `APPROVED_DIRECTORY` must exist and be accessible
-- `MCP_CONFIG_PATH` must exist if MCP is enabled
+- `APPROVED_DIRECTORY` 必须存在且可访问
+- `MCP_CONFIG_PATH` 在启用 MCP 时必须存在
 
-### Cross-Field Validation
+### 跨字段校验
 
-- `AUTH_TOKEN_SECRET` is required when `ENABLE_TOKEN_AUTH=true`
-- `MCP_CONFIG_PATH` is required when `ENABLE_MCP=true`
+- `ENABLE_TOKEN_AUTH=true` 时需要 `AUTH_TOKEN_SECRET`
+- `ENABLE_MCP=true` 时需要 `MCP_CONFIG_PATH`
 
-### Value Validation
+### 值校验
 
-- `LOG_LEVEL` must be one of: DEBUG, INFO, WARNING, ERROR, CRITICAL
-- Numeric values must be positive where appropriate
-- User IDs in `ALLOWED_USERS` must be valid integers
+- `LOG_LEVEL` 必须是以下之一：DEBUG, INFO, WARNING, ERROR, CRITICAL
+- 数值型值在适用时必须为正数
+- `ALLOWED_USERS` 中的用户 ID 必须是有效整数
 
-## Configuration Loading in Code
+## 代码中的配置加载
 
-### Basic Usage
+### 基本用法
 
 ```python
 from src.config import load_config
 
-# Load with automatic environment detection
+# 自动环境检测加载
 config = load_config()
 
-# Access configuration
+# 访问配置
 bot_token = config.telegram_token_str
 max_cost = config.claude_max_cost_per_user
 ```
 
-### Environment-Specific Loading
+### 环境特定加载
 
 ```python
 from src.config import load_config
 
-# Explicitly load production config
+# 显式加载生产环境配置
 config = load_config(env="production")
 
-# Check if running in production
+# 检查是否运行在生产环境
 if config.is_production:
-    # Production-specific behavior
+    # 生产环境特定行为
     pass
 ```
 
-### Testing Configuration
+### 测试配置
 
 ```python
 from src.config import create_test_config
 
-# Create test config with overrides
+# 创建带覆盖值的测试配置
 config = create_test_config(
     claude_max_turns=5,
     debug=True
 )
 ```
 
-## Troubleshooting
+## 故障排除
 
-### Common Issues
+### 常见问题
 
 1. **"Approved directory does not exist"**
-   - Ensure the path in `APPROVED_DIRECTORY` exists
-   - Use absolute paths, not relative paths
-   - Check file permissions
+   - 确保 `APPROVED_DIRECTORY` 中的路径存在
+   - 使用绝对路径，不要用相对路径
+   - 检查文件权限
 
 2. **"auth_token_secret required"**
-   - Set `AUTH_TOKEN_SECRET` when using `ENABLE_TOKEN_AUTH=true`
-   - Generate a secure secret: `openssl rand -hex 32`
+   - 使用 `ENABLE_TOKEN_AUTH=true` 时需设置 `AUTH_TOKEN_SECRET`
+   - 生成安全密钥：`openssl rand -hex 32`
 
 3. **"MCP config file does not exist"**
-   - Ensure `MCP_CONFIG_PATH` points to an existing file
-   - Or disable MCP with `ENABLE_MCP=false`
+   - 确保 `MCP_CONFIG_PATH` 指向已存在的文件
+   - 或使用 `ENABLE_MCP=false` 禁用 MCP
 
-### Debug Configuration
+### 调试配置
 
-To see what configuration is loaded:
+查看加载了哪些配置：
 
 ```bash
 export TELEGRAM_BOT_TOKEN=test
-export TELEGRAM_BOT_USERNAME=test  
+export TELEGRAM_BOT_USERNAME=test
 export APPROVED_DIRECTORY=/tmp
 make run-debug
 ```
 
-This will show detailed logging of configuration loading and validation.
+这将显示配置加载和校验的详细日志。
 
-## Security Considerations
+## 安全注意事项
 
-- **Never commit secrets** to version control
-- **Use environment variables** for sensitive data
-- **Rotate tokens regularly** if using token-based auth
-- **Restrict `APPROVED_DIRECTORY`** to only necessary paths
-- **Monitor logs** for configuration errors and security events
+- **切勿将密钥提交**到版本控制
+- **使用环境变量**存储敏感数据
+- 如果使用令牌认证，**定期轮换令牌**
+- 将 `APPROVED_DIRECTORY` **限制**在必要路径范围内
+- **监控日志**以发现配置错误和安全事件
 
-## Claude Integration Options
+## Claude 集成选项
 
-### SDK vs CLI Mode
+### SDK 模式与 CLI 模式
 
-The bot supports two integration methods with Claude:
+Bot 支持两种 Claude 集成方式：
 
-1. **SDK Mode (Default)**: Uses the Claude Code Python SDK for direct API integration
-   - Better performance and streaming support
-   - Can use existing Claude CLI authentication or API key
-   - More reliable error handling
+1. **SDK 模式（默认）**：使用 Claude Code Python SDK 进行直接 API 集成
+   - 更好的性能和流式传输支持
+   - 可使用现有的 Claude CLI 认证或 API 密钥
+   - 更可靠的错误处理
 
-2. **CLI Mode**: Uses Claude Code CLI subprocess
-   - Requires Claude Code CLI installation
-   - Uses CLI authentication only
-   - Legacy mode for compatibility
+2. **CLI 模式**：使用 Claude Code CLI 子进程
+   - 需要安装 Claude Code CLI
+   - 仅使用 CLI 认证
+   - 兼容性保留的传统模式
 
-### Authentication Options
+### 认证选项
 
-#### Option 1: Use Existing Claude CLI Authentication (Recommended)
+#### 选项 1：使用现有 Claude CLI 认证（推荐）
 ```bash
-# Install and authenticate Claude CLI
+# 安装并认证 Claude CLI
 claude auth login
 
-# Configure bot to use SDK with CLI auth
+# 配置 bot 使用 SDK + CLI 认证
 USE_SDK=true
-# No ANTHROPIC_API_KEY needed - SDK will use CLI credentials
+# 不需要 ANTHROPIC_API_KEY — SDK 将使用 CLI 凭据
 ```
 
-#### Option 2: Direct API Key
+#### 选项 2：直接 API 密钥
 ```bash
-# Configure bot with API key
+# 使用 API 密钥配置 bot
 USE_SDK=true
 ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 ```
 
-#### Option 3: CLI Mode (Legacy)
+#### 选项 3：CLI 模式（传统）
 ```bash
-# Use CLI subprocess instead of SDK
+# 使用 CLI 子进程替代 SDK
 USE_SDK=false
-# Requires Claude CLI to be installed and authenticated
+# 需要安装并认证 Claude CLI
 ```
 
-## Example .env File
+## .env 文件示例
 
 ```bash
-# Telegram Configuration
+# Telegram 配置
 TELEGRAM_BOT_TOKEN=1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TELEGRAM_BOT_USERNAME=my_claude_bot
 
-# Security
+# 安全配置
 APPROVED_DIRECTORY=/home/user/projects
 ALLOWED_USERS=123456789,987654321
 
-# Optional: Token Authentication
+# 可选：令牌认证
 ENABLE_TOKEN_AUTH=false
 AUTH_TOKEN_SECRET=
 
-# Claude Integration
-USE_SDK=true                          # Use Python SDK (recommended)
-ANTHROPIC_API_KEY=                    # Optional: Only if not using CLI auth
+# Claude 集成
+USE_SDK=true                          # 使用 Python SDK（推荐）
+ANTHROPIC_API_KEY=                    # 可选：仅在不使用 CLI 认证时需要
 
-# Rate Limiting
+# 限流
 RATE_LIMIT_REQUESTS=10
 RATE_LIMIT_WINDOW=60
 
-# Claude Settings
+# Claude 设置
 CLAUDE_MAX_COST_PER_USER=10.0
 CLAUDE_TIMEOUT_SECONDS=300
 CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
 
-# Storage & Database
+# 存储与数据库
 DATABASE_URL=sqlite:///data/bot.db
 SESSION_TIMEOUT_HOURS=24
 MAX_SESSIONS_PER_USER=5
 DATA_RETENTION_DAYS=90
 
-# Features
+# 功能开关
 ENABLE_GIT_INTEGRATION=true
 ENABLE_FILE_UPLOADS=true
 ENABLE_QUICK_ACTIONS=true
 
-# Development
+# 开发配置
 DEBUG=false
 LOG_LEVEL=INFO
 ```

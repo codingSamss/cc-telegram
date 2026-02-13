@@ -1,94 +1,94 @@
-# TODO-9: Deployment & Documentation
+# TODO-9: 部署与文档
 
-## Objective
-Prepare the project for production deployment and open-source release with comprehensive documentation, Docker configuration, CI/CD pipelines, and community guidelines.
+## 目标
+为生产部署和开源发布做准备，包括完善文档、Docker 配置、CI/CD 流水线和社区贡献指南。
 
-## Deployment Architecture
+## 部署架构
 
-### Infrastructure Options
+### 基础设施选项
 ```
-Deployment Options:
-├── Docker Standalone
+部署选项：
+├── Docker 单机部署
 ├── Docker Compose
 ├── Kubernetes
-├── Cloud Services
+├── 云服务
 │   ├── AWS (EC2, ECS, Lambda)
 │   ├── Google Cloud (Compute, Cloud Run)
 │   └── Azure (VMs, Container Instances)
-└── VPS (DigitalOcean, Linode, etc.)
+└── VPS (DigitalOcean, Linode 等)
 ```
 
-## Docker Configuration
+## Docker 配置
 
-### Production Dockerfile
+### 生产环境 Dockerfile
 ```dockerfile
 # docker/Dockerfile
 FROM python:3.11-slim as builder
 
-# Install build dependencies
+# 安装构建依赖
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code
+# 安装 Claude Code
 RUN curl -fsSL https://storage.googleapis.com/public-download-service-anthropic/claude-code/install.sh | bash
 
-# Create virtual environment
+# 创建虚拟环境
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy requirements
+# 复制依赖文件
 COPY requirements/base.txt /tmp/requirements.txt
 
-# Install Python dependencies
+# 安装 Python 依赖
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Production stage
+# 生产阶段
 FROM python:3.11-slim
 
-# Install runtime dependencies
+# 安装运行时依赖
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Claude Code from builder
+# 从构建阶段复制 Claude Code
 COPY --from=builder /usr/local/bin/claude /usr/local/bin/claude
 
-# Copy virtual environment
+# 复制虚拟环境
 COPY --from=builder /opt/venv /opt/venv
 
-# Create non-root user
+# 创建非 root 用户
 RUN useradd -m -u 1000 botuser && \
     mkdir -p /app /data && \
     chown -R botuser:botuser /app /data
 
-# Set environment variables
+# 设置环境变量
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     CLAUDE_CODE_PATH=/usr/local/bin/claude
 
-# Copy application
+# 复制应用代码
 WORKDIR /app
 COPY --chown=botuser:botuser . .
 
-# Switch to non-root user
+# 切换到非 root 用户
 USER botuser
 
-# Health check
+# 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python scripts/check_health.py
 
-# Run bot
+# 运行 bot
 CMD ["python", "-m", "src.main"]
 ```
 
-### Docker Compose Configuration
+### Docker Compose 配置
 ```yaml
 # docker/docker-compose.yml
 version: '3.8'
@@ -121,7 +121,7 @@ services:
           cpus: '0.5'
           memory: 512M
 
-  # Optional: Monitoring
+  # 可选：监控
   prometheus:
     image: prom/prometheus:latest
     container_name: bot-prometheus
@@ -133,7 +133,7 @@ services:
     ports:
       - "9090:9090"
 
-  # Optional: Grafana
+  # 可选：Grafana
   grafana:
     image: grafana/grafana:latest
     container_name: bot-grafana
@@ -158,9 +158,9 @@ networks:
     driver: bridge
 ```
 
-## Kubernetes Deployment
+## Kubernetes 部署
 
-### Kubernetes Manifests
+### Kubernetes 清单
 ```yaml
 # k8s/deployment.yaml
 apiVersion: apps/v1
@@ -250,7 +250,7 @@ spec:
       storage: 10Gi
 ```
 
-## Documentation
+## 文档
 
 ### README.md
 ```markdown
@@ -262,161 +262,161 @@ spec:
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-Run Claude Code remotely through Telegram with a terminal-like interface.
+通过 Telegram 远程运行 Claude Code，提供类终端界面。
 
-![Demo GIF](docs/images/demo.gif)
+![演示 GIF](docs/images/demo.gif)
 
-## Features
+## 功能特性
 
-✨ **Terminal-like Commands** - Navigate projects with familiar commands (`cd`, `ls`, `pwd`)  
-🤖 **Full Claude Code Integration** - All Claude Code features available remotely  
-🔒 **Security First** - Directory isolation, user authentication, rate limiting  
-📁 **Project Management** - Easy project switching and session persistence  
-🚀 **Advanced Features** - File uploads, Git integration, quick actions  
-📊 **Usage Tracking** - Monitor costs and usage per user  
-🔧 **Extensible** - Plugin-ready architecture for custom features  
+- **类终端命令** - 使用熟悉的命令（`cd`、`ls`、`pwd`）导航项目
+- **完整 Claude Code 集成** - 远程访问所有 Claude Code 功能
+- **安全优先** - 目录隔离、用户认证、限流
+- **项目管理** - 便捷的项目切换和会话持久化
+- **高级功能** - 文件上传、Git 集成、快捷操作
+- **使用量追踪** - 按用户监控费用和使用情况
+- **可扩展** - 插件化架构，支持自定义功能
 
-## Quick Start
+## 快速开始
 
-### 1. Prerequisites
+### 1. 前置条件
 
 - Python 3.9+
-- Claude Code CLI installed
-- Telegram Bot Token (from [@BotFather](https://t.me/botfather))
-- Linux/macOS (Windows WSL supported)
+- 已安装 Claude Code CLI
+- Telegram Bot Token（从 [@BotFather](https://t.me/botfather) 获取）
+- Linux/macOS（支持 Windows WSL）
 
-### 2. Installation
+### 2. 安装
 
 ```bash
-# Clone repository
+# 克隆仓库
 git clone https://github.com/yourusername/claude-code-telegram.git
 cd claude-code-telegram
 
-# Install dependencies
+# 安装依赖
 pip install -r requirements/base.txt
 
-# Copy environment template
+# 复制环境变量模板
 cp .env.example .env
 
-# Edit configuration
+# 编辑配置
 nano .env
 ```
 
-### 3. Configuration
+### 3. 配置
 
-Edit `.env` with your settings:
+编辑 `.env` 填入你的配置：
 
 ```bash
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_BOT_USERNAME=your_bot_username
 APPROVED_DIRECTORY=/home/user/projects
-ALLOWED_USERS=123456789,987654321  # Your Telegram user ID
+ALLOWED_USERS=123456789,987654321  # 你的 Telegram 用户 ID
 ```
 
-### 4. Run
+### 4. 运行
 
 ```bash
-# Development
+# 开发环境
 poetry run claude-telegram-bot
 
-# Production with Docker
+# 生产环境使用 Docker
 docker-compose up -d
 ```
 
-## Usage
+## 使用方法
 
-### Basic Commands
+### 基本命令
 
 ```
-/start - Initialize bot
-/ls - List files in current directory
-/cd <dir> - Change directory (resumes session for that project)
-/pwd - Show current directory
-/projects - Show all projects
-/new - Clear context and start fresh session
-/continue - Explicitly continue last session
-/end - End current session and clear context
-/status - Show session info (includes resumable sessions)
+/start - 初始化 bot
+/ls - 列出当前目录文件
+/cd <dir> - 切换目录（恢复该项目的会话）
+/pwd - 显示当前目录
+/projects - 显示所有项目
+/new - 清除上下文，开始新会话
+/continue - 明确继续上一个会话
+/end - 结束当前会话并清除上下文
+/status - 显示会话信息（含可恢复会话）
 ```
 
-### Example Workflow
+### 示例工作流
 
-1. **Start a session**
+1. **开始会话**
    ```
    /projects
-   [Select your project]
+   [选择你的项目]
    ```
 
-2. **Navigate and explore**
+2. **导航和探索**
    ```
    /ls
    /cd src
    /pwd
    ```
 
-3. **Code with Claude**
+3. **与 Claude 编码**
    ```
-   You: Create a FastAPI endpoint for user authentication
-   Claude: I'll create a FastAPI endpoint for user authentication...
-   ```
-
-4. **Use quick actions**
-   ```
-   [🧪 Run tests] [📦 Install deps] [🔍 Lint code]
+   你: 创建一个用户认证的 FastAPI 端点
+   Claude: 我来创建一个用户认证的 FastAPI 端点...
    ```
 
-## Security
+4. **使用快捷操作**
+   ```
+   [运行测试] [安装依赖] [代码检查]
+   ```
 
-- **Directory Isolation**: All operations confined to approved directory
-- **User Authentication**: Whitelist or token-based access
-- **Rate Limiting**: Prevent abuse and control costs
-- **Input Validation**: Protection against injection attacks
-- **Audit Logging**: Track all operations
+## 安全
 
-See [SECURITY.md](SECURITY.md) for details.
+- **目录隔离**：所有操作限制在已批准的目录内
+- **用户认证**：白名单或令牌方式
+- **限流**：防止滥用和控制费用
+- **输入验证**：防护注入攻击
+- **审计日志**：追踪所有操作
 
-## Development
+详见 [SECURITY.md](SECURITY.md)。
 
-### Setup Development Environment
+## 开发
+
+### 搭建开发环境
 
 ```bash
-# Install dev dependencies
+# 安装开发依赖
 pip install -r requirements/dev.txt
 
-# Install pre-commit hooks
+# 安装 pre-commit 钩子
 pre-commit install
 
-# Run tests
+# 运行测试
 pytest
 
-# Run with hot reload
+# 热重载运行
 poetry run claude-telegram-bot --debug
 ```
 
-### Project Structure
+### 项目结构
 
 ```
 claude-code-telegram/
-├── src/               # Source code
-├── tests/             # Test suite
-├── docs/              # Documentation
-├── docker/            # Docker files
-└── scripts/           # Utility scripts
+├── src/               # 源代码
+├── tests/             # 测试套件
+├── docs/              # 文档
+├── docker/            # Docker 文件
+└── scripts/           # 工具脚本
 ```
 
-## Contributing
+## 贡献
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解贡献指南。
 
-### Development Workflow
+### 开发流程
 
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
+1. Fork 仓库
+2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
+3. 提交变更 (`git commit -m 'Add amazing feature'`)
+4. 推送分支 (`git push origin feature/amazing-feature`)
+5. 创建 Pull Request
 
-## Deployment
+## 部署
 
 ### Docker
 
@@ -431,303 +431,299 @@ docker run -d --name claude-bot --env-file .env claude-code-bot
 kubectl apply -f k8s/
 ```
 
-### Cloud Platforms
+### 云平台
 
-- [AWS Deployment Guide](docs/deployment/aws.md)
-- [Google Cloud Guide](docs/deployment/gcp.md)
-- [Azure Guide](docs/deployment/azure.md)
+- [AWS 部署指南](docs/deployment/aws.md)
+- [Google Cloud 指南](docs/deployment/gcp.md)
+- [Azure 指南](docs/deployment/azure.md)
 
-## Configuration Options
+## 配置选项
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather | Required |
-| `APPROVED_DIRECTORY` | Base directory for projects | Required |
-| `ALLOWED_USERS` | Comma-separated user IDs | None |
-| `RATE_LIMIT_REQUESTS` | Requests per minute | 10 |
-| `CLAUDE_MAX_COST_PER_USER` | Max cost per user (USD) | 10.0 |
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `TELEGRAM_BOT_TOKEN` | BotFather 颁发的 Bot Token | 必填 |
+| `APPROVED_DIRECTORY` | 项目基目录 | 必填 |
+| `ALLOWED_USERS` | 逗号分隔的用户 ID | 无 |
+| `RATE_LIMIT_REQUESTS` | 每分钟请求数 | 10 |
+| `CLAUDE_MAX_COST_PER_USER` | 每用户最大费用（USD） | 10.0 |
 
-See [docs/configuration.md](docs/configuration.md) for all options.
+完整配置参见 [docs/configuration.md](docs/configuration.md)。
 
-## Troubleshooting
+## 故障排查
 
-### Common Issues
+### 常见问题
 
-**Bot not responding**
-- Check bot token is correct
-- Verify bot is not already running
-- Check logs: `docker logs claude-bot`
+**Bot 无响应**
+- 检查 bot token 是否正确
+- 确认 bot 没有重复运行
+- 查看日志：`docker logs claude-bot`
 
-**Permission denied errors**
-- Ensure approved directory exists and is readable
-- Check file permissions
+**权限拒绝错误**
+- 确保已批准的目录存在且可读
+- 检查文件权限
 
-**Rate limit errors**
-- Adjust `RATE_LIMIT_REQUESTS` in config
-- Check user hasn't exceeded cost limit
+**限流错误**
+- 调整配置中的 `RATE_LIMIT_REQUESTS`
+- 检查用户是否超出费用限额
 
-See [docs/troubleshooting.md](docs/troubleshooting.md) for more.
+更多请参见 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
-## License
+## 许可证
 
-This project is licensed under the MIT License - see [LICENSE](LICENSE) file.
+本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 
-## Acknowledgments
+## 致谢
 
-- Anthropic for Claude Code
+- Anthropic 提供 Claude Code
 - Telegram Bot API
-- Contributors and testers
+- 所有贡献者和测试者
 
-## Support
+## 支持
 
-- 📧 Email: support@example.com
-- 💬 Discord: [Join our server](https://discord.gg/example)
-- 🐛 Issues: [GitHub Issues](https://github.com/yourusername/claude-code-telegram/issues)
+- Issues: [GitHub Issues](https://github.com/yourusername/claude-code-telegram/issues)
 
 ---
 
-Made with ❤️ by the community
+由社区用心打造
 ```
 
 ### CONTRIBUTING.md
 ```markdown
-# Contributing to Claude Code Telegram Bot
+# 贡献指南
 
-Thank you for your interest in contributing! We welcome contributions from everyone.
+感谢你有兴趣为本项目做出贡献！我们欢迎所有人的贡献。
 
-## Code of Conduct
+## 行为准则
 
-Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+请阅读并遵守我们的 [行为准则](CODE_OF_CONDUCT.md)。
 
-## How to Contribute
+## 如何贡献
 
-### Reporting Bugs
+### 报告 Bug
 
-1. Check [existing issues](https://github.com/yourusername/claude-code-telegram/issues)
-2. Create a new issue with:
-   - Clear title and description
-   - Steps to reproduce
-   - Expected vs actual behavior
-   - System information
+1. 检查 [已有 issues](https://github.com/yourusername/claude-code-telegram/issues)
+2. 创建新 issue，包含：
+   - 清晰的标题和描述
+   - 复现步骤
+   - 期望行为 vs 实际行为
+   - 系统信息
 
-### Suggesting Features
+### 功能建议
 
-1. Check [existing proposals](https://github.com/yourusername/claude-code-telegram/discussions)
-2. Open a discussion with:
-   - Use case description
-   - Proposed implementation
-   - Alternative solutions
+1. 检查 [已有提案](https://github.com/yourusername/claude-code-telegram/discussions)
+2. 发起讨论，包含：
+   - 使用场景描述
+   - 建议的实现方案
+   - 替代方案
 
-### Code Contributions
+### 代码贡献
 
-#### Setup
+#### 环境搭建
 
-1. Fork the repository
-2. Clone your fork:
+1. Fork 仓库
+2. 克隆你的 fork：
    ```bash
    git clone https://github.com/yourusername/claude-code-telegram.git
    cd claude-code-telegram
    ```
 
-3. Create virtual environment:
+3. 创建虚拟环境：
    ```bash
    python -m venv venv
    source venv/bin/activate  # Linux/macOS
    venv\Scripts\activate     # Windows
    ```
 
-4. Install dependencies:
+4. 安装依赖：
    ```bash
    pip install -r requirements/dev.txt
    pre-commit install
    ```
 
-#### Development Process
+#### 开发流程
 
-1. Create feature branch:
+1. 创建功能分支：
    ```bash
    git checkout -b feature/your-feature-name
    ```
 
-2. Make changes following our coding standards
+2. 按照编码规范进行修改
 
-3. Run tests:
+3. 运行测试：
    ```bash
    pytest
    make lint
    ```
 
-4. Commit with descriptive message:
+4. 提交描述性 commit：
    ```bash
    git commit -m "feat: add amazing feature"
    ```
 
-5. Push and create PR:
+5. 推送并创建 PR：
    ```bash
    git push origin feature/your-feature-name
    ```
 
-### Coding Standards
+### 编码规范
 
-- Follow PEP 8
-- Use type hints
-- Write docstrings for all functions
-- Keep line length under 88 characters
-- Use black for formatting
-- Write tests for new features
+- 遵循 PEP 8
+- 使用类型标注
+- 所有函数添加 docstring
+- 行长度不超过 88 字符
+- 使用 black 格式化
+- 新功能必须编写测试
 
-### Commit Messages
+### 提交消息
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
+遵循 [Conventional Commits](https://www.conventionalcommits.org/)：
 
-- `feat:` New feature
-- `fix:` Bug fix
-- `docs:` Documentation changes
-- `style:` Formatting changes
-- `refactor:` Code refactoring
-- `test:` Test changes
-- `chore:` Maintenance tasks
+- `feat:` 新功能
+- `fix:` Bug 修复
+- `docs:` 文档变更
+- `style:` 格式调整
+- `refactor:` 代码重构
+- `test:` 测试变更
+- `chore:` 维护任务
 
-### Testing
+### 测试
 
-- Write unit tests for new code
-- Ensure all tests pass
-- Maintain >80% coverage
-- Include integration tests for features
+- 为新代码编写单元测试
+- 确保所有测试通过
+- 保持覆盖率 >80%
+- 功能需包含集成测试
 
-### Documentation
+### 文档
 
-- Update README if needed
-- Add docstrings to new functions
-- Include examples in docs
-- Update configuration docs
+- 必要时更新 README
+- 为新函数添加 docstring
+- 文档中包含示例
+- 更新配置文档
 
-## Pull Request Process
+## Pull Request 流程
 
-1. Update documentation
-2. Add tests for changes
-3. Ensure CI passes
-4. Request review from maintainers
-5. Address review feedback
-6. Squash commits if requested
+1. 更新文档
+2. 为变更添加测试
+3. 确保 CI 通过
+4. 请求维护者审查
+5. 处理审查反馈
+6. 如被要求则合并提交
 
-## Release Process
+## 发布流程
 
-1. Maintainers will version according to SemVer
-2. Changelog updated automatically
-3. Docker images built and pushed
-4. GitHub release created
+1. 维护者按语义化版本进行版本管理
+2. Changelog 自动更新
+3. Docker 镜像构建并推送
+4. 创建 GitHub Release
 
-## Getting Help
+## 获取帮助
 
-- 💬 [Discord Server](https://discord.gg/example)
-- 📧 maintainers@example.com
-- 🤔 [Discussions](https://github.com/yourusername/claude-code-telegram/discussions)
+- [Discussions](https://github.com/yourusername/claude-code-telegram/discussions)
 
-Thank you for contributing! 🎉
+感谢你的贡献！
 ```
 
 ### SECURITY.md
 ```markdown
-# Security Policy
+# 安全策略
 
-## Supported Versions
+## 支持的版本
 
-| Version | Supported          |
+| 版本 | 是否支持 |
 | ------- | ------------------ |
 | 1.x.x   | :white_check_mark: |
 | < 1.0   | :x:                |
 
-## Reporting a Vulnerability
+## 报告漏洞
 
-We take security seriously. If you discover a vulnerability, please follow responsible disclosure:
+我们非常重视安全问题。如果你发现了漏洞，请遵循负责任的披露流程：
 
-### 1. **Do NOT** create a public issue
+### 1. **不要**创建公开 issue
 
-### 2. Email security@example.com with:
-- Description of the vulnerability
-- Steps to reproduce
-- Potential impact
-- Suggested fix (if any)
+### 2. 发送邮件至 security@example.com，包含：
+- 漏洞描述
+- 复现步骤
+- 潜在影响
+- 修复建议（如有）
 
-### 3. Wait for response
-- We'll acknowledge within 48 hours
-- We'll provide an estimate for fix
-- We'll notify you when fixed
+### 3. 等待回复
+- 我们会在 48 小时内确认收到
+- 我们会提供修复时间预估
+- 修复完成后会通知你
 
-## Security Measures
+## 安全措施
 
-### Authentication
-- Telegram user ID whitelist
-- Optional token-based authentication
-- Session management with expiry
+### 认证
+- Telegram 用户 ID 白名单
+- 可选的令牌认证
+- 带过期机制的会话管理
 
-### Authorization
-- Directory traversal prevention
-- Command injection protection
-- File type validation
+### 授权
+- 目录遍历防护
+- 命令注入防护
+- 文件类型验证
 
-### Rate Limiting
-- Per-user request limits
-- Cost-based limiting
-- Concurrent session limits
+### 限流
+- 按用户请求限制
+- 基于费用的限制
+- 并发会话限制
 
-### Data Protection
-- Local SQLite database
-- No sensitive data in logs
-- Secure token storage
+### 数据保护
+- 本地 SQLite 数据库
+- 日志中不含敏感数据
+- 安全的令牌存储
 
-### Infrastructure
-- Run as non-root user
-- Resource limits enforced
-- Regular dependency updates
+### 基础设施
+- 以非 root 用户运行
+- 强制资源限制
+- 定期更新依赖
 
-## Best Practices for Users
+## 用户最佳实践
 
-1. **Protect your bot token**
-   - Never commit to version control
-   - Use environment variables
-   - Rotate regularly
+1. **保护 bot token**
+   - 不要提交到版本控制
+   - 使用环境变量
+   - 定期轮换
 
-2. **Limit approved directory**
-   - Use minimal necessary access
-   - Avoid system directories
-   - Regular permission audits
+2. **限制已批准目录**
+   - 使用最小必要访问权限
+   - 避免系统目录
+   - 定期审计权限
 
-3. **Monitor usage**
-   - Check audit logs
-   - Monitor costs
-   - Review user activity
+3. **监控使用情况**
+   - 检查审计日志
+   - 监控费用
+   - 审查用户活动
 
-4. **Keep updated**
-   - Apply security updates
-   - Monitor announcements
-   - Update dependencies
+4. **保持更新**
+   - 应用安全更新
+   - 关注公告
+   - 更新依赖
 
-## Security Checklist
+## 安全清单
 
-- [ ] Bot token is secure
-- [ ] Approved directory is limited
-- [ ] User whitelist configured
-- [ ] Rate limits enabled
-- [ ] Logs don't contain secrets
-- [ ] Running as non-root
-- [ ] Dependencies updated
-- [ ] Backups configured
+- [ ] Bot token 安全存储
+- [ ] 已批准目录范围受限
+- [ ] 用户白名单已配置
+- [ ] 限流已启用
+- [ ] 日志不含密钥
+- [ ] 以非 root 用户运行
+- [ ] 依赖已更新
+- [ ] 备份已配置
 
-## Contact
+## 联系方式
 
-Security issues: security@example.com  
-PGP Key: [Download](https://example.com/pgp-key.asc)
+安全问题: security@example.com
+PGP 密钥: [下载](https://example.com/pgp-key.asc)
 ```
 
-## Deployment Scripts
+## 部署脚本
 
-### Health Check Script
+### 健康检查脚本
 ```python
 # scripts/check_health.py
 """
-Health check for monitoring
+监控用健康检查
 """
 
 import sys
@@ -735,59 +731,59 @@ import asyncio
 from pathlib import Path
 
 async def check_health():
-    """Perform health checks"""
+    """执行健康检查"""
     checks = {
         'database': check_database(),
         'claude': check_claude(),
         'telegram': check_telegram(),
         'storage': check_storage()
     }
-    
+
     results = {}
     for name, check in checks.items():
         try:
             results[name] = await check
         except Exception as e:
             results[name] = False
-            print(f"Health check failed for {name}: {e}")
-    
-    # Overall health
+            print(f"{name} 健康检查失败: {e}")
+
+    # 整体健康状态
     healthy = all(results.values())
-    
+
     if healthy:
-        print("All health checks passed")
+        print("所有健康检查通过")
         sys.exit(0)
     else:
-        print(f"Health checks failed: {results}")
+        print(f"健康检查失败: {results}")
         sys.exit(1)
 
 async def check_database():
-    """Check database connectivity"""
+    """检查数据库连接"""
     from src.storage.database import DatabaseManager
-    
+
     db = DatabaseManager(os.getenv('DATABASE_URL'))
     async with db.get_connection() as conn:
         await conn.execute("SELECT 1")
     return True
 
 async def check_claude():
-    """Check Claude Code availability"""
+    """检查 Claude Code 可用性"""
     import subprocess
-    
+
     result = subprocess.run(['claude', '--version'], capture_output=True)
     return result.returncode == 0
 
 async def check_telegram():
-    """Check Telegram bot token"""
+    """检查 Telegram bot token"""
     import aiohttp
-    
+
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     async with aiohttp.ClientSession() as session:
         async with session.get(f'https://api.telegram.org/bot{token}/getMe') as resp:
             return resp.status == 200
 
 async def check_storage():
-    """Check storage availability"""
+    """检查存储可用性"""
     data_dir = Path('/data')
     return data_dir.exists() and data_dir.is_dir() and os.access(data_dir, os.W_OK)
 
@@ -795,29 +791,29 @@ if __name__ == '__main__':
     asyncio.run(check_health())
 ```
 
-### Deployment Script
+### 部署脚本
 ```bash
 #!/bin/bash
 # scripts/deploy.sh
 
 set -e
 
-echo "🚀 Deploying Claude Code Telegram Bot"
+echo "正在部署 Claude Code Telegram Bot"
 
-# Load environment
+# 加载环境变量
 source .env
 
-# Build Docker image
-echo "📦 Building Docker image..."
+# 构建 Docker 镜像
+echo "正在构建 Docker 镜像..."
 docker build -t claude-code-bot:latest -f docker/Dockerfile .
 
-# Stop existing container
-echo "🛑 Stopping existing container..."
+# 停止现有容器
+echo "正在停止现有容器..."
 docker stop claude-code-bot || true
 docker rm claude-code-bot || true
 
-# Run new container
-echo "▶️ Starting new container..."
+# 启动新容器
+echo "正在启动新容器..."
 docker run -d \
   --name claude-code-bot \
   --restart unless-stopped \
@@ -826,29 +822,29 @@ docker run -d \
   -v "${APPROVED_DIRECTORY}:/projects:ro" \
   claude-code-bot:latest
 
-# Wait for health check
-echo "⏳ Waiting for health check..."
+# 等待健康检查
+echo "正在等待健康检查..."
 sleep 10
 
-# Check health
+# 执行健康检查
 if docker exec claude-code-bot python scripts/check_health.py; then
-    echo "✅ Deployment successful!"
+    echo "部署成功！"
 else
-    echo "❌ Health check failed!"
+    echo "健康检查失败！"
     docker logs claude-code-bot
     exit 1
 fi
 
-# Cleanup old images
-echo "🧹 Cleaning up old images..."
+# 清理旧镜像
+echo "正在清理旧镜像..."
 docker image prune -f
 
-echo "🎉 Deployment complete!"
+echo "部署完成！"
 ```
 
-## Monitoring Setup
+## 监控配置
 
-### Prometheus Configuration
+### Prometheus 配置
 ```yaml
 # docker/prometheus.yml
 global:
@@ -862,14 +858,14 @@ scrape_configs:
     metrics_path: '/metrics'
 ```
 
-### Grafana Dashboard
+### Grafana 仪表盘
 ```json
 {
   "dashboard": {
-    "title": "Claude Code Bot Metrics",
+    "title": "Claude Code Bot 指标",
     "panels": [
       {
-        "title": "Active Users",
+        "title": "活跃用户",
         "targets": [
           {
             "expr": "bot_active_users"
@@ -877,7 +873,7 @@ scrape_configs:
         ]
       },
       {
-        "title": "Message Rate",
+        "title": "消息速率",
         "targets": [
           {
             "expr": "rate(bot_messages_total[5m])"
@@ -885,7 +881,7 @@ scrape_configs:
         ]
       },
       {
-        "title": "Claude Cost",
+        "title": "Claude 费用",
         "targets": [
           {
             "expr": "bot_claude_cost_total"
@@ -893,7 +889,7 @@ scrape_configs:
         ]
       },
       {
-        "title": "Error Rate",
+        "title": "错误率",
         "targets": [
           {
             "expr": "rate(bot_errors_total[5m])"
@@ -905,9 +901,9 @@ scrape_configs:
 }
 ```
 
-## Release Process
+## 发布流程
 
-### GitHub Actions Release
+### GitHub Actions 发布
 ```yaml
 # .github/workflows/release.yml
 name: Release
@@ -922,24 +918,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    
-    - name: Build Docker image
+
+    - name: 构建 Docker 镜像
       run: |
         docker build -t claude-code-bot:${{ github.ref_name }} .
         docker tag claude-code-bot:${{ github.ref_name }} claude-code-bot:latest
-    
-    - name: Login to Registry
+
+    - name: 登录镜像仓库
       uses: docker/login-action@v2
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
-    
-    - name: Push images
+
+    - name: 推送镜像
       run: |
         docker push claude-code-bot:${{ github.ref_name }}
         docker push claude-code-bot:latest
-    
-    - name: Create Release
+
+    - name: 创建 Release
       uses: softprops/action-gh-release@v1
       with:
         files: |
@@ -948,17 +944,17 @@ jobs:
         generate_release_notes: true
 ```
 
-## Success Criteria
+## 成功标准
 
-- [ ] Docker image builds successfully
-- [ ] Health checks pass
-- [ ] Documentation is complete and clear
-- [ ] All deployment scripts tested
-- [ ] CI/CD pipeline functional
-- [ ] Monitoring dashboards configured
-- [ ] Security documentation complete
-- [ ] Contributing guidelines clear
-- [ ] Release process automated
-- [ ] Example configurations provided
-- [ ] Troubleshooting guide comprehensive
-- [ ] Open source checklist complete
+- [ ] Docker 镜像构建成功
+- [ ] 健康检查通过
+- [ ] 文档完整清晰
+- [ ] 所有部署脚本已测试
+- [ ] CI/CD 流水线正常运行
+- [ ] 监控仪表盘已配置
+- [ ] 安全文档完整
+- [ ] 贡献指南清晰
+- [ ] 发布流程自动化
+- [ ] 提供示例配置
+- [ ] 故障排查指南全面
+- [ ] 开源清单完整

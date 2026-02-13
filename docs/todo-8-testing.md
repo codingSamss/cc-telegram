@@ -1,14 +1,14 @@
-# TODO-8: Testing & Quality
+# TODO-8: 测试与质量保证
 
-## Objective
-Implement comprehensive testing strategy with unit tests, integration tests, end-to-end tests, and performance tests while ensuring code quality through linting, type checking, and continuous integration.
+## 目标
+实现全面的测试策略，包括单元测试、集成测试、端到端测试和性能测试，同时通过代码检查、类型检查和持续集成确保代码质量。
 
-## Testing Architecture
+## 测试架构
 
-### Test Structure
+### 测试目录结构
 ```
 tests/
-├── unit/                    # Unit tests (mirror src structure)
+├── unit/                    # 单元测试（镜像 src 结构）
 │   ├── bot/
 │   │   ├── test_handlers.py
 │   │   ├── test_middleware.py
@@ -24,31 +24,31 @@ tests/
 │   └── storage/
 │       ├── test_repositories.py
 │       └── test_models.py
-├── integration/            # Integration tests
+├── integration/            # 集成测试
 │   ├── test_bot_claude.py
 │   ├── test_storage_integration.py
 │   └── test_security_integration.py
-├── e2e/                   # End-to-end tests
+├── e2e/                   # 端到端测试
 │   ├── test_user_flows.py
 │   └── test_scenarios.py
-├── performance/           # Performance tests
+├── performance/           # 性能测试
 │   ├── test_load.py
 │   └── test_memory.py
-├── fixtures/              # Test data
+├── fixtures/              # 测试数据
 │   ├── __init__.py
-│   ├── factories.py      # Test data factories
-│   ├── mocks.py         # Mock objects
-│   └── sample_data/     # Sample files
-└── conftest.py          # Pytest configuration
+│   ├── factories.py      # 测试数据工厂
+│   ├── mocks.py         # Mock 对象
+│   └── sample_data/     # 样本文件
+└── conftest.py          # Pytest 配置
 ```
 
-## Test Implementation
+## 测试实现
 
-### Pytest Configuration
+### Pytest 配置
 ```python
 # tests/conftest.py
 """
-Pytest configuration and shared fixtures
+Pytest 配置和共享 fixtures
 """
 
 import pytest
@@ -58,21 +58,21 @@ from unittest.mock import Mock, AsyncMock
 import tempfile
 import aiosqlite
 
-# Configure async tests
+# 配置异步测试
 pytest_plugins = ['pytest_asyncio']
 
 @pytest.fixture(scope="session")
 def event_loop():
-    """Create event loop for async tests"""
+    """为异步测试创建事件循环"""
     loop = asyncio.get_event_loop_policy().new_event_loop()
     yield loop
     loop.close()
 
 @pytest.fixture
 def test_config():
-    """Test configuration"""
+    """测试配置"""
     from src.config import Settings
-    
+
     return Settings(
         telegram_bot_token="test_token",
         telegram_bot_username="test_bot",
@@ -87,9 +87,9 @@ def test_config():
 
 @pytest.fixture
 async def test_db():
-    """In-memory test database"""
+    """内存测试数据库"""
     from src.storage.database import DatabaseManager
-    
+
     db = DatabaseManager("sqlite:///:memory:")
     await db.initialize()
     yield db
@@ -108,9 +108,9 @@ def mock_telegram_update():
 
 @pytest.fixture
 def mock_claude_response():
-    """Mock Claude response"""
+    """Mock Claude 响应"""
     from src.claude.integration import ClaudeResponse
-    
+
     return ClaudeResponse(
         content="Test response",
         session_id="test-session-123",
@@ -122,9 +122,9 @@ def mock_claude_response():
 
 @pytest.fixture
 async def test_storage(test_db):
-    """Test storage with database"""
+    """带数据库的测试存储"""
     from src.storage.facade import Storage
-    
+
     storage = Storage("sqlite:///:memory:")
     await storage.initialize()
     yield storage
@@ -132,25 +132,25 @@ async def test_storage(test_db):
 
 @pytest.fixture
 def temp_project_dir():
-    """Temporary project directory"""
+    """临时项目目录"""
     with tempfile.TemporaryDirectory() as tmpdir:
         project_dir = Path(tmpdir) / "test_project"
         project_dir.mkdir()
-        
-        # Create sample files
+
+        # 创建样本文件
         (project_dir / "main.py").write_text("print('Hello World')")
         (project_dir / "README.md").write_text("# Test Project")
-        
+
         yield project_dir
 ```
 
-### Unit Tests
+### 单元测试
 
-#### Bot Handler Tests
+#### Bot 处理器测试
 ```python
 # tests/unit/bot/test_handlers.py
 """
-Unit tests for bot command handlers
+Bot 命令处理器单元测试
 """
 
 import pytest
@@ -160,12 +160,12 @@ from pathlib import Path
 from src.bot.handlers import command
 
 class TestCommandHandlers:
-    """Test command handlers"""
-    
+    """测试命令处理器"""
+
     @pytest.mark.asyncio
     async def test_list_files_success(self, mock_telegram_update, temp_project_dir):
-        """Test ls command lists files correctly"""
-        # Setup
+        """测试 ls 命令正确列出文件"""
+        # 准备
         context = Mock()
         context.user_data = {
             'deps': {
@@ -176,20 +176,20 @@ class TestCommandHandlers:
                 'config': Mock(approved_directory=temp_project_dir.parent)
             }
         }
-        
-        # Execute
+
+        # 执行
         await command.list_files(mock_telegram_update, context)
-        
-        # Assert
+
+        # 断言
         mock_telegram_update.message.reply_text.assert_called_once()
         call_args = mock_telegram_update.message.reply_text.call_args[0][0]
         assert "main.py" in call_args
         assert "README.md" in call_args
-    
+
     @pytest.mark.asyncio
     async def test_change_directory_security(self, mock_telegram_update):
-        """Test cd command prevents directory traversal"""
-        # Setup
+        """测试 cd 命令阻止目录遍历攻击"""
+        # 准备
         context = Mock()
         context.args = ["../../../etc"]
         context.user_data = {
@@ -201,21 +201,21 @@ class TestCommandHandlers:
                 'audit_logger': AsyncMock()
             }
         }
-        
-        # Execute
+
+        # 执行
         await command.change_directory(mock_telegram_update, context)
-        
-        # Assert
-        mock_telegram_update.message.reply_text.assert_called_with("❌ Access denied")
-    
+
+        # 断言
+        mock_telegram_update.message.reply_text.assert_called_with("Access denied")
+
     @pytest.mark.asyncio
     async def test_new_session_clears_state(self, mock_telegram_update):
-        """Test new session clears Claude session"""
-        # Setup
+        """测试新建会话清除 Claude 会话状态"""
+        # 准备
         session = Mock()
         session.claude_session_id = "old-session"
         session.current_directory = Path("/test")
-        
+
         context = Mock()
         context.user_data = {
             'deps': {
@@ -223,20 +223,20 @@ class TestCommandHandlers:
                 'config': Mock(approved_directory=Path("/"))
             }
         }
-        
-        # Execute
+
+        # 执行
         await command.new_session(mock_telegram_update, context)
-        
-        # Assert
+
+        # 断言
         assert session.claude_session_id is None
         mock_telegram_update.message.reply_text.assert_called_once()
 ```
 
-#### Security Tests
+#### 安全测试
 ```python
 # tests/unit/security/test_validators.py
 """
-Unit tests for security validators
+安全验证器单元测试
 """
 
 import pytest
@@ -245,12 +245,12 @@ from pathlib import Path
 from src.security.validators import SecurityValidator
 
 class TestSecurityValidator:
-    """Test security validation"""
-    
+    """测试安全验证"""
+
     @pytest.fixture
     def validator(self, temp_project_dir):
         return SecurityValidator(temp_project_dir)
-    
+
     @pytest.mark.parametrize("path,should_fail", [
         ("../../../etc/passwd", True),
         ("./valid_dir", False),
@@ -265,18 +265,18 @@ class TestSecurityValidator:
         ("file|mail attacker", True),
     ])
     def test_path_validation(self, validator, path, should_fail):
-        """Test path validation catches dangerous paths"""
+        """测试路径验证捕获危险路径"""
         valid, resolved, error = validator.validate_path(
-            path, 
+            path,
             validator.approved_directory
         )
-        
+
         if should_fail:
             assert not valid
             assert error is not None
         else:
             assert valid or not (validator.approved_directory / path).exists()
-    
+
     @pytest.mark.parametrize("filename,should_fail", [
         ("../../etc/passwd", True),
         ("normal_file.py", False),
@@ -287,9 +287,9 @@ class TestSecurityValidator:
         ("file\x00.txt", True),
     ])
     def test_filename_validation(self, validator, filename, should_fail):
-        """Test filename validation"""
+        """测试文件名验证"""
         valid, error = validator.validate_filename(filename)
-        
+
         if should_fail:
             assert not valid
             assert error is not None
@@ -297,11 +297,11 @@ class TestSecurityValidator:
             assert valid
 ```
 
-#### Claude Integration Tests
+#### Claude 集成测试
 ```python
 # tests/unit/claude/test_integration.py
 """
-Unit tests for Claude integration
+Claude 集成单元测试
 """
 
 import pytest
@@ -312,21 +312,21 @@ from unittest.mock import Mock, AsyncMock, patch
 from src.claude.integration import ClaudeProcessManager, ClaudeResponse
 
 class TestClaudeProcessManager:
-    """Test Claude process management"""
-    
+    """测试 Claude 进程管理"""
+
     @pytest.fixture
     def process_manager(self, test_config):
         return ClaudeProcessManager(test_config)
-    
+
     @pytest.mark.asyncio
     async def test_execute_command_success(self, process_manager):
-        """Test successful command execution"""
-        # Mock subprocess
+        """测试命令执行成功"""
+        # Mock 子进程
         mock_process = Mock()
         mock_process.stdout = self._create_mock_stream([
             json.dumps({"type": "system", "subtype": "init", "tools": ["bash"]}),
             json.dumps({
-                "type": "assistant", 
+                "type": "assistant",
                 "message": {"content": [{"type": "text", "text": "Hello"}]}
             }),
             json.dumps({
@@ -340,7 +340,7 @@ class TestClaudeProcessManager:
             })
         ])
         mock_process.wait = AsyncMock(return_value=0)
-        
+
         with patch('asyncio.create_subprocess_exec', return_value=mock_process):
             result = await process_manager.execute_command(
                 "test prompt",
@@ -349,67 +349,67 @@ class TestClaudeProcessManager:
                 False,
                 None
             )
-        
+
         assert isinstance(result, ClaudeResponse)
         assert result.content == "Hello"
         assert result.session_id == "test-123"
         assert result.cost == 0.001
-    
+
     @pytest.mark.asyncio
     async def test_timeout_handling(self, process_manager, test_config):
-        """Test timeout kills process"""
-        # Mock slow subprocess
+        """测试超时终止进程"""
+        # Mock 慢速子进程
         mock_process = Mock()
         mock_process.stdout = self._create_slow_stream()
         mock_process.kill = Mock()
         mock_process.wait = AsyncMock()
-        
-        test_config.claude_timeout_seconds = 0.1  # Very short timeout
-        
+
+        test_config.claude_timeout_seconds = 0.1  # 极短超时
+
         with patch('asyncio.create_subprocess_exec', return_value=mock_process):
             with pytest.raises(ClaudeTimeoutError):
                 await process_manager.execute_command(
                     "test", Path("/test"), None, False, None
                 )
-        
+
         mock_process.kill.assert_called_once()
-    
+
     def _create_mock_stream(self, lines):
-        """Create mock stream that yields lines"""
+        """创建模拟流，逐行输出"""
         async def mock_readline():
             for line in lines:
                 yield (line + '\n').encode()
             yield b''
-        
+
         mock_stream = Mock()
         mock_stream.readline = mock_readline().__anext__
         return mock_stream
 ```
 
-### Integration Tests
+### 集成测试
 
-#### Bot-Claude Integration
+#### Bot-Claude 集成
 ```python
 # tests/integration/test_bot_claude.py
 """
-Integration tests for bot and Claude
+Bot 与 Claude 的集成测试
 """
 
 import pytest
 from pathlib import Path
 
 class TestBotClaudeIntegration:
-    """Test bot integration with Claude"""
-    
+    """测试 bot 与 Claude 的集成"""
+
     @pytest.mark.asyncio
     async def test_message_to_claude_flow(
-        self, 
+        self,
         test_storage,
         mock_telegram_update,
         mock_claude_response
     ):
-        """Test complete flow from message to Claude response"""
-        # Setup dependencies
+        """测试从消息到 Claude 响应的完整流程"""
+        # 准备依赖
         deps = {
             'session_manager': Mock(get_session=Mock(return_value=Mock(
                 current_directory=Path("/test"),
@@ -424,34 +424,34 @@ class TestBotClaudeIntegration:
             ),
             'config': Mock(enable_quick_actions=False)
         }
-        
+
         context = Mock()
         context.user_data = {'deps': deps}
-        
-        # Execute
+
+        # 执行
         from src.bot.handlers.message import handle_text_message
         await handle_text_message(mock_telegram_update, context)
-        
-        # Verify Claude was called
+
+        # 验证 Claude 被调用
         deps['claude_integration'].run_command.assert_called_once()
-        
-        # Verify response was sent
+
+        # 验证响应已发送
         assert mock_telegram_update.message.reply_text.called
-        
-        # Verify cost was tracked
+
+        # 验证费用已追踪
         deps['rate_limiter'].track_cost.assert_called_with(
-            123456789, 
+            123456789,
             mock_claude_response.cost
         )
 ```
 
-### End-to-End Tests
+### 端到端测试
 
-#### User Flow Tests
+#### 用户流程测试
 ```python
 # tests/e2e/test_user_flows.py
 """
-End-to-end tests for complete user flows
+完整用户流程的端到端测试
 """
 
 import pytest
@@ -459,62 +459,62 @@ from telegram import Update
 from telegram.ext import Application
 
 class TestUserFlows:
-    """Test complete user workflows"""
-    
+    """测试完整用户工作流"""
+
     @pytest.mark.asyncio
     async def test_new_user_onboarding(self, test_bot_app):
-        """Test new user onboarding flow"""
-        # Simulate /start command
+        """测试新用户引导流程"""
+        # 模拟 /start 命令
         update = self._create_update("/start", user_id=999999)
         await test_bot_app.process_update(update)
-        
-        # Verify welcome message
+
+        # 验证欢迎消息
         assert "Welcome to Claude Code Bot" in self.sent_messages[-1]
-        
-        # Simulate /projects command
+
+        # 模拟 /projects 命令
         update = self._create_update("/projects", user_id=999999)
         await test_bot_app.process_update(update)
-        
-        # Verify project list
+
+        # 验证项目列表
         assert "Select a project" in self.sent_messages[-1]
-    
+
     @pytest.mark.asyncio
     async def test_coding_session_flow(self, test_bot_app):
-        """Test complete coding session"""
+        """测试完整编码会话"""
         user_id = 123456789
-        
-        # Start in project
+
+        # 进入项目
         update = self._create_update("/cd myproject", user_id=user_id)
         await test_bot_app.process_update(update)
-        
-        # Send coding request
+
+        # 发送编码请求
         update = self._create_update(
-            "Create a Python function to calculate fibonacci", 
+            "Create a Python function to calculate fibonacci",
             user_id=user_id
         )
         await test_bot_app.process_update(update)
-        
-        # Verify Claude response
+
+        # 验证 Claude 响应
         assert "def fibonacci" in self.sent_messages[-1]
-        
-        # Continue conversation
+
+        # 继续对话
         update = self._create_update(
-            "Now add memoization", 
+            "Now add memoization",
             user_id=user_id
         )
         await test_bot_app.process_update(update)
-        
-        # Verify session continuity
+
+        # 验证会话连续性
         assert "memoization" in self.sent_messages[-1]
 ```
 
-### Performance Tests
+### 性能测试
 
-#### Load Testing
+#### 负载测试
 ```python
 # tests/performance/test_load.py
 """
-Performance and load tests
+性能和负载测试
 """
 
 import pytest
@@ -523,69 +523,69 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 class TestPerformance:
-    """Test performance characteristics"""
-    
+    """测试性能特性"""
+
     @pytest.mark.asyncio
     async def test_concurrent_users(self, test_bot_app):
-        """Test handling multiple concurrent users"""
+        """测试多用户并发处理"""
         num_users = 50
         messages_per_user = 5
-        
+
         async def simulate_user(user_id):
-            """Simulate user sending messages"""
+            """模拟用户发送消息"""
             for i in range(messages_per_user):
                 update = self._create_update(
-                    f"Test message {i}", 
+                    f"Test message {i}",
                     user_id=user_id
                 )
                 await test_bot_app.process_update(update)
-                await asyncio.sleep(0.1)  # Simulate typing
-        
+                await asyncio.sleep(0.1)  # 模拟输入间隔
+
         start_time = time.time()
-        
-        # Run concurrent users
+
+        # 并发运行用户
         tasks = [
-            simulate_user(user_id) 
+            simulate_user(user_id)
             for user_id in range(num_users)
         ]
         await asyncio.gather(*tasks)
-        
+
         duration = time.time() - start_time
         total_messages = num_users * messages_per_user
         throughput = total_messages / duration
-        
-        # Assert performance targets
-        assert throughput > 10  # At least 10 messages/second
-        assert duration < 30    # Complete within 30 seconds
-    
+
+        # 断言性能指标
+        assert throughput > 10  # 至少每秒 10 条消息
+        assert duration < 30    # 30 秒内完成
+
     @pytest.mark.asyncio
     async def test_memory_usage(self, test_bot_app):
-        """Test memory usage under load"""
+        """测试负载下的内存使用"""
         import psutil
         import os
-        
+
         process = psutil.Process(os.getpid())
         initial_memory = process.memory_info().rss / 1024 / 1024  # MB
-        
-        # Send many messages
+
+        # 发送大量消息
         for i in range(1000):
             update = self._create_update(f"Message {i}", user_id=123)
             await test_bot_app.process_update(update)
-        
+
         final_memory = process.memory_info().rss / 1024 / 1024  # MB
         memory_increase = final_memory - initial_memory
-        
-        # Assert memory usage is reasonable
-        assert memory_increase < 100  # Less than 100MB increase
+
+        # 断言内存使用合理
+        assert memory_increase < 100  # 增长不超过 100MB
 ```
 
-### Test Utilities
+### 测试工具
 
-#### Test Factories
+#### 测试数据工厂
 ```python
 # tests/fixtures/factories.py
 """
-Test data factories
+测试数据工厂
 """
 
 import factory
@@ -594,10 +594,10 @@ from datetime import datetime
 from src.storage.models import UserModel, SessionModel, MessageModel
 
 class UserFactory(factory.Factory):
-    """Create test users"""
+    """创建测试用户"""
     class Meta:
         model = UserModel
-    
+
     user_id = factory.Sequence(lambda n: 1000 + n)
     telegram_username = factory.Faker('user_name')
     first_seen = factory.LazyFunction(datetime.utcnow)
@@ -608,10 +608,10 @@ class UserFactory(factory.Factory):
     session_count = 0
 
 class SessionFactory(factory.Factory):
-    """Create test sessions"""
+    """创建测试会话"""
     class Meta:
         model = SessionModel
-    
+
     session_id = factory.Faker('uuid4')
     user_id = factory.SubFactory(UserFactory)
     project_path = "/test/project"
@@ -623,15 +623,15 @@ class SessionFactory(factory.Factory):
     is_active = True
 ```
 
-#### Mock Builders
+#### Mock 构建器
 ```python
 # tests/fixtures/mocks.py
 """
-Mock object builders
+Mock 对象构建器
 """
 
 def create_mock_update(text, user_id=123456789, **kwargs):
-    """Create mock Telegram update"""
+    """创建 Mock Telegram update"""
     update = Mock()
     update.effective_user.id = user_id
     update.effective_user.username = kwargs.get('username', 'testuser')
@@ -640,25 +640,25 @@ def create_mock_update(text, user_id=123456789, **kwargs):
     update.message.message_id = kwargs.get('message_id', 1)
     update.message.reply_text = AsyncMock()
     update.message.chat.send_action = AsyncMock()
-    
-    # Add callback query if specified
+
+    # 如果指定了回调数据则添加 callback query
     if 'callback_data' in kwargs:
         update.callback_query = Mock()
         update.callback_query.data = kwargs['callback_data']
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()
-    
+
     return update
 ```
 
-## Quality Assurance
+## 质量保证
 
-### Code Coverage Configuration
+### 代码覆盖率配置
 ```ini
 # .coveragerc
 [run]
 source = src
-omit = 
+omit =
     */tests/*
     */migrations/*
     */__init__.py
@@ -675,9 +675,9 @@ directory = htmlcov
 output = coverage.xml
 ```
 
-### Linting Configuration
+### 代码检查配置
 ```toml
-# pyproject.toml additions
+# pyproject.toml 附加配置
 [tool.black]
 line-length = 88
 target-version = ['py39']
@@ -704,7 +704,7 @@ max-line-length = 88
 disable = C0103,C0114,C0115,C0116,R0903
 ```
 
-### CI/CD Pipeline
+### CI/CD 流水线
 ```yaml
 # .github/workflows/test.yml
 name: Tests
@@ -721,54 +721,54 @@ jobs:
     strategy:
       matrix:
         python-version: [3.9, "3.10", 3.11]
-    
+
     steps:
     - uses: actions/checkout@v3
-    
-    - name: Set up Python ${{ matrix.python-version }}
+
+    - name: 设置 Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
-    
-    - name: Cache dependencies
+
+    - name: 缓存依赖
       uses: actions/cache@v3
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('requirements/*.txt') }}
-    
-    - name: Install dependencies
+
+    - name: 安装依赖
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements/test.txt
-    
-    - name: Lint with flake8
+
+    - name: flake8 代码检查
       run: |
         flake8 src tests
-    
-    - name: Check formatting with black
+
+    - name: black 格式检查
       run: |
         black --check src tests
-    
-    - name: Type check with mypy
+
+    - name: mypy 类型检查
       run: |
         mypy src
-    
-    - name: Test with pytest
+
+    - name: pytest 运行测试
       run: |
         pytest -v --cov=src --cov-report=xml --cov-report=html
-    
-    - name: Upload coverage
+
+    - name: 上传覆盖率
       uses: codecov/codecov-action@v3
       with:
         file: ./coverage.xml
         fail_ci_if_error: true
 ```
 
-## Testing Commands
+## 测试命令
 
-### Makefile Additions
+### Makefile 附加命令
 ```makefile
-# Testing commands
+# 测试命令
 test:
 	pytest -v
 
@@ -796,17 +796,17 @@ test-profile:
 test-all: lint type-check test-coverage
 ```
 
-## Success Criteria
+## 成功标准
 
-- [ ] Unit test coverage > 80%
-- [ ] All integration tests pass
-- [ ] E2E tests cover main user flows
-- [ ] Performance tests meet targets
-- [ ] No linting errors
-- [ ] Type checking passes
-- [ ] CI/CD pipeline green
-- [ ] Load tests handle 50+ concurrent users
-- [ ] Memory usage stays under limits
-- [ ] Security tests pass OWASP checks
-- [ ] Mock objects properly simulate real behavior
-- [ ] Test execution time < 5 minutes
+- [ ] 单元测试覆盖率 > 80%
+- [ ] 所有集成测试通过
+- [ ] 端到端测试覆盖主要用户流程
+- [ ] 性能测试达到目标
+- [ ] 无代码检查错误
+- [ ] 类型检查通过
+- [ ] CI/CD 流水线全绿
+- [ ] 负载测试处理 50+ 并发用户
+- [ ] 内存使用在限制范围内
+- [ ] 安全测试通过 OWASP 检查
+- [ ] Mock 对象正确模拟真实行为
+- [ ] 测试执行时间 < 5 分钟
