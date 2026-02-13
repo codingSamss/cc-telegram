@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import re
 import signal
 import sys
 from pathlib import Path
@@ -37,6 +38,32 @@ from src.storage.facade import Storage
 from src.storage.session_storage import SQLiteSessionStorage
 
 
+_TELEGRAM_BOT_TOKEN_IN_URL_RE = re.compile(
+    r"(https?://api\.telegram\.org/bot)([^/\s]+)"
+)
+_TELEGRAM_BOT_TOKEN_RAW_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Redact sensitive tokens from log text."""
+    redacted = _TELEGRAM_BOT_TOKEN_IN_URL_RE.sub(r"\1<redacted>", text)
+    redacted = _TELEGRAM_BOT_TOKEN_RAW_RE.sub("<redacted_token>", redacted)
+    return redacted
+
+
+class SensitiveLogFilter(logging.Filter):
+    """Filter log records to avoid leaking secrets."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = redact_sensitive_text(message)
+        if redacted != message:
+            # Keep a pre-formatted safe message to avoid re-inserting args.
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
 def setup_logging(debug: bool = False) -> None:
     """Configure structured logging."""
     level = logging.DEBUG if debug else logging.INFO
@@ -47,6 +74,11 @@ def setup_logging(debug: bool = False) -> None:
         format="%(message)s",
         stream=sys.stdout,
     )
+    # Always apply secret redaction filter to root handlers.
+    sensitive_filter = SensitiveLogFilter()
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        handler.addFilter(sensitive_filter)
 
     # Configure structlog
     structlog.configure(
