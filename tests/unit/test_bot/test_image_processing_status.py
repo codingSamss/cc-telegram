@@ -36,6 +36,15 @@ def test_build_image_analyzing_status_includes_slow_hint():
     assert "响应时间较长" in long_text
 
 
+def test_build_image_analyzing_status_uses_engine_label():
+    """Analysis status should reflect the active engine label."""
+    codex_text = _build_image_analyzing_status(12, engine_label="Codex")
+    claude_text = _build_image_analyzing_status(12, engine_label="Claude")
+
+    assert "Codex 正在分析图片" in codex_text
+    assert "Claude 正在分析图片" in claude_text
+
+
 class _FakeTelegramFile:
     """Fake Telegram file for image handler tests."""
 

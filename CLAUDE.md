@@ -1,23 +1,26 @@
 # CLAUDE.md
 
-本文件为 Claude Code (claude.ai/code) 在本仓库中工作时提供指引。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 项目概述
 
-Telegram bot，提供对 Claude Code 的远程访问。Python 3.10+，使用 Poetry 构建，`python-telegram-bot` 处理 Telegram 交互，`claude-agent-sdk` 处理 Claude Code 集成。
+Telegram Bot，通过 Long Polling 提供对 CLI 编码智能体（Claude / Codex）的远程访问。Python 3.10+，Poetry 构建，`python-telegram-bot` 处理 Telegram 交互，`claude-agent-sdk` 处理 Claude Code 集成。
 
 ## 命令
 
 ```bash
 make dev              # 安装所有依赖（含开发依赖）
 make install          # 仅安装生产依赖
-make run              # 运行 bot
+make run              # 运行 bot（poetry run claude-telegram-bot）
 make run-debug        # 以调试日志模式运行
 make test             # 运行测试并生成覆盖率
 make lint             # Black + isort + flake8 + mypy
 make format           # 使用 black + isort 自动格式化
 
-# 运行单个测试
+# 运行单个测试文件
+poetry run pytest tests/unit/test_config.py -v
+
+# 运行匹配名称的测试
 poetry run pytest tests/unit/test_config.py -k test_name -v
 
 # 仅类型检查
@@ -26,65 +29,135 @@ poetry run mypy src
 
 ## 架构
 
-### 双 Claude 集成（SDK 优先，CLI 回退）
+### 多引擎集成（Claude + Codex）
 
-`ClaudeIntegration`（门面层，位于 `src/claude/facade.py`）封装两个后端：
+系统支持多个 CLI 引擎，通过 `src/bot/utils/cli_engine.py` 统一抽象：
+
+- **引擎选择**：`get_cli_integration(bot_data, scope_state)` 根据当前 scope 的 `active_cli_engine` 状态解析对应的集成实例
+- **引擎能力声明**：`EngineCapabilities` 数据类描述各引擎支持的功能（模型选择、诊断命令等）
+- **命令可见性**：`COMMAND_ENGINE_VISIBILITY` 控制哪些命令在哪个引擎下显示
+
+每个引擎的集成实例通过 `context.bot_data["cli_integrations"]` 字典访问（键为引擎名），向后兼容 `context.bot_data["claude_integration"]`。
+
+### Claude 双后端（SDK 优先，CLI 回退）
+
+`ClaudeIntegration`（门面层，`src/claude/facade.py`）封装两个后端：
 - **`ClaudeSDKManager`**（`src/claude/sdk_integration.py`）— 主要方式。使用 `claude-agent-sdk` 异步 `query()` 和流式传输。会话 ID 来自 Claude 的 `ResultMessage`，而非本地生成。
-- **`ClaudeProcessManager`**（`src/claude/integration.py`）— 传统 CLI 子进程回退方式。在 SDK 出现 JSON 解码或 TaskGroup 错误时使用。
+- **`ClaudeProcessManager`**（`src/claude/integration.py`）— CLI 子进程回退方式。
 
-会话自动恢复：按用户+目录维度，持久化到 SQLite，临时 ID（`temp_*`）不会发送给 Claude 用于恢复。
+回退策略：
+- **可重试错误**（触发 SDK→CLI 回退）：`ClaudeTimeoutError`、`CLIConnectionError`、`CLIJSONDecodeError`、`ClaudeParsingError`、TaskGroup/ExceptionGroup
+- **不可重试错误**（直接失败）：ValueError、权限拒绝、验证失败
+- **不回退的场景**：权限审批中的请求（仅 SDK 支持）、图片处理请求（CLI 不支持）
 
 ### 请求流程
 
 ```
 Telegram 消息 → 安全中间件 (group -3) → 认证中间件 (group -2)
 → 限流 (group -1) → 命令/消息处理器 (group 10)
-→ ClaudeIntegration.run_command() → SDK（带 CLI 回退）
-→ 响应解析 → 存入 SQLite → 返回 Telegram
+→ CLI 引擎解析 → ClaudeIntegration.run_command() → SDK（带 CLI 回退）
+→ 响应解析 → Storage.save_claude_interaction() → 返回 Telegram
 ```
+
+### Per-Topic 作用域状态
+
+`src/bot/utils/scope_state.py` 实现按 `user_id:chat_id:thread_id` 维度的独立状态隔离，支持群组论坛的多 topic 并行会话：
+
+- 状态存储在 `context.user_data["scope_state"][scope_key]`
+- **继承白名单**：新 scope 仅继承 `current_directory` 和 `claude_model`，会话标识（session_id、force_new_session）不继承
+- 新 scope 自动设置 `force_new_session = True`，防止拉取父 topic 的会话
+- 处理器通过 `get_scope_state_from_update()` / `get_scope_state_from_query()` 获取当前 scope
+
+### 服务层
+
+`src/services/` 提取了处理器的业务逻辑，避免 handler 臃肿：
+
+- **`SessionInteractionService`**（815 行）— 核心交互逻辑：上下文渲染、状态/用量展示、会话信息查询。定义 `SessionInteractionMessage`、`ContextViewSpec`、`ContextRenderResult` 数据类
+- **`SessionLifecycleService`** — 会话创建、终止、生命周期事件
+- **`SessionService`** — 会话操作（切换目录、模型设置）
+- **`ApprovalService`** — 工具权限审批工作流
+- **`EventService`** — 事件追踪
 
 ### 依赖注入
 
-Bot 处理器通过 `context.bot_data` 访问依赖：
+`ClaudeCodeBot._inject_deps()` 将所有依赖注入 `context.bot_data`：
+
 ```python
-context.bot_data["auth_manager"]
-context.bot_data["claude_integration"]
-context.bot_data["storage"]
-context.bot_data["security_validator"]
+# 核心依赖
+context.bot_data["cli_integrations"]     # dict[str, Integration] 多引擎
+context.bot_data["claude_integration"]   # 向后兼容的 Claude 集成
+context.bot_data["storage"]              # Storage 门面
+context.bot_data["features"]             # FeatureFlags
+context.bot_data["task_registry"]        # 任务注册（用于取消）
+
+# 安全
+context.bot_data["auth_manager"]         # AuthenticationManager
+context.bot_data["security_validator"]   # SecurityValidator
+context.bot_data["rate_limiter"]         # RateLimiter
+context.bot_data["audit_logger"]         # AuditLogger
+
+# 服务
+context.bot_data["permission_manager"]   # PermissionManager
+context.bot_data["approval_service"]     # ApprovalService
+context.bot_data["session_lifecycle_service"]
+context.bot_data["session_interaction_service"]
+context.bot_data["event_service"]
+context.bot_data["session_service"]
 ```
 
-### 关键目录
+### 存储层
 
-- `src/config/` — Pydantic Settings v2 配置，带环境检测、功能开关（`features.py`）
-- `src/bot/handlers/` — Telegram 命令、消息和回调处理器
-- `src/bot/middleware/` — 认证、限流、安全输入验证
-- `src/bot/features/` — Git 集成、文件处理、快捷操作、会话导出
-- `src/claude/` — Claude 集成门面层、SDK/CLI 管理器、会话管理、工具监控
-- `src/storage/` — 基于 aiosqlite 的 SQLite，仓储模式（users、sessions、messages、tool_usage、audit_log、cost_tracking）
-- `src/security/` — 多提供者认证（白名单 + 令牌）、输入验证器、限流器、审计日志
+`src/storage/` 使用 Repository 模式 + aiosqlite：
+
+- **`Storage`**（`storage/facade.py`）— 高级门面，`save_claude_interaction()` 原子性保存消息、工具用量、费用、用户/会话统计、事件、审计日志
+- **Repositories**（`storage/repositories.py`）— 每个实体一个 Repository：User、Session、Message、ToolUsage、SessionEvent、AuditLog、ApprovalRequest、CostTracking、Analytics
+- **`SQLiteSessionStorage`**（`storage/session_storage.py`）— Claude 会话持久化，支持自动恢复
+
+### 会话管理
+
+`SessionManager`（`src/claude/session.py`）管理会话生命周期：
+- 临时 ID 格式 `temp_*`，首次响应后替换为 Claude 分配的真实 ID
+- 自动恢复：按 user_id + project_path 匹配，排除临时 ID，检查超时
+- 桌面会话采纳：通过 `adopt_external_session()` 标记 `source="desktop_adopted"`
+
+### 工具权限系统
+
+`PermissionManager`（`src/claude/permissions.py`）桥接 SDK `can_use_tool` 回调与 Telegram 审批按钮：
+- `request_permission()` 创建 `asyncio.Future`，用户通过内联按钮审批
+- `claude_allowed_tools` 配置项自动放行白名单工具
+- 默认超时 120 秒
 
 ### 安全模型
 
-5 层纵深防御：认证（白名单/令牌）→ 目录隔离（APPROVED_DIRECTORY + 路径遍历防护）→ 输入验证（阻止 `..`、`;`、`&&`、`$()`等）→ 限流（令牌桶）→ 审计日志。
-
-`SecurityValidator` 阻止访问敏感文件（`.env`、`.ssh`、`id_rsa`、`.pem`）和危险 shell 模式。
+5 层纵深防御：认证（白名单/令牌，group -2）→ 输入验证（阻止 `..`、`;`、`&&`、`$()` 等，group -3）→ 目录隔离（`APPROVED_DIRECTORY` + 路径遍历防护）→ 限流（令牌桶，group -1）→ 审计日志。
 
 ### 配置
 
-配置通过 Pydantic Settings 从环境变量加载。必需项：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_BOT_USERNAME`、`APPROVED_DIRECTORY`。重要可选项：`ALLOWED_USERS`（逗号分隔的 Telegram ID）、`USE_SDK`（默认 true）、`ANTHROPIC_API_KEY`、`ENABLE_MCP`、`MCP_CONFIG_PATH`。
+Pydantic Settings v2 从环境变量加载（`src/config/settings.py`）。必需项：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_BOT_USERNAME`、`APPROVED_DIRECTORY`。
 
-功能开关位于 `src/config/features.py`，控制：MCP、Git 集成、文件上传、快捷操作、会话导出、图片上传、对话模式。
+重要可选项：`ALLOWED_USERS`（逗号分隔 Telegram ID）、`USE_SDK`（默认 true）、`ENABLE_CODEX_CLI`、`CODEX_CLI_PATH`、`ANTHROPIC_API_KEY`、`ENABLE_MCP`、`MCP_CONFIG_PATH`。
+
+功能开关位于 `src/config/features.py`（`FeatureFlags` 类），通过 `is_feature_enabled(name)` 查询。
+
+### 应用生命周期
+
+入口 `src/main.py`：
+1. 解析参数（`--debug`、`--config-file`）→ 加载配置 → 初始化 structlog（带敏感信息脱敏）
+2. 初始化存储 → 创建安全组件 → 创建 Claude 组件和服务 → 创建 Bot
+3. 可选创建 Codex CLI 适配器（独立配置，共享存储）
+4. Bot 启动 Polling 或 Webhook → 运行直到收到 SIGINT/SIGTERM
+5. 优雅关闭：停止 updater → 终止活跃进程 → 清理过期会话 → 关闭数据库
 
 ## 代码风格
 
-- Black（88 字符行宽）、isort（black 配置）、flake8、mypy 严格模式
-- pytest-asyncio，`asyncio_mode = "auto"`
-- structlog 用于所有日志（生产 JSON，开发控制台）
-- 所有函数必须添加类型标注（`disallow_untyped_defs = true`）
+- Black（88 字符行宽）、isort（black profile）、flake8、mypy 严格模式（`disallow_untyped_defs = true`）
+- pytest-asyncio，`asyncio_mode = "auto"`，测试中用 `AsyncMock` 模拟异步方法
+- structlog 结构化日志（生产 JSON，开发控制台），`SensitiveLogFilter` 脱敏 bot token
 
 ## 添加新 Bot 命令
 
 1. 在 `src/bot/handlers/command.py` 中添加处理函数
 2. 在 `src/bot/core.py` 的 `_register_handlers()` 中注册
 3. 添加到 `_set_bot_commands()` 以显示在 Telegram 命令菜单中
-4. 为该命令添加审计日志
+4. 如命令仅对特定引擎可见，在 `cli_engine.py` 的 `COMMAND_ENGINE_VISIBILITY` 中配置
+5. 为该命令添加审计日志

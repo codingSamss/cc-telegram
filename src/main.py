@@ -1,9 +1,10 @@
-"""Main entry point for Claude Code Telegram Bot."""
+"""Main entry point for CLI TG."""
 
 import argparse
 import asyncio
 import logging
 import re
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -113,13 +114,11 @@ def setup_logging(debug: bool = False) -> None:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Claude Code Telegram Bot",
+        description="CLI TG",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
-        "--version", action="version", version=f"Claude Code Telegram Bot {__version__}"
-    )
+    parser.add_argument("--version", action="version", version=f"CLI TG {__version__}")
 
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
@@ -200,6 +199,36 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         permission_manager=permission_manager,
     )
 
+    cli_integrations: Dict[str, Any] = {"claude": claude_integration}
+    if config.enable_codex_cli:
+        codex_cli_path = str(config.codex_cli_path or "").strip() or shutil.which(
+            "codex"
+        )
+        if codex_cli_path:
+            codex_config = config.model_copy(deep=True)
+            codex_config.use_sdk = False
+            codex_config.enable_mcp = False
+            codex_config.claude_cli_path = codex_cli_path
+            codex_config.claude_binary_path = codex_cli_path
+
+            codex_session_storage = SQLiteSessionStorage(storage.db_manager)
+            codex_session_manager = SessionManager(codex_config, codex_session_storage)
+            codex_process_manager = ClaudeProcessManager(codex_config)
+            codex_integration = ClaudeIntegration(
+                config=codex_config,
+                process_manager=codex_process_manager,
+                sdk_manager=None,
+                session_manager=codex_session_manager,
+                tool_monitor=tool_monitor,
+                permission_manager=permission_manager,
+            )
+            cli_integrations["codex"] = codex_integration
+            logger.info("Codex CLI adapter enabled", codex_cli_path=codex_cli_path)
+        else:
+            logger.warning(
+                "ENABLE_CODEX_CLI is true but codex binary not found; skip codex adapter"
+            )
+
     # Create bot with all dependencies
     dependencies = {
         "auth_manager": auth_manager,
@@ -214,6 +243,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "session_interaction_service": session_interaction_service,
         "event_service": event_service,
         "session_service": session_service,
+        "cli_integrations": cli_integrations,
     }
 
     bot = ClaudeCodeBot(config, dependencies)
@@ -223,6 +253,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     return {
         "bot": bot,
         "claude_integration": claude_integration,
+        "cli_integrations": cli_integrations,
         "storage": storage,
         "config": config,
     }
@@ -233,6 +264,9 @@ async def run_application(app: Dict[str, Any]) -> None:
     logger = structlog.get_logger()
     bot: ClaudeCodeBot = app["bot"]
     claude_integration: ClaudeIntegration = app["claude_integration"]
+    cli_integrations: Dict[str, Any] = app.get("cli_integrations") or {
+        "claude": claude_integration
+    }
     storage: Storage = app["storage"]
 
     # Set up signal handlers for graceful shutdown
@@ -247,7 +281,7 @@ async def run_application(app: Dict[str, Any]) -> None:
 
     try:
         # Start the bot
-        logger.info("Starting Claude Code Telegram Bot")
+        logger.info("Starting CLI TG")
 
         # Run bot in background task
         bot_task = asyncio.create_task(bot.start())
@@ -275,7 +309,17 @@ async def run_application(app: Dict[str, Any]) -> None:
 
         try:
             await bot.stop()
-            await claude_integration.shutdown()
+            shutdown_targets = []
+            for integration in cli_integrations.values():
+                if integration not in shutdown_targets:
+                    shutdown_targets.append(integration)
+            for integration in shutdown_targets:
+                shutdown = getattr(integration, "shutdown", None)
+                if shutdown is None:
+                    continue
+                result = shutdown()
+                if asyncio.iscoroutine(result):
+                    await result
             await storage.close()
         except Exception as e:
             logger.error("Error during shutdown", error=str(e))
@@ -289,7 +333,7 @@ async def main() -> None:
     setup_logging(debug=args.debug)
 
     logger = structlog.get_logger()
-    logger.info("Starting Claude Code Telegram Bot", version=__version__)
+    logger.info("Starting CLI TG", version=__version__)
 
     try:
         # Load configuration

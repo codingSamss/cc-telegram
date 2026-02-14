@@ -63,6 +63,39 @@ class TestClaudeIntegrationFacade:
         assert "USE_SDK=true" in str(exc_info.value)
         process_manager.execute_command.assert_not_awaited()
 
+    async def test_images_can_use_codex_subprocess_when_supported(self, tmp_path):
+        """Image requests should pass through when subprocess advertises image support."""
+        config = _build_config(tmp_path, use_sdk=False)
+        response = ClaudeResponse(
+            content="ok",
+            session_id="codex-session",
+            cost=0.0,
+            duration_ms=8,
+            num_turns=1,
+        )
+        process_manager = MagicMock()
+        process_manager.supports_image_inputs = MagicMock(return_value=True)
+        process_manager.execute_command = AsyncMock(return_value=response)
+
+        facade = _build_facade(
+            config=config, sdk_manager=None, process_manager=process_manager
+        )
+
+        result = await facade._execute_with_fallback(
+            prompt="Analyze this image",
+            working_directory=tmp_path,
+            images=[
+                {
+                    "file_path": "/tmp/upload.png",
+                    "media_type": "image/png",
+                }
+            ],
+        )
+
+        assert result is response
+        kwargs = process_manager.execute_command.await_args.kwargs
+        assert kwargs["images"][0]["file_path"] == "/tmp/upload.png"
+
     async def test_images_do_not_fallback_to_subprocess_on_sdk_error(self, tmp_path):
         """Image requests should not silently degrade to text-only subprocess mode."""
         config = _build_config(tmp_path, use_sdk=True)
@@ -244,6 +277,43 @@ class TestClaudeIntegrationFacade:
         assert second["cached"] is True
         process_manager.execute_command.assert_awaited_once()
         sdk_manager.execute_command.assert_not_awaited()
+
+    async def test_get_precise_context_usage_probes_codex_status(self, tmp_path):
+        """Codex subprocess should probe `/status` and parse context usage."""
+        config = _build_config(tmp_path, use_sdk=False)
+        sdk_manager = MagicMock()
+        process_manager = MagicMock()
+        process_manager._resolve_cli_path = MagicMock(
+            return_value="/usr/local/bin/codex"
+        )
+        process_manager._detect_cli_kind = MagicMock(return_value="codex")
+        process_manager.execute_command = AsyncMock(
+            return_value=ClaudeResponse(
+                content=(
+                    "Status\n"
+                    "Context usage: 42.0% (84,000 / 200,000 tokens)\n"
+                    "Remaining: 116,000 tokens"
+                ),
+                session_id="thread-codex-1",
+                cost=0.0,
+                duration_ms=1,
+                num_turns=0,
+            )
+        )
+
+        facade = _build_facade(config, sdk_manager, process_manager)
+        result = await facade.get_precise_context_usage(
+            session_id="thread-codex-1",
+            working_directory=tmp_path,
+        )
+
+        assert result is not None
+        assert result["used_tokens"] == 84_000
+        assert result["total_tokens"] == 200_000
+        assert result["remaining_tokens"] == 116_000
+        assert result["used_percent"] == 42.0
+        process_manager.execute_command.assert_awaited_once()
+        assert process_manager.execute_command.await_args.kwargs["prompt"] == "/status"
 
     async def test_get_precise_context_usage_returns_none_when_unparseable(
         self, tmp_path

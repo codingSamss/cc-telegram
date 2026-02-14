@@ -8,7 +8,6 @@ import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from ...claude.facade import ClaudeIntegration
 from ...claude.task_registry import TaskRegistry
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
@@ -16,12 +15,91 @@ from ...security.validators import SecurityValidator
 from ...services.session_interaction_service import SessionInteractionService
 from ...services.session_lifecycle_service import SessionLifecycleService
 from ...services.session_service import SessionService
+from ..utils.cli_engine import (
+    ENGINE_CODEX,
+    SUPPORTED_CLI_ENGINES,
+    get_active_cli_engine,
+    get_cli_integration,
+    get_engine_capabilities,
+    get_engine_primary_status_command,
+    normalize_cli_engine,
+    set_active_cli_engine,
+)
+from ..utils.command_menu import sync_chat_command_menu
+from ..utils.recent_projects import build_recent_projects_message, scan_recent_projects
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.scope_state import get_scope_state_from_update
 from ..utils.ui_adapter import build_reply_markup_from_spec
 from .message import build_permission_handler
 
 logger = structlog.get_logger()
+
+
+def _get_or_create_resume_token_manager(context: ContextTypes.DEFAULT_TYPE):
+    """Get shared resume token manager from bot_data."""
+    from ...bot.resume_tokens import ResumeTokenManager
+
+    token_mgr = context.bot_data.get("resume_token_manager")
+    if token_mgr is None:
+        token_mgr = ResumeTokenManager()
+        context.bot_data["resume_token_manager"] = token_mgr
+    return token_mgr
+
+
+def _get_or_create_resume_scanner(
+    *, context: ContextTypes.DEFAULT_TYPE, settings: Settings, engine: str
+):
+    """Get engine-specific desktop session scanner."""
+    from ...bot.utils.codex_resume_scanner import CodexSessionScanner
+    from ...claude.desktop_scanner import DesktopSessionScanner
+
+    scanner_key = (
+        "codex_desktop_scanner" if engine == ENGINE_CODEX else "desktop_scanner"
+    )
+    scanner = context.bot_data.get(scanner_key)
+    if scanner is None:
+        scanner = (
+            CodexSessionScanner(
+                approved_directory=settings.approved_directory,
+                cache_ttl_sec=settings.resume_scan_cache_ttl_seconds,
+            )
+            if engine == ENGINE_CODEX
+            else DesktopSessionScanner(
+                approved_directory=settings.approved_directory,
+                cache_ttl_sec=settings.resume_scan_cache_ttl_seconds,
+            )
+        )
+        context.bot_data[scanner_key] = scanner
+    return scanner
+
+
+def _engine_display_name(engine: str) -> str:
+    """Human-readable engine name."""
+    return "Codex" if engine == ENGINE_CODEX else "Claude"
+
+
+def _build_engine_selector_keyboard(
+    *, active_engine: str, available_engines: set[str]
+) -> InlineKeyboardMarkup | None:
+    """Build inline keyboard for engine switching."""
+    buttons = []
+    for engine in SUPPORTED_CLI_ENGINES:
+        if engine not in available_engines:
+            continue
+        label = _engine_display_name(engine)
+        if engine == active_engine:
+            label = f"✅ {label}（当前）"
+        buttons.append(
+            InlineKeyboardButton(
+                label,
+                callback_data=f"engine:switch:{engine}",
+            )
+        )
+
+    if not buttons:
+        return None
+
+    return InlineKeyboardMarkup([buttons])
 
 
 def _is_context_full_mode(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -67,29 +145,89 @@ def _render_status_full_text(payload: dict) -> str:
     return SessionInteractionService.render_context_full_text(payload)
 
 
+async def _sync_chat_menu_for_engine(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None,
+    engine: str,
+) -> None:
+    """Refresh per-chat command menu after engine resolution/switch."""
+    bot = getattr(context, "bot", None)
+    if bot is None:
+        return
+
+    try:
+        commands = await sync_chat_command_menu(
+            bot=bot,
+            chat_id=chat_id,
+            engine=engine,
+        )
+        if commands:
+            logger.info(
+                "Synced chat command menu",
+                chat_id=chat_id,
+                engine=engine,
+                commands=[cmd.command for cmd in commands],
+            )
+    except Exception as exc:
+        logger.warning(
+            "Failed to sync chat command menu",
+            chat_id=chat_id,
+            engine=engine,
+            error=str(exc),
+        )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     user = update.effective_user
+    settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
+    active_engine = get_active_cli_engine(scope_state)
+
+    await _sync_chat_menu_for_engine(
+        context=context,
+        chat_id=getattr(update.effective_chat, "id", None),
+        engine=active_engine,
+    )
+    status_command = get_engine_primary_status_command(active_engine)
+    if status_command == "status":
+        status_line = "• `/status [full]` - Show session status and usage"
+        status_hint = "📊 Use `/status` to check your usage limits."
+        diagnostics_line = "• `/codexdiag` - Diagnose codex MCP status\n"
+        status_button = "📊 Check Status"
+        status_button_action = "action:status"
+    else:
+        status_line = "• `/context [full]` - Show session context and usage"
+        status_hint = "📊 Use `/context` to check your usage limits."
+        diagnostics_line = ""
+        status_button = "📊 Check Context"
+        status_button_action = "action:context"
 
     welcome_message = (
-        f"👋 Welcome to Claude Code Telegram Bot, {user.first_name}!\n\n"
-        f"🤖 I help you access Claude Code remotely through Telegram.\n\n"
+        f"👋 Welcome to CLI TG, {user.first_name}!\n\n"
+        f"🤖 I help you access CLI coding agents remotely through Telegram.\n\n"
         f"**Available Commands:**\n"
         f"• `/help` - Show detailed help\n"
-        f"• `/new` - Start a new Claude session\n"
+        f"• `/new` - Start a new session\n"
         f"• `/ls` - List files in current directory\n"
         f"• `/cd <dir>` - Change directory\n"
         f"• `/projects` - Show available projects\n"
-        f"• `/context [full]` - Show session context\n"
+        f"{status_line}\n"
+        f"• `/engine [claude|codex]` - Switch CLI engine\n"
         f"• `/actions` - Show quick actions\n"
         f"• `/git` - Git repository commands\n"
-        f"• `/codexdiag` - Diagnose codex MCP status\n\n"
+        f"{diagnostics_line}\n"
         f"**Quick Start:**\n"
         f"1. Use `/projects` to see available projects\n"
         f"2. Use `/cd <project>` to navigate to a project\n"
-        f"3. Send any message to start coding with Claude!\n\n"
+        f"3. Send any message to start coding with your active CLI engine!\n\n"
         f"🔒 Your access is secured and all actions are logged.\n"
-        f"📊 Use `/context` to check your usage limits."
+        f"{status_hint}"
     )
 
     # Add quick action buttons
@@ -102,7 +240,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ],
         [
             InlineKeyboardButton("🆕 New Session", callback_data="action:new_session"),
-            InlineKeyboardButton("📊 Check Context", callback_data="action:context"),
+            InlineKeyboardButton(status_button, callback_data=status_button_action),
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -121,8 +259,38 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
+    settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
+    active_engine = get_active_cli_engine(scope_state)
+    capabilities = get_engine_capabilities(active_engine)
+    status_command = get_engine_primary_status_command(active_engine)
+    if status_command == "status":
+        status_line = "• `/status [full]` - Show session status and usage"
+        status_alias_line = "• Compatibility alias: `/context [full]`"
+        diagnostics_text = (
+            "**Diagnostics:**\n"
+            "• `/codexdiag` - Diagnose latest codex MCP call in current directory\n"
+            "• `/codexdiag root` - Diagnose codex MCP call under approved root\n"
+            "• `/codexdiag <session_id>` - Diagnose a specific CLI session\n\n"
+        )
+        status_hint_line = "• Check `/status` to monitor your usage"
+    else:
+        status_line = "• `/context [full]` - Show session context and usage"
+        status_alias_line = "• Compatibility alias: `/status [full]`"
+        diagnostics_text = ""
+        status_hint_line = "• Check `/context` to monitor your usage"
+    model_line = (
+        "• `/model` - View or switch Claude model\n"
+        if capabilities.supports_model_selection
+        else ""
+    )
+
     help_text = (
-        "🤖 **Claude Code Telegram Bot Help**\n\n"
+        "🤖 **CLI TG Help**\n\n"
         "**Navigation Commands:**\n"
         "• `/ls` - List files and directories\n"
         "• `/cd <directory>` - Change to directory\n"
@@ -132,14 +300,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/new` - Clear context and start a fresh session\n"
         "• `/continue [message]` - Explicitly continue last session\n"
         "• `/end` - End current session and clear context\n"
-        "• `/context [full]` - Show session context and usage\n"
+        f"{status_line}\n"
+        f"{status_alias_line}\n"
+        "• `/engine [claude|codex]` - Switch active CLI engine\n"
+        f"{model_line}"
         "• `/export` - Export session history\n"
         "• `/actions` - Show context-aware quick actions\n"
         "• `/git` - Git repository information\n\n"
-        "**Diagnostics:**\n"
-        "• `/codexdiag` - Diagnose latest codex MCP call in current directory\n"
-        "• `/codexdiag root` - Diagnose codex MCP call under approved root\n"
-        "• `/codexdiag <session_id>` - Diagnose a specific Claude session\n\n"
+        f"{diagnostics_text}"
         "**Session Behavior:**\n"
         "• Sessions are automatically maintained per project directory\n"
         "• Switching directories with `/cd` resumes the session for that project\n"
@@ -148,11 +316,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**Usage Examples:**\n"
         "• `cd myproject` - Enter project directory\n"
         "• `ls` - See what's in current directory\n"
-        "• `Create a simple Python script` - Ask Claude to code\n"
-        "• Send a file to have Claude review it\n\n"
+        "• `Create a simple Python script` - Ask your current engine to code\n"
+        "• Send a file to have your current engine review it\n\n"
         "**File Operations:**\n"
         "• Send text files (.py, .js, .md, etc.) for review\n"
-        "• Claude can read, modify, and create files\n"
+        "• CLI engine can read, modify, and create files\n"
         "• All file operations are within your approved directory\n\n"
         "**Security Features:**\n"
         "• 🔒 Path traversal protection\n"
@@ -161,13 +329,153 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• 🛡️ Input validation and sanitization\n\n"
         "**Tips:**\n"
         "• Use specific, clear requests for best results\n"
-        "• Check `/context` to monitor your usage\n"
+        f"{status_hint_line}\n"
         "• Use quick action buttons when available\n"
-        "• File uploads are automatically processed by Claude\n\n"
+        "• File uploads are automatically processed by active engine\n\n"
         "Need more help? Contact your administrator."
     )
 
     await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /engine command to switch active CLI adapter."""
+    user_id = update.effective_user.id
+    settings: Settings = context.bot_data["settings"]
+    _, scope_state = get_scope_state_from_update(
+        user_data=context.user_data,
+        update=update,
+        default_directory=settings.approved_directory,
+    )
+    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+
+    active_engine = get_active_cli_engine(scope_state)
+    args = [
+        str(arg).strip().lower() for arg in (context.args or []) if str(arg).strip()
+    ]
+    if not args:
+        integrations = context.bot_data.get("cli_integrations") or {}
+        available_engines = set(
+            normalize_cli_engine(name) for name in integrations.keys() if name
+        )
+        await _sync_chat_menu_for_engine(
+            context=context,
+            chat_id=getattr(update.effective_chat, "id", None),
+            engine=active_engine,
+        )
+        supported = ", ".join(SUPPORTED_CLI_ENGINES)
+        selector_keyboard = _build_engine_selector_keyboard(
+            active_engine=active_engine,
+            available_engines=available_engines,
+        )
+        selector_text = (
+            "🧭 **CLI 引擎设置**\n\n"
+            f"当前引擎：`{active_engine}`\n"
+            f"支持引擎：`{supported}`\n\n"
+            "点击下方按钮即可切换；切换后会继续引导你选择最近目录与会话。\n"
+            "也可手动输入：`/engine codex` 或 `/engine claude`"
+        )
+        if selector_keyboard is None:
+            selector_text += "\n\n⚠️ 当前未检测到可用引擎，请检查配置。"
+
+        await update.message.reply_text(
+            selector_text,
+            parse_mode="Markdown",
+            reply_markup=selector_keyboard,
+        )
+        return
+
+    requested_engine = normalize_cli_engine(args[0])
+    integrations = context.bot_data.get("cli_integrations") or {}
+    if requested_engine not in integrations:
+        await update.message.reply_text(
+            f"❌ 引擎 `{requested_engine}` 当前不可用。\n"
+            "请检查对应 CLI 是否安装，并在配置中启用。",
+            parse_mode="Markdown",
+        )
+        return
+
+    if requested_engine == active_engine:
+        await _sync_chat_menu_for_engine(
+            context=context,
+            chat_id=getattr(update.effective_chat, "id", None),
+            engine=active_engine,
+        )
+        await update.message.reply_text(
+            f"ℹ️ 当前已经是 `{active_engine}` 引擎。",
+            parse_mode="Markdown",
+        )
+        return
+
+    old_session_id = scope_state.get("claude_session_id")
+    set_active_cli_engine(scope_state, requested_engine)
+    scope_state["claude_session_id"] = None
+    scope_state["session_started"] = True
+    scope_state["force_new_session"] = True
+    if old_session_id:
+        permission_manager = context.bot_data.get("permission_manager")
+        if permission_manager:
+            permission_manager.clear_session(old_session_id)
+
+    await _sync_chat_menu_for_engine(
+        context=context,
+        chat_id=getattr(update.effective_chat, "id", None),
+        engine=requested_engine,
+    )
+
+    switch_success_text = (
+        "✅ **CLI 引擎已切换**\n\n"
+        f"从 `{active_engine}` 切换到 `{requested_engine}`。\n"
+        "已清空当前会话绑定。请先选目录，再选会话；也可在下一步直接新建会话。"
+    )
+    projects: list[Path] = []
+    try:
+        token_mgr = _get_or_create_resume_token_manager(context)
+        scanner = _get_or_create_resume_scanner(
+            context=context,
+            settings=settings,
+            engine=requested_engine,
+        )
+        projects = await scanner.list_projects()
+    except Exception as scan_error:
+        logger.warning(
+            "Failed to preload resume projects after engine switch",
+            engine=requested_engine,
+            error=str(scan_error),
+        )
+
+    if projects:
+        current_dir = scope_state.get("current_directory")
+        resume_text, resume_keyboard = build_resume_project_selector(
+            projects=projects,
+            approved_root=settings.approved_directory,
+            token_mgr=token_mgr,
+            user_id=user_id,
+            current_directory=Path(current_dir) if current_dir else None,
+            show_all=False,
+            payload_extra={"engine": requested_engine},
+            engine=requested_engine,
+        )
+        await update.message.reply_text(
+            f"{switch_success_text}\n\n{resume_text}",
+            parse_mode="Markdown",
+            reply_markup=resume_keyboard,
+        )
+    else:
+        await update.message.reply_text(
+            f"{switch_success_text}\n\n"
+            "未发现可恢复的桌面会话，请直接发送消息开始新会话，"
+            "或先 `/cd` 到目标目录后再发送。",
+            parse_mode="Markdown",
+        )
+
+    if audit_logger:
+        await audit_logger.log_command(
+            user_id=user_id,
+            command="engine",
+            args=[requested_engine],
+            success=True,
+        )
 
 
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -216,7 +524,10 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         update=update,
         default_directory=settings.approved_directory,
     )
-    claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
+    active_engine, cli_integration = get_cli_integration(
+        bot_data=context.bot_data,
+        scope_state=scope_state,
+    )
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
     session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
         SessionLifecycleService(
@@ -236,7 +547,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
-        if not claude_integration:
+        if not cli_integration:
             await update.message.reply_text(
                 session_interaction.get_integration_unavailable_text()
             )
@@ -265,7 +576,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             user_id=user_id,
             scope_state=scope_state,
             current_dir=current_dir,
-            claude_integration=claude_integration,
+            claude_integration=cli_integration,
             prompt=prompt,
             default_prompt=default_prompt,
             permission_handler=permission_handler,
@@ -299,7 +610,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await audit_logger.log_command(
                     user_id=user_id,
                     command="continue",
-                    args=context.args or [],
+                    args=[active_engine, *(context.args or [])],
                     success=True,
                 )
 
@@ -459,6 +770,28 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Parse arguments
     if not context.args:
+        # Show recent active projects for quick switch
+        active_engine = get_active_cli_engine(scope_state)
+        current_dir = scope_state.get("current_directory", settings.approved_directory)
+        try:
+            recent = scan_recent_projects(settings.approved_directory)
+            if recent:
+                text, markup = build_recent_projects_message(
+                    recent_projects=recent,
+                    current_directory=current_dir,
+                    approved_directory=settings.approved_directory,
+                    active_engine=active_engine,
+                )
+                await update.message.reply_text(
+                    text,
+                    parse_mode="Markdown",
+                    reply_markup=markup,
+                )
+                return
+        except Exception as e:
+            logger.warning("Failed to scan recent projects", error=str(e))
+
+        # Fallback: show usage help
         await update.message.reply_text(
             "**Usage:** `/cd <directory>`\n\n"
             "**Examples:**\n"
@@ -679,17 +1012,20 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         session_service = context.bot_data.get("session_service")
-        claude_integration: ClaudeIntegration = context.bot_data.get(
-            "claude_integration"
+        active_engine, cli_integration = get_cli_integration(
+            bot_data=context.bot_data,
+            scope_state=scope_state,
         )
+        engine_capabilities = get_engine_capabilities(active_engine)
         snapshot = await SessionService.build_scope_context_snapshot(
             user_id=user_id,
             scope_state=scope_state,
             approved_directory=settings.approved_directory,
-            claude_integration=claude_integration,
+            claude_integration=cli_integration,
             session_service=session_service,
             include_resumable=view_spec.include_resumable,
             include_event_summary=view_spec.include_event_summary,
+            allow_precise_context_probe=engine_capabilities.supports_precise_context_probe,
         )
         render_result = session_interaction.build_context_render_result(
             snapshot=snapshot,
@@ -712,6 +1048,11 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await status_msg.edit_text(view_spec.error_text)
         except Exception:
             await update.message.reply_text(view_spec.error_text)
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /status command as backward-compatible alias of /context."""
+    await session_status(update, context)
 
 
 async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -990,6 +1331,10 @@ async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     cancelled = await task_registry.cancel(user_id, scope_key=scope_key)
+    if not cancelled:
+        # Fallback to user-level cancellation in case scoped key mismatches
+        # between message update and callback context (e.g. topic/thread edge cases).
+        cancelled = await task_registry.cancel(user_id, scope_key=None)
     if cancelled:
         await update.message.reply_text("Task cancellation requested.")
     else:
@@ -1049,6 +1394,16 @@ async def codex_diag_command(
         default_directory=settings.approved_directory,
     )
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    active_engine = get_active_cli_engine(scope_state)
+    capabilities = get_engine_capabilities(active_engine)
+    if not capabilities.supports_codex_diag:
+        await update.message.reply_text(
+            "ℹ️ 当前引擎不支持 `/codexdiag`。\n"
+            f"当前引擎：`{active_engine}`\n"
+            "请先切换：`/engine codex`",
+            parse_mode="Markdown",
+        )
+        return
 
     current_dir = scope_state.get("current_directory", settings.approved_directory)
     project_dir = current_dir
@@ -1215,6 +1570,17 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         update=update,
         default_directory=settings.approved_directory,
     )
+    active_engine = get_active_cli_engine(scope_state)
+    capabilities = get_engine_capabilities(active_engine)
+    if not capabilities.supports_model_selection:
+        await update.message.reply_text(
+            "ℹ️ 当前引擎不支持 `/model`。\n"
+            f"当前引擎：`{active_engine}`\n"
+            "请先切换：`/engine claude`",
+            parse_mode="Markdown",
+        )
+        return
+
     current = scope_state.get("claude_model")
 
     keyboard = [
@@ -1248,7 +1614,7 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /resume command - resume a desktop Claude Code session."""
+    """Handle /resume command - resume a desktop session for active engine."""
     user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
@@ -1256,24 +1622,15 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         update=update,
         default_directory=settings.approved_directory,
     )
+    active_engine = get_active_cli_engine(scope_state)
+    engine_label = "Codex" if active_engine == ENGINE_CODEX else "Claude"
 
-    # Lazy import to avoid circular deps
-    from ...bot.resume_tokens import ResumeTokenManager
-    from ...claude.desktop_scanner import DesktopSessionScanner
-
-    # Get or create scanner and token manager
-    scanner = context.bot_data.get("desktop_scanner")
-    if scanner is None:
-        scanner = DesktopSessionScanner(
-            approved_directory=settings.approved_directory,
-            cache_ttl_sec=settings.resume_scan_cache_ttl_seconds,
-        )
-        context.bot_data["desktop_scanner"] = scanner
-
-    token_mgr = context.bot_data.get("resume_token_manager")
-    if token_mgr is None:
-        token_mgr = ResumeTokenManager()
-        context.bot_data["resume_token_manager"] = token_mgr
+    scanner = _get_or_create_resume_scanner(
+        context=context,
+        settings=settings,
+        engine=active_engine,
+    )
+    token_mgr = _get_or_create_resume_token_manager(context)
 
     try:
         # S0 -> scan projects
@@ -1283,8 +1640,8 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if not projects:
             await update.message.reply_text(
-                "No desktop Claude Code sessions found.\n\n"
-                "Make sure you have used Claude Code CLI "
+                f"No desktop {engine_label} sessions found.\n\n"
+                f"Make sure you have used {engine_label} CLI "
                 "in a project under your approved directory.",
                 parse_mode="Markdown",
             )
@@ -1297,6 +1654,8 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_id=user_id,
             current_directory=Path(current_dir) if current_dir else None,
             show_all=False,
+            payload_extra={"engine": active_engine},
+            engine=active_engine,
         )
 
         await update.message.reply_text(

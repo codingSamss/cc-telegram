@@ -344,18 +344,43 @@ class ClaudeIntegration:
         """
         has_images = bool(images)
         permission_gate_required = permission_callback is not None
+        supports_image_subprocess = False
+        supports_images_fn = getattr(
+            self.process_manager, "supports_image_inputs", None
+        )
+        if callable(supports_images_fn):
+            try:
+                support_result = supports_images_fn(images)
+                supports_image_subprocess = (
+                    support_result if isinstance(support_result, bool) else False
+                )
+            except TypeError:
+                support_result = supports_images_fn()
+                supports_image_subprocess = (
+                    support_result if isinstance(support_result, bool) else False
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to detect subprocess image capability",
+                    error=str(e),
+                )
 
-        # Image analysis requires SDK multimodal input. CLI subprocess fallback
-        # can only send plain text prompts, so we fail fast with clear guidance.
-        if has_images and not (self.config.use_sdk and self.sdk_manager):
+        # Image analysis requires a multimodal-capable backend. We support:
+        # 1) SDK multimodal input (Claude SDK mode), or
+        # 2) subprocess multimodal input (Codex CLI --image file path).
+        if has_images and not (
+            (self.config.use_sdk and self.sdk_manager) or supports_image_subprocess
+        ):
             logger.warning(
-                "Image request rejected because SDK mode is disabled",
+                "Image request rejected because no multimodal backend is available",
                 use_sdk=self.config.use_sdk,
                 has_sdk_manager=bool(self.sdk_manager),
+                supports_image_subprocess=supports_image_subprocess,
             )
             raise ClaudeProcessError(
-                "Image analysis requires SDK mode. "
-                "Set USE_SDK=true and restart the bot."
+                "Image analysis requires multimodal backend support. "
+                "Set USE_SDK=true and restart the bot, "
+                "or use a Codex CLI integration with local image file support."
             )
 
         # Try SDK first if configured
@@ -429,9 +454,8 @@ class ClaudeIntegration:
                         )
 
                     # Do not silently degrade multimodal image requests to text-only
-                    # subprocess mode, otherwise Claude will respond as if no image
-                    # was provided.
-                    if has_images:
+                    # subprocess mode, otherwise the response may ignore images.
+                    if has_images and not supports_image_subprocess:
                         logger.error(
                             "Claude SDK image request failed; skipping subprocess fallback",
                             error=error_str,
@@ -461,6 +485,7 @@ class ClaudeIntegration:
                             continue_session=False,
                             stream_callback=stream_callback,
                             model=model,
+                            images=images,
                         )
                         logger.info("Subprocess fallback succeeded")
                         return response
@@ -490,6 +515,7 @@ class ClaudeIntegration:
                 continue_session=continue_session,
                 stream_callback=stream_callback,
                 model=model,
+                images=images,
             )
 
     async def _find_resumable_session(
@@ -575,16 +601,28 @@ class ClaudeIntegration:
         model: Optional[str] = None,
         force_refresh: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """Probe precise context usage via /context command with short cache."""
+        """Probe precise context usage via CLI status/context command with short cache."""
         if not session_id:
             return None
+
+        cli_kind = "claude"
+        process_manager = getattr(self, "process_manager", None)
+        resolve_cli_path = getattr(process_manager, "_resolve_cli_path", None)
+        detect_cli_kind = getattr(process_manager, "_detect_cli_kind", None)
+        if callable(resolve_cli_path) and callable(detect_cli_kind):
+            try:
+                cli_kind = detect_cli_kind(resolve_cli_path())
+            except Exception:
+                cli_kind = "claude"
+        probe_prompt = "/status" if cli_kind == "codex" else "/context"
+        cache_key = f"{cli_kind}:{session_id}"
 
         now = asyncio.get_event_loop().time()
         ttl_seconds = max(
             int(getattr(self.config, "status_context_probe_ttl_seconds", 0) or 0), 0
         )
 
-        cached = self._context_usage_cache.get(session_id)
+        cached = self._context_usage_cache.get(cache_key)
         if (
             not force_refresh
             and ttl_seconds > 0
@@ -599,25 +637,16 @@ class ClaudeIntegration:
             int(getattr(self.config, "status_context_probe_timeout_seconds", 45) or 45),
             1,
         )
-        probe_timeout = max(1, min(self.config.claude_timeout_seconds, probe_timeout_cfg))
-        probe_runners: List[tuple[str, Callable[[], Any]]] = [
-            (
-                "subprocess",
-                lambda: self.process_manager.execute_command(
-                    prompt="/context",
-                    working_directory=working_directory,
-                    session_id=session_id,
-                    continue_session=True,
-                    model=model,
-                ),
-            )
-        ]
-        if self.config.use_sdk and self.sdk_manager:
+        probe_timeout = max(
+            1, min(self.config.claude_timeout_seconds, probe_timeout_cfg)
+        )
+        probe_runners: List[tuple[str, Callable[[], Any]]] = []
+        if self.process_manager:
             probe_runners.append(
                 (
-                    "sdk",
-                    lambda: self.sdk_manager.execute_command(
-                        prompt="/context",
+                    "subprocess",
+                    lambda: self.process_manager.execute_command(
+                        prompt=probe_prompt,
                         working_directory=working_directory,
                         session_id=session_id,
                         continue_session=True,
@@ -625,6 +654,21 @@ class ClaudeIntegration:
                     ),
                 )
             )
+        if self.config.use_sdk and self.sdk_manager:
+            probe_runners.append(
+                (
+                    "sdk",
+                    lambda: self.sdk_manager.execute_command(
+                        prompt=probe_prompt,
+                        working_directory=working_directory,
+                        session_id=session_id,
+                        continue_session=True,
+                        model=model,
+                    ),
+                )
+            )
+        if not probe_runners:
+            return None
 
         parsed: Optional[Dict[str, Any]] = None
         for probe_source, runner in probe_runners:
@@ -665,8 +709,9 @@ class ClaudeIntegration:
                 break
 
             logger.info(
-                "Unable to parse /context output",
+                "Unable to parse context usage output",
                 session_id=session_id,
+                probe_prompt=probe_prompt,
                 content_preview=(response.content or "")[:240],
                 probe_source=probe_source,
             )
@@ -678,11 +723,12 @@ class ClaudeIntegration:
             **parsed,
             "session_id": session_id,
             "cached": False,
+            "probe_command": probe_prompt,
         }
         if ttl_seconds > 0:
-            self._context_usage_cache[session_id] = (now, dict(payload))
+            self._context_usage_cache[cache_key] = (now, dict(payload))
         else:
-            self._context_usage_cache.pop(session_id, None)
+            self._context_usage_cache.pop(cache_key, None)
         return payload
 
     async def get_user_sessions(self, user_id: int) -> List[Dict[str, Any]]:
@@ -709,9 +755,7 @@ class ClaudeIntegration:
             return None
 
         numeric = r"\d[\d,._]*(?:\.\d+)?\s*[kKmMbB]?"
-        pair_pattern = re.compile(
-            rf"(?P<used>{numeric})\s*/\s*(?P<total>{numeric})"
-        )
+        pair_pattern = re.compile(rf"(?P<used>{numeric})\s*/\s*(?P<total>{numeric})")
         percent_pattern = re.compile(r"(?P<pct>\d{1,3}(?:\.\d+)?)\s*%")
         used_pattern = re.compile(
             rf"(?:used|usage|已使用|占用)\D{{0,16}}(?P<used>{numeric})",
@@ -773,10 +817,18 @@ class ClaudeIntegration:
             )
             percent = float(pct_match.group("pct")) if pct_match else None
 
-            if total_tokens is None and used_tokens is not None and remaining_tokens is not None:
+            if (
+                total_tokens is None
+                and used_tokens is not None
+                and remaining_tokens is not None
+            ):
                 total_tokens = used_tokens + remaining_tokens
 
-            if used_tokens is None and total_tokens is not None and remaining_tokens is not None:
+            if (
+                used_tokens is None
+                and total_tokens is not None
+                and remaining_tokens is not None
+            ):
                 used_tokens = max(total_tokens - remaining_tokens, 0)
 
             if (

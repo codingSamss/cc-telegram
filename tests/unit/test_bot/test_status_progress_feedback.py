@@ -11,7 +11,9 @@ from src.bot.handlers.command import (
     _build_status_full_payload,
     _render_status_full_text,
     session_status,
+    status_command,
 )
+from src.bot.utils.cli_engine import ENGINE_STATE_KEY
 
 
 def _scoped_user_data(user_id: int, state: dict | None = None) -> dict:
@@ -43,6 +45,92 @@ async def test_session_status_shows_loading_message_before_final_output(tmp_path
     status_msg.edit_text.assert_awaited_once()
     assert "Session: none" in status_msg.edit_text.await_args.args[0]
     assert "reply_markup" not in status_msg.edit_text.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_status_command_alias_uses_context_rendering(tmp_path):
+    """`/status` should behave as a backward-compatible alias of `/context`."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+
+    status_msg = SimpleNamespace(edit_text=AsyncMock())
+    message = SimpleNamespace(reply_text=AsyncMock(return_value=status_msg))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1003),
+        message=message,
+    )
+    context = SimpleNamespace(
+        bot_data={"settings": SimpleNamespace(approved_directory=approved)},
+        user_data=_scoped_user_data(1003),
+        args=[],
+    )
+
+    await status_command(update, context)
+
+    message.reply_text.assert_awaited_once_with("⏳ 正在获取会话状态，请稍候...")
+    status_msg.edit_text.assert_awaited_once()
+    assert "Session: none" in status_msg.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_session_status_with_codex_engine_renders_exact_usage_percent(tmp_path):
+    """Codex `/context` should show exact usage percentage when `/status` probe succeeds."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+
+    status_msg = SimpleNamespace(edit_text=AsyncMock())
+    message = SimpleNamespace(reply_text=AsyncMock(return_value=status_msg))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1004),
+        message=message,
+    )
+    codex_integration = SimpleNamespace(
+        get_precise_context_usage=AsyncMock(
+            return_value={
+                "used_tokens": 84_000,
+                "total_tokens": 200_000,
+                "remaining_tokens": 116_000,
+                "used_percent": 42.0,
+                "session_id": "thread-codex-1",
+                "probe_command": "/status",
+                "cached": False,
+            }
+        ),
+        get_session_info=AsyncMock(
+            return_value={
+                "messages": 26,
+                "turns": 26,
+                "cost": 0.0,
+                "model_usage": {
+                    "input_tokens": 81_313_238,
+                    "cached_input_tokens": 75_014_784,
+                    "output_tokens": 319_348,
+                },
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        bot_data={
+            "settings": SimpleNamespace(approved_directory=approved),
+            "cli_integrations": {"codex": codex_integration},
+        },
+        user_data=_scoped_user_data(
+            1004,
+            {
+                ENGINE_STATE_KEY: "codex",
+                "claude_session_id": "thread-codex-1",
+                "current_directory": approved,
+            },
+        ),
+        args=[],
+    )
+
+    await session_status(update, context)
+
+    codex_integration.get_precise_context_usage.assert_awaited_once()
+    rendered = status_msg.edit_text.await_args.args[0]
+    assert "Context (/status)" in rendered
+    assert "Usage: `84,000` / `200,000` (42.0%) _(exact)_" in rendered
 
 
 @pytest.mark.asyncio

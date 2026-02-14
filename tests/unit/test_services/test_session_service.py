@@ -149,6 +149,87 @@ async def test_build_context_snapshot_for_active_session():
 
 
 @pytest.mark.asyncio
+async def test_build_context_snapshot_can_skip_precise_probe():
+    """Context snapshot should skip /context probe when capability is disabled."""
+    approved = Path("/tmp/project")
+    claude_integration = SimpleNamespace(
+        get_precise_context_usage=AsyncMock(
+            return_value={
+                "used_tokens": 1,
+                "total_tokens": 2,
+                "remaining_tokens": 1,
+                "used_percent": 50.0,
+            }
+        ),
+        get_session_info=AsyncMock(
+            return_value={
+                "messages": 1,
+                "turns": 1,
+                "cost": 0.01,
+                "model_usage": {"input_tokens": 100, "output_tokens": 20},
+            }
+        ),
+    )
+
+    snapshot = await SessionService.build_context_snapshot(
+        user_id=3010,
+        session_id="sess-no-probe",
+        current_dir=approved,
+        approved_directory=approved,
+        current_model="gpt-5",
+        claude_integration=claude_integration,
+        allow_precise_context_probe=False,
+    )
+
+    claude_integration.get_precise_context_usage.assert_not_awaited()
+    claude_integration.get_session_info.assert_awaited_once()
+    rendered = "\n".join(snapshot.lines)
+    assert "Context (" in rendered
+
+
+@pytest.mark.asyncio
+async def test_build_context_snapshot_codex_without_precise_uses_status_hint():
+    """Codex should avoid rendering cumulative usage as current context when probe fails."""
+    approved = Path("/tmp/project")
+    process_manager = SimpleNamespace(
+        _resolve_cli_path=lambda: "/usr/local/bin/codex",
+        _detect_cli_kind=lambda _: "codex",
+    )
+    claude_integration = SimpleNamespace(
+        process_manager=process_manager,
+        get_precise_context_usage=AsyncMock(return_value=None),
+        get_session_info=AsyncMock(
+            return_value={
+                "messages": 26,
+                "turns": 26,
+                "cost": 0.0,
+                "model_usage": {
+                    "input_tokens": 81_313_238,
+                    "cached_input_tokens": 75_014_784,
+                    "output_tokens": 319_348,
+                },
+            }
+        ),
+    )
+
+    snapshot = await SessionService.build_context_snapshot(
+        user_id=3011,
+        session_id="thread-codex-1",
+        current_dir=approved,
+        approved_directory=approved,
+        current_model="default",
+        claude_integration=claude_integration,
+        allow_precise_context_probe=True,
+    )
+
+    rendered = "\n".join(snapshot.lines)
+    assert "Context (/status)" in rendered
+    assert "请执行 `/status` 刷新" in rendered
+    assert "Tokens: `156,647,370`" not in rendered
+    claude_integration.get_precise_context_usage.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_build_context_snapshot_for_resumable_session():
     """No active session should show resumable info when available."""
     approved = Path("/tmp/project")

@@ -1,6 +1,6 @@
-# Claude Code Telegram Bot
+# CLI TG
 
-通过 Telegram Bot 远程控制本地机器上运行的 Claude Code，实现手机端下达指令、查看结果的工作流。
+通过 Telegram Bot 远程控制本地机器上运行的 CLI 编码智能体（目前支持 Claude / Codex），实现手机端下达指令、查看结果的工作流。
 
 基于 Python，使用 `python-telegram-bot` (Polling 模式) + `claude-agent-sdk`，无需 Cloudflare Tunnel、tmux 等外部依赖。启动即用。
 
@@ -56,8 +56,8 @@ brew install node
 ### Step 3: 克隆项目并安装依赖
 
 ```bash
-git clone <repo-url> ~/cc-telegram
-cd ~/cc-telegram
+git clone <repo-url> ~/cli-tg
+cd ~/cli-tg
 poetry install
 ```
 

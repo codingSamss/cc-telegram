@@ -1,4 +1,4 @@
-"""Claude Code Telegram Bot.
+"""CLI TG.
 
 A Telegram bot that provides remote access to Claude Code CLI, allowing developers
 to interact with their projects from anywhere through a secure, terminal-like
@@ -23,7 +23,7 @@ __version__ = "0.1.0"
 __author__ = "Richard Atkinson"
 __email__ = "richardatk01@gmail.com"
 __license__ = "MIT"
-__homepage__ = "https://github.com/richardatkinson/claude-code-telegram"
+__homepage__ = "https://github.com/codingSamss/cli-tg"
 
 # Development status indicators
 __status__ = "Alpha"

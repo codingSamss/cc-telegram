@@ -33,26 +33,51 @@ def build_model_usage_status_lines(
 ) -> List[str]:
     """Build context/token usage lines for /context output."""
     status_lines: List[str] = []
+    entries = _iter_model_usage_entries(
+        model_usage=model_usage,
+        current_model=current_model,
+    )
 
-    for model_name, usage in model_usage.items():
-        if not isinstance(usage, dict):
-            continue
-
-        input_t = int(usage.get("inputTokens", 0) or 0)
-        output_t = int(usage.get("outputTokens", 0) or 0)
-        cache_read = int(usage.get("cacheReadInputTokens", 0) or 0)
-        cache_create = int(usage.get("cacheCreationInputTokens", 0) or 0)
+    for model_name, usage in entries:
+        input_t = int(usage.get("inputTokens", usage.get("input_tokens", 0)) or 0)
+        output_t = int(usage.get("outputTokens", usage.get("output_tokens", 0)) or 0)
+        cache_read = int(
+            usage.get(
+                "cacheReadInputTokens",
+                usage.get(
+                    "cache_read_input_tokens", usage.get("cached_input_tokens", 0)
+                ),
+            )
+            or 0
+        )
+        cache_create = int(
+            usage.get(
+                "cacheCreationInputTokens",
+                usage.get("cache_creation_input_tokens", 0),
+            )
+            or 0
+        )
         total_tokens = input_t + output_t + cache_read + cache_create
 
-        resolved_model = usage.get("resolvedModel")
+        resolved_model = usage.get("resolvedModel") or usage.get("resolved_model")
         display_model = resolved_model or (
             current_model if model_name == "sdk" and current_model else model_name
         )
 
-        raw_ctx_window = usage.get("contextWindow", 0) or 0
-        ctx_window_source = str(usage.get("contextWindowSource") or "").strip().lower()
+        raw_ctx_window = usage.get("contextWindow", usage.get("context_window", 0)) or 0
+        ctx_window_source = (
+            str(
+                usage.get(
+                    "contextWindowSource", usage.get("context_window_source") or ""
+                )
+            )
+            .strip()
+            .lower()
+        )
         inferred_ctx_window = estimate_context_window_tokens(
-            resolved_model or (None if model_name == "sdk" else model_name) or current_model
+            resolved_model
+            or (None if model_name == "sdk" else model_name)
+            or current_model
         )
         ctx_window = int(raw_ctx_window or inferred_ctx_window or 0)
         estimated = bool(
@@ -78,11 +103,39 @@ def build_model_usage_status_lines(
         status_lines.append(
             f"  Cache read: `{cache_read:,}` | Cache create: `{cache_create:,}`"
         )
-        max_output = int(usage.get("maxOutputTokens", 0) or 0)
+        max_output = int(
+            usage.get("maxOutputTokens", usage.get("max_output_tokens", 0)) or 0
+        )
         if max_output:
             status_lines.append(f"  Max output: `{max_output:,}`")
 
     return status_lines
+
+
+def _iter_model_usage_entries(
+    *,
+    model_usage: Dict[str, Any],
+    current_model: Optional[str],
+) -> List[tuple[str, Dict[str, Any]]]:
+    """Normalize usage payloads from Claude (nested) and Codex (flat)."""
+    flat_keys = {
+        "inputTokens",
+        "outputTokens",
+        "cacheReadInputTokens",
+        "cacheCreationInputTokens",
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+    }
+    if any(key in model_usage for key in flat_keys):
+        model_name = str(model_usage.get("resolvedModel") or current_model or "current")
+        return [(model_name, model_usage)]
+
+    entries: List[tuple[str, Dict[str, Any]]] = []
+    for model_name, usage in model_usage.items():
+        if isinstance(usage, dict):
+            entries.append((str(model_name), usage))
+    return entries
 
 
 def build_precise_context_status_lines(context_usage: Dict[str, Any]) -> List[str]:
@@ -99,10 +152,15 @@ def build_precise_context_status_lines(context_usage: Dict[str, Any]) -> List[st
         context_usage.get("remaining_tokens", max(total_tokens - used_tokens, 0))
     )
     cached = bool(context_usage.get("cached", False))
+    probe_command = str(context_usage.get("probe_command") or "/context").strip()
+    if not probe_command.startswith("/"):
+        probe_command = f"/{probe_command}"
+    if not probe_command:
+        probe_command = "/context"
 
-    header = "\n*Context (/context)*"
+    header = f"\n*Context ({probe_command})*"
     if cached:
-        header = "\n*Context (/context, cached)*"
+        header = f"\n*Context ({probe_command}, cached)*"
 
     return [
         header,

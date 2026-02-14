@@ -68,6 +68,10 @@ class PermissionManager:
         # Tools allowed for the rest of the session (per session_id)
         self.session_allowed_tools: Dict[str, Set[str]] = {}
         self.approval_repository = approval_repository
+        # Cache latest resolution per request for better callback UX when
+        # users click stale/expired permission buttons.
+        self.request_resolution_cache: Dict[str, Dict[str, Any]] = {}
+        self.max_resolution_cache = 512
 
     async def initialize(self) -> None:
         """Run startup recovery for persisted pending approvals."""
@@ -153,6 +157,15 @@ class PermissionManager:
                 request_id=request_id,
                 tool_name=tool_name,
             )
+            self._record_resolution_snapshot(
+                request_id=request_id,
+                status="expired",
+                decision=None,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                session_id=session_id,
+            )
             await self._persist_resolution(
                 request_id=request_id,
                 status="expired",
@@ -161,6 +174,15 @@ class PermissionManager:
             return False
 
         except asyncio.CancelledError:
+            self._record_resolution_snapshot(
+                request_id=request_id,
+                status="expired",
+                decision=None,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                session_id=session_id,
+            )
             await self._persist_resolution(
                 request_id=request_id,
                 status="expired",
@@ -174,6 +196,15 @@ class PermissionManager:
                 request_id=request_id,
                 tool_name=tool_name,
                 error=str(exc),
+            )
+            self._record_resolution_snapshot(
+                request_id=request_id,
+                status="denied",
+                decision="deny",
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                session_id=session_id,
             )
             await self._persist_resolution(
                 request_id=request_id,
@@ -239,6 +270,15 @@ class PermissionManager:
             resolved_decision = "deny"
 
         pending.future.set_result(allowed)
+        self._record_resolution_snapshot(
+            request_id=request_id,
+            status=status,
+            decision=resolved_decision,
+            tool_name=pending.tool_name,
+            tool_input=pending.tool_input,
+            user_id=pending.user_id,
+            session_id=pending.session_id,
+        )
         self._schedule_persist_resolution(
             request_id=request_id,
             status=status,
@@ -266,8 +306,59 @@ class PermissionManager:
         """Clear session-level permissions."""
         self.session_allowed_tools.pop(session_id, None)
 
+    def get_pending_request(
+        self, request_id: str, user_id: Optional[int] = None
+    ) -> Optional[PendingPermission]:
+        """Return pending approval request for diagnostics/UI rendering."""
+        pending = self.pending_requests.get(request_id)
+        if not pending:
+            return None
+        if user_id is not None and pending.user_id != user_id:
+            return None
+        return pending
+
     def get_pending_count(self) -> int:
         return len(self.pending_requests)
+
+    def get_resolution_snapshot(
+        self,
+        request_id: str,
+        user_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return cached resolution metadata for user-facing stale callbacks."""
+        snapshot = self.request_resolution_cache.get(request_id)
+        if not snapshot:
+            return None
+
+        if user_id is not None and snapshot.get("user_id") != user_id:
+            return None
+
+        return dict(snapshot)
+
+    def _record_resolution_snapshot(
+        self,
+        *,
+        request_id: str,
+        status: str,
+        decision: Optional[str],
+        tool_name: Optional[str],
+        tool_input: Optional[Dict[str, Any]],
+        user_id: int,
+        session_id: str,
+    ) -> None:
+        """Store latest resolution metadata for stale button explanations."""
+        self.request_resolution_cache[request_id] = {
+            "status": status,
+            "decision": decision,
+            "tool_name": tool_name,
+            "tool_input": dict(tool_input or {}),
+            "user_id": user_id,
+            "session_id": session_id,
+            "resolved_at": datetime.utcnow().isoformat(),
+        }
+        while len(self.request_resolution_cache) > self.max_resolution_cache:
+            oldest = next(iter(self.request_resolution_cache))
+            self.request_resolution_cache.pop(oldest, None)
 
     async def _persist_pending_request(
         self,
