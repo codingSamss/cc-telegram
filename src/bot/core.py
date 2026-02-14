@@ -11,7 +11,7 @@ import asyncio
 from typing import Any, Callable, Dict, Optional
 
 import structlog
-from telegram import BotCommand, Update
+from telegram import Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -25,6 +25,8 @@ from ..claude.task_registry import TaskRegistry
 from ..config.settings import Settings
 from ..exceptions import ClaudeCodeTelegramError
 from .features.registry import FeatureRegistry
+from .utils.cli_engine import ENGINE_CLAUDE
+from .utils.command_menu import build_bot_commands_for_engine
 
 logger = structlog.get_logger()
 
@@ -98,19 +100,7 @@ class ClaudeCodeBot:
 
     async def _set_bot_commands(self) -> None:
         """Set bot command menu."""
-        commands = [
-            BotCommand("new", "Clear context and start fresh session"),
-            BotCommand("resume", "Resume a desktop Claude Code session"),
-            BotCommand("context", "Show session context status"),
-            BotCommand("cancel", "Cancel the current running task"),
-            BotCommand("model", "View or switch Claude model"),
-            BotCommand("projects", "Show all projects"),
-            BotCommand("cd", "Change directory (resumes project session)"),
-            BotCommand("ls", "List files in current directory"),
-            BotCommand("git", "Git repository commands"),
-            BotCommand("export", "Export current session"),
-            BotCommand("help", "Show available commands"),
-        ]
+        commands = build_bot_commands_for_engine(ENGINE_CLAUDE)
 
         await self.app.bot.set_my_commands(commands)
         logger.info("Bot commands set", commands=[cmd.command for cmd in commands])
@@ -131,6 +121,8 @@ class ClaudeCodeBot:
             ("pwd", command.print_working_directory),
             ("projects", command.show_projects),
             ("context", command.session_status),
+            ("status", command.status_command),
+            ("engine", command.switch_engine),
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),

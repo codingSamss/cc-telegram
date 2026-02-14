@@ -11,12 +11,20 @@ from src.bot.handlers.command import (
     _build_status_full_payload,
     _render_status_full_text,
     session_status,
+    status_command,
 )
+from src.bot.utils.cli_engine import ENGINE_STATE_KEY
+
+
+def _scoped_user_data(user_id: int, state: dict | None = None) -> dict:
+    """Build scoped user data compatible with scope_state helper."""
+    scope_key = f"{user_id}:{user_id}:0"
+    return {"scope_state": {scope_key: state or {}}}
 
 
 @pytest.mark.asyncio
 async def test_session_status_shows_loading_message_before_final_output(tmp_path):
-    """The /status command should send immediate loading feedback."""
+    """The /context command should send immediate loading feedback."""
     approved = tmp_path / "approved"
     approved.mkdir()
 
@@ -28,7 +36,7 @@ async def test_session_status_shows_loading_message_before_final_output(tmp_path
     )
     context = SimpleNamespace(
         bot_data={"settings": SimpleNamespace(approved_directory=approved)},
-        user_data={},
+        user_data=_scoped_user_data(1001),
     )
 
     await session_status(update, context)
@@ -40,15 +48,101 @@ async def test_session_status_shows_loading_message_before_final_output(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_status_command_alias_uses_context_rendering(tmp_path):
+    """`/status` should behave as a backward-compatible alias of `/context`."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+
+    status_msg = SimpleNamespace(edit_text=AsyncMock())
+    message = SimpleNamespace(reply_text=AsyncMock(return_value=status_msg))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1003),
+        message=message,
+    )
+    context = SimpleNamespace(
+        bot_data={"settings": SimpleNamespace(approved_directory=approved)},
+        user_data=_scoped_user_data(1003),
+        args=[],
+    )
+
+    await status_command(update, context)
+
+    message.reply_text.assert_awaited_once_with("⏳ 正在获取会话状态，请稍候...")
+    status_msg.edit_text.assert_awaited_once()
+    assert "Session: none" in status_msg.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_session_status_with_codex_engine_renders_exact_usage_percent(tmp_path):
+    """Codex `/context` should show exact usage percentage when `/status` probe succeeds."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+
+    status_msg = SimpleNamespace(edit_text=AsyncMock())
+    message = SimpleNamespace(reply_text=AsyncMock(return_value=status_msg))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1004),
+        message=message,
+    )
+    codex_integration = SimpleNamespace(
+        get_precise_context_usage=AsyncMock(
+            return_value={
+                "used_tokens": 84_000,
+                "total_tokens": 200_000,
+                "remaining_tokens": 116_000,
+                "used_percent": 42.0,
+                "session_id": "thread-codex-1",
+                "probe_command": "/status",
+                "cached": False,
+            }
+        ),
+        get_session_info=AsyncMock(
+            return_value={
+                "messages": 26,
+                "turns": 26,
+                "cost": 0.0,
+                "model_usage": {
+                    "input_tokens": 81_313_238,
+                    "cached_input_tokens": 75_014_784,
+                    "output_tokens": 319_348,
+                },
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        bot_data={
+            "settings": SimpleNamespace(approved_directory=approved),
+            "cli_integrations": {"codex": codex_integration},
+        },
+        user_data=_scoped_user_data(
+            1004,
+            {
+                ENGINE_STATE_KEY: "codex",
+                "claude_session_id": "thread-codex-1",
+                "current_directory": approved,
+            },
+        ),
+        args=[],
+    )
+
+    await session_status(update, context)
+
+    codex_integration.get_precise_context_usage.assert_awaited_once()
+    rendered = status_msg.edit_text.await_args.args[0]
+    assert "Context (/status)" in rendered
+    assert "Usage: `84,000` / `200,000` (42.0%) _(exact)_" in rendered
+
+
+@pytest.mark.asyncio
 async def test_status_callback_shows_loading_message_before_refresh_result(tmp_path):
-    """Status callback should first show a refreshing indicator."""
+    """Context callback should first show a refreshing indicator."""
     approved = tmp_path / "approved"
     approved.mkdir()
 
     query = SimpleNamespace(edit_message_text=AsyncMock())
     context = SimpleNamespace(
         bot_data={"settings": SimpleNamespace(approved_directory=approved)},
-        user_data={},
+        user_data=_scoped_user_data(0),
     )
 
     await _handle_status_action(query, context)
@@ -58,6 +152,84 @@ async def test_status_callback_shows_loading_message_before_refresh_result(tmp_p
     assert "正在刷新状态" in calls[0].args[0]
     assert "Session: none" in calls[1].args[0]
     assert "reply_markup" not in calls[1].kwargs
+
+
+@pytest.mark.asyncio
+async def test_status_callback_uses_context_error_message_on_snapshot_failure(tmp_path):
+    """Context callback should render unified error copy when snapshot build fails."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=2002),
+        edit_message_text=AsyncMock(),
+    )
+    claude_integration = SimpleNamespace(
+        get_precise_context_usage=AsyncMock(side_effect=RuntimeError("boom")),
+    )
+    context = SimpleNamespace(
+        bot_data={
+            "settings": SimpleNamespace(approved_directory=approved),
+            "claude_integration": claude_integration,
+        },
+        user_data=_scoped_user_data(
+            2002,
+            {
+                "claude_session_id": "session-error-1",
+                "current_directory": approved,
+            },
+        ),
+    )
+
+    await _handle_status_action(query, context)
+
+    assert query.edit_message_text.await_count == 2
+    calls = query.edit_message_text.await_args_list
+    assert "正在刷新状态" in calls[0].args[0]
+    assert calls[1].args[0] == "❌ 获取状态失败，请稍后重试。"
+
+
+@pytest.mark.asyncio
+async def test_session_status_includes_event_summary_lines_from_service(tmp_path):
+    """`/context` output should include event summary lines from session service."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+
+    status_msg = SimpleNamespace(edit_text=AsyncMock())
+    message = SimpleNamespace(reply_text=AsyncMock(return_value=status_msg))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=2001),
+        message=message,
+    )
+    session_service = SimpleNamespace(
+        get_context_event_lines=AsyncMock(
+            return_value=[
+                "",
+                "*Recent Session Events*",
+                "Count: 3",
+                "- command_exec: 1",
+            ]
+        )
+    )
+    context = SimpleNamespace(
+        bot_data={
+            "settings": SimpleNamespace(approved_directory=approved),
+            "session_service": session_service,
+        },
+        user_data=_scoped_user_data(
+            2001,
+            {
+                "claude_session_id": "session-event-1234",
+                "current_directory": approved,
+            },
+        ),
+    )
+
+    await session_status(update, context)
+
+    rendered = status_msg.edit_text.await_args.args[0]
+    assert "Recent Session Events" in rendered
+    session_service.get_context_event_lines.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -99,18 +271,21 @@ async def test_session_status_full_mode_renders_full_payload(tmp_path):
             "settings": SimpleNamespace(approved_directory=approved),
             "claude_integration": claude_integration,
         },
-        user_data={
-            "claude_session_id": "session-abcdef123",
-            "current_directory": approved,
-            "claude_model": "sonnet",
-        },
+        user_data=_scoped_user_data(
+            1001,
+            {
+                "claude_session_id": "session-abcdef123",
+                "current_directory": approved,
+                "claude_model": "sonnet",
+            },
+        ),
         args=["full"],
     )
 
     await session_status(update, context)
 
     rendered = status_msg.edit_text.await_args.args[0]
-    assert rendered.startswith("Session Status (full)")
+    assert rendered.startswith("Session Context (full)")
     assert "[/context Structured Summary]" in rendered
     assert "No markdown table summary detected in /context output." in rendered
     assert "used_tokens: 55,000" in rendered

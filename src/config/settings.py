@@ -73,6 +73,14 @@ class Settings(BaseSettings):
         DEFAULT_CLAUDE_MAX_COST_PER_USER, description="Max cost per user"
     )
     use_sdk: bool = Field(True, description="Use Python SDK instead of CLI subprocess")
+    enable_codex_cli: bool = Field(
+        False,
+        description="Enable Codex CLI adapter (subprocess mode)",
+    )
+    codex_cli_path: Optional[str] = Field(
+        None,
+        description="Path to Codex CLI executable",
+    )
     claude_allowed_tools: Optional[List[str]] = Field(
         default=[
             "Read",
@@ -248,12 +256,16 @@ class Settings(BaseSettings):
         if "mcpServers" not in config_data:
             raise ValueError(
                 "MCP config file must contain a 'mcpServers' key. "
-                "Expected format: {\"mcpServers\": {\"server-name\": {\"command\": \"...\", ...}}}"
+                'Expected format: {"mcpServers": {"server-name": {"command": "...", ...}}}'
             )
         if not isinstance(config_data["mcpServers"], dict):
-            raise ValueError("'mcpServers' must be an object mapping server names to configurations")
+            raise ValueError(
+                "'mcpServers' must be an object mapping server names to configurations"
+            )
         if not config_data["mcpServers"]:
-            raise ValueError("'mcpServers' must contain at least one server configuration")
+            raise ValueError(
+                "'mcpServers' must contain at least one server configuration"
+            )
         return v  # type: ignore[no-any-return]
 
     @field_validator("log_level")

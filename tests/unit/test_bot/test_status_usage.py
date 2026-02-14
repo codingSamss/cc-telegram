@@ -107,3 +107,39 @@ def test_build_precise_context_status_lines_marks_exact_source():
     joined = "\n".join(lines)
     assert "Context (/context, cached)" in joined
     assert "Usage: `55,000` / `200,000` (27.5%) _(exact)_" in joined
+
+
+def test_build_precise_context_status_lines_supports_status_probe_label():
+    """Precise context lines should reflect probe command when provided."""
+    lines = build_precise_context_status_lines(
+        {
+            "used_tokens": 84_000,
+            "total_tokens": 200_000,
+            "remaining_tokens": 116_000,
+            "used_percent": 42.0,
+            "probe_command": "/status",
+            "cached": False,
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "Context (/status)" in joined
+    assert "Usage: `84,000` / `200,000` (42.0%) _(exact)_" in joined
+
+
+def test_build_model_usage_status_lines_supports_codex_flat_usage_payload():
+    """Codex turn usage payload (snake_case flat dict) should be rendered."""
+    lines = build_model_usage_status_lines(
+        model_usage={
+            "input_tokens": 120,
+            "cached_input_tokens": 40,
+            "output_tokens": 15,
+            "model": "gpt-5",
+        },
+        current_model="gpt-5",
+    )
+
+    joined = "\n".join(lines)
+    assert "Context (gpt-5)" in joined
+    assert "Tokens: `175`" in joined
+    assert "Input: `120` | Output: `15`" in joined

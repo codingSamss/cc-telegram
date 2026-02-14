@@ -28,7 +28,7 @@ class _TokenEntry:
 class ResumeTokenManager:
     """Issue and resolve short-lived tokens for /resume inline buttons."""
 
-    VALID_KINDS = {"p", "s", "f"}
+    VALID_KINDS = {"p", "s", "f", "n"}
     _PURGE_INTERVAL = 50  # auto-purge every N issue() calls
 
     def __init__(self) -> None:
@@ -47,7 +47,8 @@ class ResumeTokenManager:
         """Issue a short token bound to user_id.
 
         Args:
-            kind: Token kind - "p" (project), "s" (session), "f" (force confirm).
+            kind: Token kind - "p" (project), "s" (session), "f" (force confirm),
+                "n" (start new session).
             user_id: Telegram user ID the token is bound to.
             payload: Arbitrary data to store (e.g. project path, session id).
             ttl_sec: Time-to-live in seconds (default 10 minutes).
@@ -56,7 +57,9 @@ class ResumeTokenManager:
             The token index string (e.g. "0", "1", "2").
         """
         if kind not in self.VALID_KINDS:
-            raise ValueError(f"Invalid token kind: {kind!r}, must be one of {self.VALID_KINDS}")
+            raise ValueError(
+                f"Invalid token kind: {kind!r}, must be one of {self.VALID_KINDS}"
+            )
         if ttl_sec <= 0:
             raise ValueError(f"ttl_sec must be positive, got {ttl_sec}")
 

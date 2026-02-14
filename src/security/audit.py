@@ -14,6 +14,9 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from src.storage.models import AuditLogModel
+from src.storage.repositories import AuditLogRepository
+
 # from src.exceptions import SecurityError  # Future use
 
 logger = structlog.get_logger()
@@ -127,6 +130,99 @@ class InMemoryAuditStorage(AuditStorage):
         """Get security violations."""
         return await self.get_events(
             user_id=user_id, event_type="security_violation", limit=limit
+        )
+
+
+class SQLiteAuditStorage(AuditStorage):
+    """SQLite-backed audit storage for production persistence."""
+
+    def __init__(self, audit_repository: AuditLogRepository):
+        self.audit_repository = audit_repository
+
+    async def store_event(self, event: AuditEvent) -> None:
+        """Store event in SQLite audit_log table."""
+        model = AuditLogModel(
+            id=None,
+            user_id=event.user_id,
+            event_type=event.event_type,
+            event_data={
+                "details": event.details,
+                "risk_level": event.risk_level,
+                "session_id": event.session_id,
+            },
+            success=event.success,
+            timestamp=event.timestamp,
+            ip_address=event.ip_address,
+        )
+        await self.audit_repository.log_event(model)
+
+        if event.risk_level in ["high", "critical"]:
+            logger.warning(
+                "High-risk security event",
+                event_type=event.event_type,
+                user_id=event.user_id,
+                risk_level=event.risk_level,
+                details=event.details,
+            )
+
+    async def get_events(
+        self,
+        user_id: Optional[int] = None,
+        event_type: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: int = 100,
+    ) -> List[AuditEvent]:
+        """Get filtered events from SQLite."""
+        rows = await self.audit_repository.get_events(
+            user_id=user_id,
+            event_type=event_type,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+        return [self._to_audit_event(row) for row in rows]
+
+    async def get_security_violations(
+        self, user_id: Optional[int] = None, limit: int = 100
+    ) -> List[AuditEvent]:
+        """Get security violation events from SQLite."""
+        rows = await self.audit_repository.get_security_violations(
+            user_id=user_id,
+            limit=limit,
+        )
+        return [self._to_audit_event(row) for row in rows]
+
+    def _to_audit_event(self, model: AuditLogModel) -> AuditEvent:
+        """Convert repository model to AuditEvent shape."""
+        event_data = model.event_data or {}
+
+        if isinstance(event_data, dict) and isinstance(event_data.get("details"), dict):
+            details = event_data.get("details", {})
+        elif isinstance(event_data, dict):
+            # Backward compatibility for older rows where event_data is flat details.
+            details = event_data
+        else:
+            details = {}
+
+        risk_level = (
+            event_data.get("risk_level", "low")
+            if isinstance(event_data, dict)
+            else "low"
+        )
+        session_id = (
+            event_data.get("session_id") if isinstance(event_data, dict) else None
+        )
+
+        return AuditEvent(
+            timestamp=model.timestamp,
+            user_id=model.user_id,
+            event_type=model.event_type,
+            success=bool(model.success),
+            details=details,
+            ip_address=model.ip_address,
+            session_id=session_id,
+            risk_level=risk_level,
         )
 
 

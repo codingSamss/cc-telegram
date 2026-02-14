@@ -9,6 +9,7 @@ Features:
 
 import asyncio
 import json
+import os
 import re
 import uuid
 from asyncio.subprocess import Process
@@ -113,10 +114,19 @@ class ClaudeProcessManager:
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         model: Optional[str] = None,
+        images: Optional[List[Dict[str, str]]] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command."""
         # Build command
-        cmd = self._build_command(prompt, session_id, continue_session, model=model)
+        cmd = self._build_command(
+            prompt,
+            session_id,
+            continue_session,
+            model=model,
+            images=images,
+        )
+        cli_kind = self._detect_cli_kind(cmd[0])
+        cli_display_name = "Codex CLI" if cli_kind == "codex" else "Claude Code"
 
         # Create process ID for tracking
         process_id = str(uuid.uuid4())
@@ -124,6 +134,7 @@ class ClaudeProcessManager:
         logger.info(
             "Starting Claude Code process",
             process_id=process_id,
+            cli_kind=cli_kind,
             working_directory=str(working_directory),
             session_id=session_id,
             continue_session=continue_session,
@@ -136,7 +147,11 @@ class ClaudeProcessManager:
 
             # Handle output with timeout
             result = await asyncio.wait_for(
-                self._handle_process_output(process, stream_callback),
+                self._handle_process_output(
+                    process,
+                    stream_callback,
+                    cli_kind=cli_kind,
+                ),
                 timeout=self.config.claude_timeout_seconds,
             )
 
@@ -162,7 +177,8 @@ class ClaudeProcessManager:
             )
 
             raise ClaudeTimeoutError(
-                f"Claude Code timed out after {self.config.claude_timeout_seconds}s"
+                f"{cli_display_name} timed out after "
+                f"{self.config.claude_timeout_seconds}s"
             )
 
         except Exception as e:
@@ -178,18 +194,60 @@ class ClaudeProcessManager:
             if process_id in self.active_processes:
                 del self.active_processes[process_id]
 
-    def _build_command(
-        self, prompt: str, session_id: Optional[str], continue_session: bool,
-        model: Optional[str] = None,
-    ) -> List[str]:
-        """Build Claude Code command with arguments."""
+    def _resolve_cli_path(self) -> str:
+        """Resolve configured CLI executable path."""
         from .sdk_integration import find_claude_cli
 
-        cli_path = (
+        return (
             find_claude_cli(self.config.claude_cli_path)
             or self.config.claude_binary_path
             or "claude"
         )
+
+    @staticmethod
+    def _detect_cli_kind(cli_path: str) -> str:
+        """Detect CLI kind by executable name."""
+        basename = os.path.basename(str(cli_path)).lower()
+        return "codex" if basename.startswith("codex") else "claude"
+
+    def _build_command(
+        self,
+        prompt: str,
+        session_id: Optional[str],
+        continue_session: bool,
+        model: Optional[str] = None,
+        images: Optional[List[Dict[str, str]]] = None,
+    ) -> List[str]:
+        """Build CLI command with engine-specific arguments."""
+        cli_path = self._resolve_cli_path()
+        cli_kind = self._detect_cli_kind(cli_path)
+        if cli_kind == "codex":
+            return self._build_codex_command(
+                cli_path=cli_path,
+                prompt=prompt,
+                session_id=session_id,
+                continue_session=continue_session,
+                model=model,
+                images=images,
+            )
+        return self._build_claude_command(
+            cli_path=cli_path,
+            prompt=prompt,
+            session_id=session_id,
+            continue_session=continue_session,
+            model=model,
+        )
+
+    def _build_claude_command(
+        self,
+        *,
+        cli_path: str,
+        prompt: str,
+        session_id: Optional[str],
+        continue_session: bool,
+        model: Optional[str],
+    ) -> List[str]:
+        """Build legacy Claude CLI command."""
         cmd = [cli_path]
 
         if continue_session and not prompt:
@@ -234,6 +292,69 @@ class ClaudeProcessManager:
         logger.debug("Built Claude Code command", command=cmd)
         return cmd
 
+    def _build_codex_command(
+        self,
+        *,
+        cli_path: str,
+        prompt: str,
+        session_id: Optional[str],
+        continue_session: bool,
+        model: Optional[str],
+        images: Optional[List[Dict[str, str]]] = None,
+    ) -> List[str]:
+        """Build Codex CLI command."""
+        cmd = [cli_path, "exec", "--json", "--skip-git-repo-check"]
+
+        if model:
+            cmd.extend(["--model", model])
+
+        image_paths = self._extract_codex_image_paths(images)
+        if images and not image_paths:
+            raise ClaudeProcessError(
+                "Codex image input requires local file paths in images[*].file_path."
+            )
+        for image_path in image_paths:
+            cmd.extend(["--image", image_path])
+
+        if continue_session:
+            cmd.append("resume")
+            if session_id:
+                cmd.append(session_id)
+            else:
+                cmd.append("--last")
+            if prompt:
+                cmd.append(prompt)
+        elif prompt:
+            cmd.append(prompt)
+
+        logger.debug("Built Codex CLI command", command=cmd)
+        return cmd
+
+    def supports_image_inputs(
+        self, images: Optional[List[Dict[str, str]]] = None
+    ) -> bool:
+        """Whether current subprocess CLI can accept image attachments."""
+        cli_path = self._resolve_cli_path()
+        if self._detect_cli_kind(cli_path) != "codex":
+            return False
+        if not images:
+            return True
+        return bool(self._extract_codex_image_paths(images))
+
+    @staticmethod
+    def _extract_codex_image_paths(
+        images: Optional[List[Dict[str, str]]],
+    ) -> List[str]:
+        """Extract valid image file paths for Codex CLI --image flags."""
+        if not images:
+            return []
+        paths: List[str] = []
+        for image in images:
+            file_path = str(image.get("file_path") or "").strip()
+            if file_path:
+                paths.append(file_path)
+        return paths
+
     async def _start_process(self, cmd: List[str], cwd: Path) -> Process:
         """Start Claude Code subprocess."""
         return await asyncio.create_subprocess_exec(
@@ -246,7 +367,11 @@ class ClaudeProcessManager:
         )
 
     async def _handle_process_output(
-        self, process: Process, stream_callback: Optional[Callable]
+        self,
+        process: Process,
+        stream_callback: Optional[Callable],
+        *,
+        cli_kind: str = "claude",
     ) -> ClaudeResponse:
         """Memory-optimized output handling with bounded buffers."""
         message_buffer = deque(maxlen=self.max_message_buffer)
@@ -254,6 +379,16 @@ class ClaudeProcessManager:
         parsing_errors = []
 
         async for line in self._read_stream_bounded(process.stdout):
+            if not line:
+                continue
+            if not line.lstrip().startswith("{"):
+                # Some CLIs may print plain logs on stdout even in JSON mode.
+                logger.debug(
+                    "Skipping non-JSON stdout line",
+                    cli_kind=cli_kind,
+                    line=line[:200],
+                )
+                continue
             try:
                 msg = json.loads(line)
 
@@ -277,7 +412,11 @@ class ClaudeProcessManager:
                         )
 
                 # Check for final result
-                if msg.get("type") == "result":
+                msg_type = msg.get("type")
+                if msg_type == "result" or (
+                    cli_kind == "codex"
+                    and msg_type in {"turn.completed", "turn.failed"}
+                ):
                     result = msg
 
             except json.JSONDecodeError as e:
@@ -301,6 +440,8 @@ class ClaudeProcessManager:
         if return_code != 0:
             stderr = await process.stderr.read()
             error_msg = stderr.decode("utf-8", errors="replace")
+            cli_display_name = "Codex CLI" if cli_kind == "codex" else "Claude Code"
+            provider_name = "Codex" if cli_kind == "codex" else "Claude AI"
             logger.error(
                 "Claude Code process failed",
                 return_code=return_code,
@@ -321,8 +462,8 @@ class ClaudeProcessManager:
                 timezone = timezone_match.group(1) if timezone_match else ""
 
                 user_friendly_msg = (
-                    f"⏱️ **Claude AI Usage Limit Reached**\n\n"
-                    f"You've reached your Claude AI usage limit for this period.\n\n"
+                    f"⏱️ **{provider_name} Usage Limit Reached**\n\n"
+                    f"You've reached your {provider_name} usage limit for this period.\n\n"
                     f"**When will it reset?**\n"
                     f"Your limit will reset at **{reset_time}**"
                     f"{f' ({timezone})' if timezone else ''}\n\n"
@@ -337,17 +478,27 @@ class ClaudeProcessManager:
 
             # Check for MCP-related errors
             if "mcp" in error_msg.lower():
-                raise ClaudeMCPError(
-                    f"MCP server error: {error_msg}"
-                )
+                raise ClaudeMCPError(f"MCP server error: {error_msg}")
 
             # Generic error handling for other cases
             raise ClaudeProcessError(
-                f"Claude Code exited with code {return_code}: {error_msg}"
+                f"{cli_display_name} exited with code {return_code}: {error_msg}"
             )
 
+        if cli_kind == "codex" and isinstance(result, dict):
+            if result.get("type") == "turn.failed":
+                failure_message = self._extract_codex_failure_message(
+                    result,
+                    list(message_buffer),
+                )
+                raise ClaudeProcessError(f"Codex turn failed: {failure_message}")
+
         if not result:
-            logger.error("No result message received from Claude Code")
+            logger.error(
+                "No result message received from Claude Code", cli_kind=cli_kind
+            )
+            if cli_kind == "codex":
+                raise ClaudeParsingError("No result message received from Codex CLI")
             raise ClaudeParsingError("No result message received from Claude Code")
 
         return self._parse_result(result, list(message_buffer))
@@ -397,10 +548,133 @@ class ClaudeProcessManager:
             return self._parse_error_message(msg)
         elif msg_type == "progress":
             return self._parse_progress_message(msg)
+        elif msg_type in {
+            "thread.started",
+            "turn.started",
+            "turn.completed",
+            "turn.failed",
+            "item.started",
+            "item.completed",
+        }:
+            return self._parse_codex_stream_message(msg)
 
         # Unknown message type - log and continue
         logger.debug("Unknown message type", msg_type=msg_type, msg=msg)
         return None
+
+    def _parse_codex_stream_message(self, msg: Dict) -> Optional[StreamUpdate]:
+        """Parse Codex JSONL events into unified stream updates."""
+        msg_type = msg.get("type")
+
+        if msg_type == "thread.started":
+            return StreamUpdate(
+                type="system",
+                metadata={"subtype": "thread.started", "engine": "codex"},
+                session_context={"session_id": msg.get("thread_id")},
+            )
+
+        if msg_type == "turn.started":
+            return StreamUpdate(
+                type="progress",
+                content="Codex turn started",
+                metadata={"subtype": "turn.started", "engine": "codex"},
+            )
+
+        if msg_type == "turn.completed":
+            return StreamUpdate(
+                type="progress",
+                content="Codex turn completed",
+                metadata={
+                    "usage": msg.get("usage"),
+                    "subtype": "turn.completed",
+                    "engine": "codex",
+                },
+            )
+
+        if msg_type == "turn.failed":
+            message = self._extract_codex_failure_message(msg, [msg])
+            return StreamUpdate(
+                type="error",
+                content=message,
+                metadata={
+                    "subtype": "turn.failed",
+                    "usage": msg.get("usage"),
+                    "engine": "codex",
+                },
+                error_info={
+                    "message": message,
+                    "code": (
+                        msg.get("error", {}).get("code")
+                        if isinstance(msg.get("error"), dict)
+                        else None
+                    ),
+                    "subtype": "turn.failed",
+                },
+            )
+
+        item = msg.get("item")
+        if not isinstance(item, dict):
+            return None
+
+        item_type = item.get("type")
+        if item_type == "agent_message":
+            text = str(item.get("text", "")).strip()
+            return StreamUpdate(
+                type="assistant",
+                content=text or None,
+                metadata={
+                    "subtype": msg_type,
+                    "item_type": item_type,
+                    "engine": "codex",
+                },
+            )
+        if item_type == "reasoning":
+            text = str(item.get("text", "")).strip()
+            condensed = self._condense_codex_reasoning_text(text)
+            return StreamUpdate(
+                type="progress",
+                content=condensed or text or None,
+                metadata={
+                    "subtype": msg_type,
+                    "item_type": item_type,
+                    "engine": "codex",
+                },
+            )
+        if item_type == "command_execution":
+            status = item.get("status") or "unknown"
+            command = item.get("command") or ""
+            return StreamUpdate(
+                type="progress",
+                content=str(command).strip() or None,
+                metadata={
+                    "subtype": msg_type,
+                    "item_type": item_type,
+                    "status": status,
+                    "command": command,
+                    "exit_code": item.get("exit_code"),
+                    "engine": "codex",
+                },
+                progress={"operation": "command_execution"},
+            )
+        return None
+
+    @staticmethod
+    def _condense_codex_reasoning_text(text: str, max_chars: int = 180) -> str:
+        """Condense verbose Codex reasoning text into a concise one-liner."""
+        if not text:
+            return ""
+        normalized = text.replace("\r\n", "\n").strip()
+        first_block = next(
+            (block.strip() for block in normalized.split("\n\n") if block.strip()),
+            normalized,
+        )
+        # Drop markdown decorations for Telegram progress readability.
+        cleaned = re.sub(r"\*\*(.+?)\*\*", r"\1", first_block)
+        cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+        cleaned = " ".join(cleaned.split())
+        if len(cleaned) > max_chars:
+            cleaned = cleaned[: max_chars - 3].rstrip() + "..."
+        return cleaned
 
     def _parse_assistant_message(self, msg: Dict) -> StreamUpdate:
         """Parse assistant message with enhanced context."""
@@ -544,6 +818,11 @@ class ClaudeProcessManager:
 
     def _parse_result(self, result: Dict, messages: List[Dict]) -> ClaudeResponse:
         """Parse final result message."""
+        if result.get("type") == "turn.completed":
+            return self._parse_codex_result(result, messages)
+        if result.get("type") == "turn.failed":
+            return self._parse_codex_failed_result(result, messages)
+
         # Extract tools used from messages
         tools_used = []
         assistant_texts = []  # Collect all assistant text responses
@@ -580,7 +859,7 @@ class ClaudeProcessManager:
             logger.debug(
                 "Using fallback content from assistant messages",
                 num_texts=len(assistant_texts),
-                content_length=len(content)
+                content_length=len(content),
             )
         if not content and local_command_outputs:
             content = local_command_outputs[-1]
@@ -601,6 +880,123 @@ class ClaudeProcessManager:
             tools_used=tools_used,
             model_usage=result.get("modelUsage"),
         )
+
+    def _parse_codex_result(self, result: Dict, messages: List[Dict]) -> ClaudeResponse:
+        """Parse Codex turn-completed event into unified ClaudeResponse."""
+        thread_id = ""
+        assistant_texts: List[str] = []
+        tools_used: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            msg_type = msg.get("type")
+            if msg_type == "thread.started":
+                thread_id = str(msg.get("thread_id") or thread_id)
+                continue
+
+            if msg_type != "item.completed":
+                continue
+
+            item = msg.get("item")
+            if not isinstance(item, dict):
+                continue
+
+            item_type = item.get("type")
+            if item_type == "agent_message":
+                text = str(item.get("text", "")).strip()
+                if text:
+                    assistant_texts.append(text)
+            elif item_type == "command_execution":
+                tools_used.append(
+                    {
+                        "name": "Bash",
+                        "command": item.get("command"),
+                        "exit_code": item.get("exit_code"),
+                        "timestamp": msg.get("timestamp"),
+                    }
+                )
+
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            usage = None
+
+        content = assistant_texts[-1] if assistant_texts else ""
+        return ClaudeResponse(
+            content=content,
+            session_id=thread_id,
+            cost=0.0,
+            duration_ms=int(result.get("duration_ms") or 0),
+            num_turns=1,
+            is_error=False,
+            error_type=None,
+            tools_used=tools_used,
+            model_usage=usage,
+        )
+
+    def _parse_codex_failed_result(
+        self,
+        result: Dict,
+        messages: List[Dict],
+    ) -> ClaudeResponse:
+        """Parse Codex turn-failed event into unified error response."""
+        thread_id = ""
+        for msg in messages:
+            if msg.get("type") == "thread.started":
+                thread_id = str(msg.get("thread_id") or thread_id)
+
+        return ClaudeResponse(
+            content=self._extract_codex_failure_message(result, messages),
+            session_id=thread_id,
+            cost=0.0,
+            duration_ms=int(result.get("duration_ms") or 0),
+            num_turns=1,
+            is_error=True,
+            error_type="turn.failed",
+            tools_used=[],
+            model_usage=(
+                result.get("usage") if isinstance(result.get("usage"), dict) else None
+            ),
+        )
+
+    @staticmethod
+    def _extract_codex_failure_message(
+        result: Dict[str, Any], messages: List[Dict]
+    ) -> str:
+        """Extract readable failure text from Codex `turn.failed`/`error` events."""
+        error_payload = result.get("error")
+        if isinstance(error_payload, dict):
+            for key in ("message", "detail", "details", "error"):
+                value = str(error_payload.get(key) or "").strip()
+                if value:
+                    return value
+            code = str(error_payload.get("code") or "").strip()
+            if code:
+                return code
+        elif error_payload:
+            value = str(error_payload).strip()
+            if value:
+                return value
+
+        for key in ("message", "reason", "detail", "details"):
+            value = str(result.get(key) or "").strip()
+            if value:
+                return value
+
+        for msg in reversed(messages):
+            if msg.get("type") != "error":
+                continue
+            for key in ("message", "error"):
+                value = str(msg.get(key) or "").strip()
+                if value:
+                    return value
+            nested = msg.get("result")
+            if isinstance(nested, dict):
+                nested_value = str(
+                    nested.get("message") or nested.get("error") or ""
+                ).strip()
+                if nested_value:
+                    return nested_value
+
+        return "Codex request failed."
 
     @classmethod
     def _extract_local_command_output(cls, content: Any) -> str:

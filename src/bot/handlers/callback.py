@@ -7,20 +7,138 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ...claude.facade import ClaudeIntegration
-from ...config.settings import Settings
-from .message import build_permission_handler
 from ...claude.task_registry import TaskRegistry
+from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
+from ...services import ApprovalService
+from ...services.session_interaction_service import SessionInteractionService
+from ...services.session_lifecycle_service import SessionLifecycleService
+from ...services.session_service import SessionService
 from ..features.session_export import ExportFormat
+from ..utils.cli_engine import (
+    ENGINE_CLAUDE,
+    ENGINE_CODEX,
+    SUPPORTED_CLI_ENGINES,
+    get_active_cli_engine,
+    get_cli_integration,
+    get_engine_capabilities,
+    normalize_cli_engine,
+    set_active_cli_engine,
+)
+from ..utils.command_menu import sync_chat_command_menu
+from ..utils.recent_projects import build_recent_projects_message, scan_recent_projects
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.scope_state import get_scope_state_from_query
-from ..utils.status_usage import (
-    build_model_usage_status_lines,
-    build_precise_context_status_lines,
-)
+from ..utils.ui_adapter import build_reply_markup_from_spec
+from .message import build_permission_handler
 
 logger = structlog.get_logger()
+
+
+async def _cancel_task_with_fallback(
+    *,
+    task_registry: TaskRegistry,
+    user_id: int,
+    scope_key: str | None,
+) -> tuple[bool, bool]:
+    """Cancel scoped task first, then fallback to user-level cancellation.
+
+    Returns:
+    - cancelled: whether any task was cancelled
+    - used_fallback: whether fallback path was used
+    """
+    cancelled = await task_registry.cancel(user_id, scope_key=scope_key)
+    if cancelled:
+        return True, False
+
+    if scope_key:
+        cancelled_any = await task_registry.cancel(user_id, scope_key=None)
+        if cancelled_any:
+            return True, True
+
+    return False, False
+
+
+def _resume_engine_label(engine: str) -> str:
+    """Render resume engine label."""
+    return "Codex" if engine == ENGINE_CODEX else "Claude"
+
+
+def _engine_display_name(engine: str) -> str:
+    """Render readable label for engine selector."""
+    return "Codex" if engine == ENGINE_CODEX else "Claude"
+
+
+def _build_engine_selector_keyboard(
+    *, active_engine: str, available_engines: set[str]
+) -> InlineKeyboardMarkup | None:
+    """Build inline keyboard for engine switching callbacks."""
+    buttons = []
+    for engine in SUPPORTED_CLI_ENGINES:
+        if engine not in available_engines:
+            continue
+        label = _engine_display_name(engine)
+        if engine == active_engine:
+            label = f"✅ {label}（当前）"
+        buttons.append(
+            InlineKeyboardButton(
+                label,
+                callback_data=f"engine:switch:{engine}",
+            )
+        )
+
+    if not buttons:
+        return None
+
+    return InlineKeyboardMarkup([buttons])
+
+
+def _get_query_chat_id(query) -> int | None:
+    """Extract chat id from callback query message."""
+    message_obj = getattr(query, "message", None)
+    chat_id = getattr(message_obj, "chat_id", None)
+    if not isinstance(chat_id, int):
+        chat_id = getattr(getattr(message_obj, "chat", None), "id", None)
+    return chat_id if isinstance(chat_id, int) else None
+
+
+def _get_or_create_resume_token_manager(context: ContextTypes.DEFAULT_TYPE):
+    """Get shared resume token manager from bot_data."""
+    from ...bot.resume_tokens import ResumeTokenManager
+
+    token_mgr = context.bot_data.get("resume_token_manager")
+    if token_mgr is None:
+        token_mgr = ResumeTokenManager()
+        context.bot_data["resume_token_manager"] = token_mgr
+    return token_mgr
+
+
+def _get_or_create_resume_scanner(
+    *, context: ContextTypes.DEFAULT_TYPE, settings: Settings, engine: str
+):
+    """Get engine-specific desktop session scanner."""
+    from ...bot.utils.codex_resume_scanner import CodexSessionScanner
+    from ...claude.desktop_scanner import DesktopSessionScanner
+
+    scanner_key = (
+        "codex_desktop_scanner" if engine == ENGINE_CODEX else "desktop_scanner"
+    )
+    scanner = context.bot_data.get(scanner_key)
+    if scanner is None:
+        scanner = (
+            CodexSessionScanner(
+                approved_directory=settings.approved_directory,
+                cache_ttl_sec=settings.resume_scan_cache_ttl_seconds,
+            )
+            if engine == ENGINE_CODEX
+            else DesktopSessionScanner(
+                approved_directory=settings.approved_directory,
+                cache_ttl_sec=settings.resume_scan_cache_ttl_seconds,
+            )
+        )
+        context.bot_data[scanner_key] = scanner
+    return scanner
 
 
 def _get_scope_state_for_query(
@@ -28,9 +146,7 @@ def _get_scope_state_for_query(
 ) -> tuple[str, dict]:
     """Get per-chat/topic scoped state for callback handlers."""
     settings: Settings | None = context.bot_data.get("settings")
-    default_directory = (
-        settings.approved_directory if settings else Path(".").resolve()
-    )
+    default_directory = settings.approved_directory if settings else Path(".").resolve()
     return get_scope_state_from_query(
         user_data=context.user_data,
         query=query,
@@ -50,6 +166,39 @@ def _parse_export_format(export_format: str) -> ExportFormat | None:
         ExportFormat.JSON.value: ExportFormat.JSON,
     }
     return format_map.get(raw)
+
+
+async def _sync_chat_menu_for_engine(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None,
+    engine: str,
+) -> None:
+    """Refresh per-chat command menu after callback-side engine switch."""
+    bot = getattr(context, "bot", None)
+    if bot is None:
+        return
+
+    try:
+        commands = await sync_chat_command_menu(
+            bot=bot,
+            chat_id=chat_id,
+            engine=engine,
+        )
+        if commands:
+            logger.info(
+                "Synced callback chat menu",
+                chat_id=chat_id,
+                engine=engine,
+                commands=[cmd.command for cmd in commands],
+            )
+    except Exception as exc:
+        logger.warning(
+            "Failed to sync callback chat menu",
+            chat_id=chat_id,
+            engine=engine,
+            error=str(exc),
+        )
 
 
 async def handle_callback_query(
@@ -75,14 +224,29 @@ async def handle_callback_query(
         if action == "cancel" and param == "task":
             task_registry: TaskRegistry = context.bot_data.get("task_registry")
             if not task_registry:
-                await query.answer("Task registry not available.")
+                await query.answer("Task registry not available.", show_alert=True)
                 return
             scope_key, _ = _get_scope_state_for_query(query, context)
-            cancelled = await task_registry.cancel(user_id, scope_key=scope_key)
+            cancelled, used_fallback = await _cancel_task_with_fallback(
+                task_registry=task_registry,
+                user_id=user_id,
+                scope_key=scope_key,
+            )
             if cancelled:
+                if used_fallback:
+                    logger.info(
+                        "Cancel button used fallback cancellation scope",
+                        user_id=user_id,
+                        scope_key=scope_key,
+                    )
                 await query.answer("Task cancellation requested.")
+                # Visible feedback for clients where callback toast is subtle.
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
             else:
-                await query.answer("No active task to cancel.")
+                await query.answer("No active task to cancel.", show_alert=True)
             audit_logger: AuditLogger = context.bot_data.get("audit_logger")
             if audit_logger:
                 await audit_logger.log_command(
@@ -107,6 +271,7 @@ async def handle_callback_query(
             "thinking": handle_thinking_callback,
             "resume": handle_resume_callback,
             "model": handle_model_callback,
+            "engine": handle_engine_callback,
         }
 
         handler = handlers.get(action)
@@ -189,6 +354,7 @@ async def handle_cd_callback(
         old_session_id = scope_state.get("claude_session_id")
         scope_state["current_directory"] = new_path
         scope_state["claude_session_id"] = None
+        scope_state["force_new_session"] = True
         if old_session_id:
             permission_manager = context.bot_data.get("permission_manager")
             if permission_manager:
@@ -209,7 +375,7 @@ async def handle_cd_callback(
                 InlineKeyboardButton(
                     "📋 Projects", callback_data="action:show_projects"
                 ),
-                InlineKeyboardButton("📊 Context", callback_data="action:status"),
+                InlineKeyboardButton("📊 Context", callback_data="action:context"),
             ],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -247,6 +413,10 @@ async def handle_action_callback(
         "new_session": _handle_new_session_action,
         "continue": _handle_continue_action,
         "end_session": _handle_end_session_action,
+        "context": _handle_status_action,
+        "refresh_context": _handle_refresh_status_action,
+        "recent_cd": _handle_recent_cd_action,
+        # Backward compatibility for older callback buttons in history.
         "status": _handle_status_action,
         "ls": _handle_ls_action,
         "start_coding": _handle_start_coding_action,
@@ -283,6 +453,9 @@ async def handle_confirm_callback(
 
 async def _handle_help_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle help action."""
+    _, scope_state = _get_scope_state_for_query(query, context)
+    active_engine = get_active_cli_engine(scope_state)
+    engine_label = "Codex" if active_engine == ENGINE_CODEX else "Claude"
     help_text = (
         "🤖 **Quick Help**\n\n"
         "**Navigation:**\n"
@@ -290,10 +463,10 @@ async def _handle_help_action(query, context: ContextTypes.DEFAULT_TYPE) -> None
         "• `/cd <dir>` - Change directory\n"
         "• `/projects` - Show projects\n\n"
         "**Sessions:**\n"
-        "• `/new` - New Claude session\n"
-        "• `/context` - Session status\n\n"
+        f"• `/new` - New {engine_label} session\n"
+        "• `/context` - Session context\n\n"
         "**Tips:**\n"
-        "• Send any text to interact with Claude\n"
+        f"• Send any text to interact with {engine_label}\n"
         "• Upload files for code review\n"
         "• Use buttons for quick actions\n\n"
         "Use `/help` for detailed help."
@@ -376,44 +549,28 @@ async def _handle_new_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
     """Handle new session action."""
     settings: Settings = context.bot_data["settings"]
     _, scope_state = _get_scope_state_for_query(query, context)
-
-    # Clear session and force new session on next message
-    old_session_id = scope_state.get("claude_session_id")
-    scope_state["claude_session_id"] = None
-    scope_state["session_started"] = True
-    scope_state["force_new_session"] = True
-    if old_session_id:
-        permission_manager = context.bot_data.get("permission_manager")
-        if permission_manager:
-            permission_manager.clear_session(old_session_id)
-
+    session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+        SessionLifecycleService(
+            permission_manager=context.bot_data.get("permission_manager")
+        )
+    )
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
+    reset_result = session_lifecycle.start_new_session(scope_state)
     current_dir = scope_state.get("current_directory", settings.approved_directory)
-    relative_path = current_dir.relative_to(settings.approved_directory)
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📝 Start Coding", callback_data="action:start_coding"
-            ),
-            InlineKeyboardButton(
-                "📁 Change Project", callback_data="action:show_projects"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📋 Quick Actions", callback_data="action:quick_actions"
-            ),
-            InlineKeyboardButton("❓ Help", callback_data="action:help"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    session_message = session_interaction.build_new_session_message(
+        current_dir=current_dir,
+        approved_directory=settings.approved_directory,
+        previous_session_id=reset_result.old_session_id,
+        for_callback=True,
+    )
 
     await query.edit_message_text(
-        f"🆕 **New Claude Code Session**\n\n"
-        f"📂 Working directory: `{relative_path}/`\n\n"
-        f"Ready to help you code! Send me a message to get started:",
+        session_message.text,
         parse_mode="Markdown",
-        reply_markup=reply_markup,
+        reply_markup=build_reply_markup_from_spec(session_message.keyboard),
     )
 
 
@@ -421,72 +578,40 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
     """Handle end session action."""
     settings: Settings = context.bot_data["settings"]
     _, scope_state = _get_scope_state_for_query(query, context)
+    session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+        SessionLifecycleService(
+            permission_manager=context.bot_data.get("permission_manager")
+        )
+    )
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
+    end_result = session_lifecycle.end_session(scope_state)
 
-    # Check if there's an active session
-    claude_session_id = scope_state.get("claude_session_id")
-
-    if not claude_session_id:
+    if not end_result.had_active_session:
+        no_active_message = session_interaction.build_end_no_active_message(
+            for_callback=True
+        )
         await query.edit_message_text(
-            "ℹ️ **No Active Session**\n\n"
-            "There's no active Claude session to end.\n\n"
-            "**What you can do:**\n"
-            "• Use the button below to start a new session\n"
-            "• Check your session context\n"
-            "• Send any message to start a conversation",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "🆕 New Session", callback_data="action:new_session"
-                        )
-                    ],
-                    [InlineKeyboardButton("📊 Context", callback_data="action:status")],
-                ]
-            ),
+            no_active_message.text,
+            reply_markup=build_reply_markup_from_spec(no_active_message.keyboard),
         )
         return
 
     # Get current directory for display
     current_dir = scope_state.get("current_directory", settings.approved_directory)
-    relative_path = current_dir.relative_to(settings.approved_directory)
-
-    # Clear session data
-    scope_state["claude_session_id"] = None
-    scope_state["session_started"] = False
-    scope_state["last_message"] = None
-    if claude_session_id:
-        permission_manager = context.bot_data.get("permission_manager")
-        if permission_manager:
-            permission_manager.clear_session(claude_session_id)
-
-    # Create quick action buttons
-    keyboard = [
-        [
-            InlineKeyboardButton("🆕 New Session", callback_data="action:new_session"),
-            InlineKeyboardButton(
-                "📁 Change Project", callback_data="action:show_projects"
-            ),
-        ],
-        [
-            InlineKeyboardButton("📊 Context", callback_data="action:status"),
-            InlineKeyboardButton("❓ Help", callback_data="action:help"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    end_message = session_interaction.build_end_success_message(
+        current_dir=current_dir,
+        approved_directory=settings.approved_directory,
+        for_callback=True,
+        title="Session Ended",
+    )
 
     await query.edit_message_text(
-        "✅ **Session Ended**\n\n"
-        f"Your Claude session has been terminated.\n\n"
-        f"**Current Status:**\n"
-        f"• Directory: `{relative_path}/`\n"
-        f"• Session: None\n"
-        f"• Ready for new commands\n\n"
-        f"**Next Steps:**\n"
-        f"• Start a new session\n"
-        f"• Check context\n"
-        f"• Send any message to begin a new conversation",
+        end_message.text,
         parse_mode="Markdown",
-        reply_markup=reply_markup,
+        reply_markup=build_reply_markup_from_spec(end_message.keyboard),
     )
 
 
@@ -494,164 +619,145 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handle continue session action."""
     user_id = query.from_user.id
     settings: Settings = context.bot_data["settings"]
-    claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
     _, scope_state = _get_scope_state_for_query(query, context)
+    active_engine, cli_integration = get_cli_integration(
+        bot_data=context.bot_data,
+        scope_state=scope_state,
+    )
+    session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+        SessionLifecycleService(
+            permission_manager=context.bot_data.get("permission_manager")
+        )
+    )
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
     current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
-        if not claude_integration:
+        if not cli_integration:
             await query.edit_message_text(
-                "❌ **Claude Integration Not Available**\n\n"
-                "Claude integration is not properly configured."
+                session_interaction.get_integration_unavailable_text()
             )
             return
 
         # Check if there's an existing session in user context
-        claude_session_id = scope_state.get("claude_session_id")
+        claude_session_id = session_lifecycle.get_active_session_id(scope_state)
+        permission_handler = build_permission_handler(
+            bot=context.bot,
+            chat_id=query.message.chat_id,
+            settings=settings,
+        )
 
-        if claude_session_id:
-            # Continue with the existing session (no prompt = use --continue)
-            await query.edit_message_text(
-                f"🔄 **Continuing Session**\n\n"
-                f"Session ID: `{claude_session_id[:8]}...`\n"
-                f"Directory: `{current_dir.relative_to(settings.approved_directory)}/`\n\n"
-                f"Continuing where you left off...",
-                parse_mode="Markdown",
-            )
+        progress_text = session_interaction.build_continue_progress_text(
+            existing_session_id=claude_session_id,
+            current_dir=current_dir,
+            approved_directory=settings.approved_directory,
+            prompt=None,
+        )
+        await query.edit_message_text(progress_text, parse_mode="Markdown")
 
-            claude_response = await claude_integration.run_command(
-                prompt="",  # Empty prompt triggers --continue
-                working_directory=current_dir,
-                user_id=user_id,
-                session_id=claude_session_id,
-                permission_handler=build_permission_handler(
-                    bot=context.bot, chat_id=query.message.chat_id, settings=settings
-                ),
-            )
-        else:
-            # No session in context, try to find the most recent session
-            await query.edit_message_text(
-                "🔍 **Looking for Recent Session**\n\n"
-                "Searching for your most recent session in this directory...",
-                parse_mode="Markdown",
-            )
+        continue_result = await session_lifecycle.continue_session(
+            user_id=user_id,
+            scope_state=scope_state,
+            current_dir=current_dir,
+            claude_integration=cli_integration,
+            prompt=None,
+            default_prompt="Please continue where we left off",
+            permission_handler=permission_handler,
+            use_empty_prompt_when_existing=True,
+            allow_none_prompt_when_discover=True,
+        )
+        claude_response = continue_result.response
 
-            claude_response = await claude_integration.continue_session(
-                user_id=user_id,
-                working_directory=current_dir,
-                prompt=None,  # No prompt = use --continue
-                permission_handler=build_permission_handler(
-                    bot=context.bot, chat_id=query.message.chat_id, settings=settings
-                ),
-            )
-
-        if claude_response:
-            # Update session ID in context
-            scope_state["claude_session_id"] = claude_response.session_id
+        if continue_result.status == "continued" and claude_response:
 
             # Send Claude's response
             await query.message.reply_text(
-                f"✅ **Session Continued**\n\n"
-                f"{claude_response.content[:500]}{'...' if len(claude_response.content) > 500 else ''}",
+                session_interaction.build_continue_callback_success_text(
+                    claude_response.content
+                )
+                + f"\n\n`Engine: {active_engine}`",
                 parse_mode="Markdown",
             )
-        else:
+        elif continue_result.status == "not_found":
             # No session found to continue
+            not_found_message = session_interaction.build_continue_not_found_message(
+                current_dir=current_dir,
+                approved_directory=settings.approved_directory,
+                for_callback=True,
+            )
             await query.edit_message_text(
-                "❌ **No Session Found**\n\n"
-                f"No recent Claude session found in this directory.\n"
-                f"Directory: `{current_dir.relative_to(settings.approved_directory)}/`\n\n"
-                f"**What you can do:**\n"
-                f"• Use the button below to start a fresh session\n"
-                f"• Check your session context\n"
-                f"• Navigate to a different directory",
+                not_found_message.text,
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                "🆕 New Session", callback_data="action:new_session"
-                            ),
-                            InlineKeyboardButton(
-                                "📊 Context", callback_data="action:status"
-                            ),
-                        ]
-                    ]
-                ),
+                reply_markup=build_reply_markup_from_spec(not_found_message.keyboard),
+            )
+        else:
+            await query.edit_message_text(
+                session_interaction.get_integration_unavailable_text()
             )
 
     except Exception as e:
         logger.error("Error in continue action", error=str(e), user_id=user_id)
+        error_message = session_interaction.build_continue_callback_error_message(
+            str(e)
+        )
         await query.edit_message_text(
-            f"❌ **Error Continuing Session**\n\n"
-            f"An error occurred: `{str(e)}`\n\n"
-            f"Try starting a new session instead.",
+            error_message.text,
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "🆕 New Session", callback_data="action:new_session"
-                        )
-                    ]
-                ]
-            ),
+            reply_markup=build_reply_markup_from_spec(error_message.keyboard),
         )
 
 
 async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle status action - synced with /context command logic."""
     settings: Settings = context.bot_data["settings"]
+    user_id = int(getattr(getattr(query, "from_user", None), "id", 0) or 0)
     _, scope_state = _get_scope_state_for_query(query, context)
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
+    view_spec = session_interaction.build_context_view_spec(for_callback=True)
+    loading_kwargs = {}
+    if view_spec.loading_parse_mode:
+        loading_kwargs["parse_mode"] = view_spec.loading_parse_mode
     await query.edit_message_text(
-        "**Session Status**\n\n⏳ 正在刷新状态，请稍候...", parse_mode="Markdown"
+        view_spec.loading_text,
+        **loading_kwargs,
     )
 
-    claude_session_id = scope_state.get("claude_session_id")
-    current_dir = scope_state.get("current_directory", settings.approved_directory)
-    relative_path = current_dir.relative_to(settings.approved_directory)
-    current_model = scope_state.get("claude_model")
-
-    status_lines = [
-        "**Session Status**\n",
-        f"Directory: `{relative_path}/`",
-        f"Model: `{current_model or 'default'}`",
-    ]
-    claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
-
-    if claude_session_id:
-        status_lines.append(f"Session: `{claude_session_id[:8]}...`")
-        if claude_integration:
-            precise_context = await claude_integration.get_precise_context_usage(
-                session_id=claude_session_id,
-                working_directory=current_dir,
-                model=current_model,
-            )
-            if precise_context:
-                status_lines.extend(
-                    build_precise_context_status_lines(precise_context)
-                )
-
-            info = await claude_integration.get_session_info(claude_session_id)
-            if info:
-                status_lines.append(f"Cost: `${info.get('cost', 0.0):.4f}`")
-                status_lines.append(f"Messages: {info.get('messages', 0)}")
-                status_lines.append(f"Turns: {info.get('turns', 0)}")
-                model_usage = info.get("model_usage")
-                if model_usage and not precise_context:
-                    status_lines.extend(
-                        build_model_usage_status_lines(
-                            model_usage=model_usage,
-                            current_model=current_model,
-                            allow_estimated_ratio=True,
-                        )
-                    )
-    else:
-        status_lines.append("Session: none")
-
-    await query.edit_message_text(
-        "\n".join(status_lines), parse_mode="Markdown"
-    )
+    try:
+        active_engine, cli_integration = get_cli_integration(
+            bot_data=context.bot_data,
+            scope_state=scope_state,
+        )
+        engine_capabilities = get_engine_capabilities(active_engine)
+        session_service = context.bot_data.get("session_service")
+        snapshot = await SessionService.build_scope_context_snapshot(
+            user_id=user_id,
+            scope_state=scope_state,
+            approved_directory=settings.approved_directory,
+            claude_integration=cli_integration,
+            session_service=session_service,
+            include_resumable=view_spec.include_resumable,
+            include_event_summary=view_spec.include_event_summary,
+            allow_precise_context_probe=engine_capabilities.supports_precise_context_probe,
+        )
+        render_result = session_interaction.build_context_render_result(
+            snapshot=snapshot,
+            scope_state=scope_state,
+            approved_directory=settings.approved_directory,
+            full_mode=False,
+        )
+        await query.edit_message_text(
+            render_result.primary_text,
+            parse_mode=render_result.parse_mode,
+        )
+    except Exception as exc:
+        logger.error("Error in context callback", error=str(exc), user_id=user_id)
+        await query.edit_message_text(view_spec.error_text)
 
 
 async def handle_model_callback(
@@ -659,6 +765,17 @@ async def handle_model_callback(
 ) -> None:
     """Handle model selection callback from inline keyboard."""
     _, scope_state = _get_scope_state_for_query(query, context)
+    active_engine = get_active_cli_engine(scope_state)
+    capabilities = get_engine_capabilities(active_engine)
+    if not capabilities.supports_model_selection:
+        await query.edit_message_text(
+            "ℹ️ 当前引擎不支持模型选择。\n"
+            f"当前引擎：`{active_engine}`\n"
+            "请先切换：`/engine claude`",
+            parse_mode="Markdown",
+        )
+        return
+
     if param == "default":
         scope_state.pop("claude_model", None)
         selected = "default"
@@ -696,6 +813,110 @@ async def handle_model_callback(
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+
+async def handle_engine_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle engine switch callback from /engine selector."""
+    settings: Settings = context.bot_data["settings"]
+    _, scope_state = _get_scope_state_for_query(query, context)
+    active_engine = get_active_cli_engine(scope_state)
+    integrations = context.bot_data.get("cli_integrations") or {}
+    available_engines = set(
+        normalize_cli_engine(name) for name in integrations.keys() if name
+    )
+    selector_keyboard = _build_engine_selector_keyboard(
+        active_engine=active_engine,
+        available_engines=available_engines,
+    )
+
+    if not param or not param.startswith("switch:"):
+        await query.edit_message_text(
+            "❌ 无效的引擎切换操作，请重新执行 `/engine`。",
+            parse_mode="Markdown",
+            reply_markup=selector_keyboard,
+        )
+        return
+
+    requested_engine = normalize_cli_engine(param.split(":", 1)[1])
+    if requested_engine not in integrations:
+        await query.edit_message_text(
+            f"❌ 引擎 `{requested_engine}` 当前不可用。\n"
+            "请检查对应 CLI 是否安装，并在配置中启用。",
+            parse_mode="Markdown",
+            reply_markup=selector_keyboard,
+        )
+        return
+
+    if requested_engine == active_engine:
+        await query.edit_message_text(
+            f"ℹ️ 当前已经是 `{active_engine}` 引擎。",
+            parse_mode="Markdown",
+            reply_markup=selector_keyboard,
+        )
+        return
+
+    old_session_id = scope_state.get("claude_session_id")
+    set_active_cli_engine(scope_state, requested_engine)
+    scope_state["claude_session_id"] = None
+    scope_state["session_started"] = True
+    scope_state["force_new_session"] = True
+    if old_session_id:
+        permission_manager = context.bot_data.get("permission_manager")
+        if permission_manager:
+            permission_manager.clear_session(old_session_id)
+
+    await _sync_chat_menu_for_engine(
+        context=context,
+        chat_id=_get_query_chat_id(query),
+        engine=requested_engine,
+    )
+    token_mgr = _get_or_create_resume_token_manager(context)
+    scanner = _get_or_create_resume_scanner(
+        context=context,
+        settings=settings,
+        engine=requested_engine,
+    )
+    projects = await scanner.list_projects()
+
+    if projects:
+        current_dir = scope_state.get("current_directory")
+        resume_text, resume_keyboard = build_resume_project_selector(
+            projects=projects,
+            approved_root=settings.approved_directory,
+            token_mgr=token_mgr,
+            user_id=query.from_user.id,
+            current_directory=current_dir,
+            show_all=False,
+            payload_extra={"engine": requested_engine},
+            engine=requested_engine,
+        )
+        await query.edit_message_text(
+            "✅ **CLI 引擎已切换**\n\n"
+            f"从 `{active_engine}` 切换到 `{requested_engine}`。\n"
+            "已清空当前会话绑定。请先选目录，再选会话；也可在下一步直接新建会话。\n\n"
+            f"{resume_text}",
+            parse_mode="Markdown",
+            reply_markup=resume_keyboard,
+        )
+    else:
+        await query.edit_message_text(
+            "✅ **CLI 引擎已切换**\n\n"
+            f"从 `{active_engine}` 切换到 `{requested_engine}`。\n"
+            "未发现可恢复的桌面会话，请直接发送消息开始新会话，"
+            "或先 `/cd` 到目标目录后再发送。",
+            parse_mode="Markdown",
+        )
+
+    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    if audit_logger:
+        await audit_logger.log_command(
+            user_id=query.from_user.id,
+            command="engine_callback",
+            args=[requested_engine],
+            success=True,
+        )
 
 
 async def _handle_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -828,6 +1049,37 @@ async def _handle_refresh_status_action(
     await _handle_status_action(query, context)
 
 
+async def _handle_recent_cd_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle recent_cd action -- refresh recent projects list for /cd."""
+    settings: Settings = context.bot_data["settings"]
+    _, scope_state = _get_scope_state_for_query(query, context)
+    active_engine = get_active_cli_engine(scope_state)
+    current_dir = scope_state.get("current_directory", settings.approved_directory)
+
+    try:
+        recent = scan_recent_projects(settings.approved_directory)
+        if recent:
+            text, markup = build_recent_projects_message(
+                recent_projects=recent,
+                current_directory=current_dir,
+                approved_directory=settings.approved_directory,
+                active_engine=active_engine,
+            )
+            await query.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=markup,
+            )
+        else:
+            await query.edit_message_text(
+                "No recent projects found.\n\nUse `/cd <path>` to navigate directly.",
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        logger.error("Failed to scan recent projects in callback", error=str(e))
+        await query.edit_message_text(f"Failed to load recent projects: {str(e)}")
+
+
 async def _handle_refresh_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle refresh ls action."""
     await _handle_ls_action(query, context)
@@ -836,47 +1088,41 @@ async def _handle_refresh_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -
 async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle export action."""
     _, scope_state = _get_scope_state_for_query(query, context)
+    session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+        SessionLifecycleService(
+            permission_manager=context.bot_data.get("permission_manager")
+        )
+    )
+    session_interaction = (
+        context.bot_data.get("session_interaction_service")
+        or SessionInteractionService()
+    )
     features = context.bot_data.get("features")
     session_exporter = features.get_session_export() if features else None
 
     if not session_exporter:
         await query.edit_message_text(
-            "❌ **Export Unavailable**\n\n"
-            "Session export service is not available.",
+            session_interaction.build_export_unavailable_text(for_callback=True),
             parse_mode="Markdown",
         )
         return
 
-    claude_session_id = scope_state.get("claude_session_id")
+    claude_session_id = session_lifecycle.get_active_session_id(scope_state)
     if not claude_session_id:
         await query.edit_message_text(
-            "❌ **No Active Session**\n\n"
-            "There's no active Claude session to export.\n\n"
-            "**What you can do:**\n"
-            "• Start a new session with `/new`\n"
-            "• Continue an existing session with `/continue`\n"
-            "• Check your status with `/context`",
+            session_interaction.build_export_no_active_session_text(),
             parse_mode="Markdown",
         )
         return
 
-    keyboard = [
-        [
-            InlineKeyboardButton("📝 Markdown", callback_data="export:markdown"),
-            InlineKeyboardButton("🌐 HTML", callback_data="export:html"),
-        ],
-        [
-            InlineKeyboardButton("📋 JSON", callback_data="export:json"),
-            InlineKeyboardButton("❌ Cancel", callback_data="export:cancel"),
-        ],
-    ]
+    export_selector = session_interaction.build_export_selector_message(
+        claude_session_id
+    )
 
     await query.edit_message_text(
-        "📤 **Export Session**\n\n"
-        f"Ready to export session: `{claude_session_id[:8]}...`\n\n"
-        "**Choose export format:**",
+        export_selector.text,
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=build_reply_markup_from_spec(export_selector.keyboard),
     )
 
 
@@ -885,6 +1131,8 @@ async def handle_quick_action_callback(
 ) -> None:
     """Handle quick action callbacks."""
     user_id = query.from_user.id
+    settings: Settings = context.bot_data["settings"]
+    _, scope_state = _get_scope_state_for_query(query, context)
 
     # Get quick actions manager from bot data if available
     quick_actions = context.bot_data.get("quick_actions")
@@ -897,16 +1145,16 @@ async def handle_quick_action_callback(
         return
 
     # Get Claude integration
-    claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
-    if not claude_integration:
+    active_engine, cli_integration = get_cli_integration(
+        bot_data=context.bot_data,
+        scope_state=scope_state,
+    )
+    if not cli_integration:
         await query.edit_message_text(
-            "❌ **Claude Integration Not Available**\n\n"
-            "Claude integration is not properly configured."
+            "❌ **CLI 引擎不可用**\n\n" "当前引擎未正确配置，请联系管理员检查配置。"
         )
         return
 
-    settings: Settings = context.bot_data["settings"]
-    _, scope_state = _get_scope_state_for_query(query, context)
     current_dir = scope_state.get("current_directory", settings.approved_directory)
 
     try:
@@ -927,24 +1175,32 @@ async def handle_quick_action_callback(
             parse_mode="Markdown",
         )
 
-        # Run the action through Claude
-        claude_response = await claude_integration.run_command(
+        # Run the action through Claude, using scoped session to prevent
+        # cross-topic leakage via facade auto-resume.
+        session_id = scope_state.get("claude_session_id")
+        force_new = scope_state.get("force_new_session", False)
+        claude_response = await cli_integration.run_command(
             prompt=action.prompt,
             working_directory=current_dir,
             user_id=user_id,
+            session_id=session_id,
+            force_new_session=force_new,
             permission_handler=build_permission_handler(
                 bot=context.bot, chat_id=query.message.chat_id, settings=settings
             ),
         )
 
         if claude_response:
+            # Write back session_id and consume flag only on success
+            scope_state["claude_session_id"] = claude_response.session_id
+            scope_state.pop("force_new_session", None)
             # Format and send the response
             response_text = claude_response.content
             if len(response_text) > 4000:
                 response_text = response_text[:4000] + "...\n\n_(Response truncated)_"
 
             await query.message.reply_text(
-                f"✅ **{action.icon} {action.name} Complete**\n\n{response_text}",
+                f"✅ **{action.icon} {action.name} Complete**\n\n{response_text}\n\n`Engine: {active_engine}`",
                 parse_mode="Markdown",
             )
         else:
@@ -1038,48 +1294,29 @@ async def handle_conversation_callback(
         if conversation_enhancer:
             conversation_enhancer.clear_context(user_id)
 
-        # Clear session data
-        old_session_id = scope_state.get("claude_session_id")
-        scope_state["claude_session_id"] = None
-        scope_state["session_started"] = False
-        if old_session_id:
-            permission_manager = context.bot_data.get("permission_manager")
-            if permission_manager:
-                permission_manager.clear_session(old_session_id)
+        session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
+            SessionLifecycleService(
+                permission_manager=context.bot_data.get("permission_manager")
+            )
+        )
+        session_interaction = (
+            context.bot_data.get("session_interaction_service")
+            or SessionInteractionService()
+        )
+        session_lifecycle.end_session(scope_state)
 
         current_dir = scope_state.get("current_directory", settings.approved_directory)
-        relative_path = current_dir.relative_to(settings.approved_directory)
-
-        # Create quick action buttons
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "🆕 New Session", callback_data="action:new_session"
-                ),
-                InlineKeyboardButton(
-                    "📁 Change Project", callback_data="action:show_projects"
-                ),
-            ],
-            [
-                InlineKeyboardButton("📊 Context", callback_data="action:status"),
-                InlineKeyboardButton("❓ Help", callback_data="action:help"),
-            ],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        end_message = session_interaction.build_end_success_message(
+            current_dir=current_dir,
+            approved_directory=settings.approved_directory,
+            for_callback=True,
+            title="Conversation Ended",
+        )
 
         await query.edit_message_text(
-            "✅ **Conversation Ended**\n\n"
-            f"Your Claude session has been terminated.\n\n"
-            f"**Current Status:**\n"
-            f"• Directory: `{relative_path}/`\n"
-            f"• Session: None\n"
-            f"• Ready for new commands\n\n"
-            f"**Next Steps:**\n"
-            f"• Start a new session\n"
-            f"• Check context\n"
-            f"• Send any message to begin a new conversation",
+            end_message.text,
             parse_mode="Markdown",
-            reply_markup=reply_markup,
+            reply_markup=build_reply_markup_from_spec(end_message.keyboard),
         )
 
         logger.info("Conversation ended via callback", user_id=user_id)
@@ -1148,8 +1385,10 @@ async def handle_git_callback(
             else:
                 # Clean up diff output for Telegram
                 # Remove emoji symbols that interfere with markdown parsing
-                clean_diff = diff_output.replace("➕", "+").replace("➖", "-").replace("📍", "@")
-                
+                clean_diff = (
+                    diff_output.replace("➕", "+").replace("➖", "-").replace("📍", "@")
+                )
+
                 # Limit diff output
                 max_length = 2000
                 if len(clean_diff) > max_length:
@@ -1305,46 +1544,27 @@ async def handle_permission_callback(
 ) -> None:
     """Handle tool permission button callbacks."""
     user_id = query.from_user.id
-
-    if not param or ":" not in param:
-        await query.edit_message_text("Invalid permission callback data.")
-        return
-
-    decision, request_id = param.split(":", 1)
-
+    approval_service = context.bot_data.get("approval_service") or ApprovalService()
     permission_manager = context.bot_data.get("permission_manager")
-    if not permission_manager:
-        await query.edit_message_text("Permission manager not available.")
-        return
-
-    resolved = permission_manager.resolve_permission(request_id, decision, user_id=user_id)
-
-    if not resolved:
-        await query.edit_message_text(
-            "**Permission Request Expired**\n\n"
-            "This permission request has already been handled or timed out.",
-            parse_mode="Markdown",
-        )
-        return
-
-    decision_labels = {
-        "allow": "Allowed",
-        "allow_all": "Allowed (all for session)",
-        "deny": "Denied",
-    }
-    label = decision_labels.get(decision, decision)
+    result = approval_service.resolve_callback(
+        param=param,
+        user_id=user_id,
+        permission_manager=permission_manager,
+    )
 
     await query.edit_message_text(
-        f"**Permission {label}**\n\n"
-        f"Your choice has been applied.",
-        parse_mode="Markdown",
+        result.message,
+        parse_mode=result.parse_mode,
     )
+
+    if not result.ok:
+        return
 
     logger.info(
         "Permission callback handled",
         user_id=user_id,
-        request_id=request_id,
-        decision=decision,
+        request_id=result.request_id,
+        decision=result.decision,
     )
 
 
@@ -1366,6 +1586,47 @@ async def handle_thinking_callback(
         )
         return
 
+    def _is_noop_edit_error(error: Exception) -> bool:
+        """Whether Telegram rejected edit because target text is unchanged."""
+        return "message is not modified" in str(error).lower()
+
+    async def _edit_with_markdown_fallback(
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> bool:
+        """Try Markdown first, then fallback to plain text if entity parsing fails."""
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+            return True
+        except Exception as markdown_error:
+            if _is_noop_edit_error(markdown_error):
+                return True
+            logger.warning(
+                "Thinking callback markdown render failed; fallback to plain text",
+                error=str(markdown_error),
+                action=action,
+            )
+            try:
+                await query.edit_message_text(
+                    text,
+                    reply_markup=reply_markup,
+                )
+                return True
+            except Exception as plain_error:
+                if _is_noop_edit_error(plain_error):
+                    return True
+                logger.warning(
+                    "Thinking callback plain render failed",
+                    error=str(plain_error),
+                    action=action,
+                )
+                return False
+
     if action == "expand":
         full_text = "\n".join(cached["lines"])
 
@@ -1383,17 +1644,24 @@ async def handle_thinking_callback(
                 ]
             ]
         )
-        try:
-            await query.edit_message_text(
-                full_text,
-                parse_mode="Markdown",
-                reply_markup=collapse_keyboard,
-            )
-        except Exception as e:
-            logger.warning("Failed to expand thinking", error=str(e))
-            await query.edit_message_text(
-                "Failed to expand thinking process. Content may be too long."
-            )
+        if await _edit_with_markdown_fallback(
+            full_text,
+            reply_markup=collapse_keyboard,
+        ):
+            return
+
+        # Secondary fallback: stricter truncation for edge cases.
+        compact_text = _truncate_thinking(cached["lines"], max_chars=2400)
+        if await _edit_with_markdown_fallback(
+            compact_text,
+            reply_markup=collapse_keyboard,
+        ):
+            return
+
+        await query.edit_message_text(
+            "Unable to expand thinking details right now. "
+            "The content may be too long or the message has expired."
+        )
 
     elif action == "collapse":
         expand_keyboard = InlineKeyboardMarkup(
@@ -1406,11 +1674,12 @@ async def handle_thinking_callback(
                 ]
             ]
         )
-        await query.edit_message_text(
+        if await _edit_with_markdown_fallback(
             cached["summary"],
-            parse_mode="Markdown",
             reply_markup=expand_keyboard,
-        )
+        ):
+            return
+        await query.edit_message_text(cached["summary"], reply_markup=expand_keyboard)
 
     else:
         await query.edit_message_text("Unknown thinking action.")
@@ -1445,9 +1714,28 @@ def _format_file_size(size: int) -> str:
 def _escape_markdown(text: str) -> str:
     """Escape special markdown characters in text for Telegram."""
     # Escape characters that have special meaning in Telegram Markdown
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    special_chars = [
+        "_",
+        "*",
+        "[",
+        "]",
+        "(",
+        ")",
+        "~",
+        "`",
+        ">",
+        "#",
+        "+",
+        "-",
+        "=",
+        "|",
+        "{",
+        "}",
+        ".",
+        "!",
+    ]
     for char in special_chars:
-        text = text.replace(char, f'\\{char}')
+        text = text.replace(char, f"\\{char}")
     return text
 
 
@@ -1457,29 +1745,34 @@ async def handle_resume_callback(query, param, context):
     Callback data format: resume:<sub>:<token>
     Sub-actions:
     - p (project), s (session), f (force-confirm)
+    - n (start new session in selected project)
     - show_all, show_recent, cancel
     """
     user_id = query.from_user.id
     settings: Settings = context.bot_data["settings"]
-
-    from ...bot.resume_tokens import ResumeTokenManager
-    from ...claude.desktop_scanner import DesktopSessionScanner
-
-    token_mgr: ResumeTokenManager = context.bot_data.get(
-        "resume_token_manager"
-    )
-    scanner: DesktopSessionScanner = context.bot_data.get(
-        "desktop_scanner"
-    )
-
-    if not token_mgr or not scanner:
-        await query.edit_message_text(
-            "Session expired. Please run /resume again."
-        )
-        return
+    token_mgr = _get_or_create_resume_token_manager(context)
 
     # Handle non-token sub-actions first.
+    _, scope_state = _get_scope_state_for_query(query, context)
+    active_engine = get_active_cli_engine(scope_state)
+    show_sub = None
+    show_engine = None
     if param in {"show_all", "show_recent"}:
+        show_sub = param
+    elif param and param.startswith("show_all:"):
+        show_sub = "show_all"
+        show_engine = normalize_cli_engine(param.split(":", 1)[1])
+    elif param and param.startswith("show_recent:"):
+        show_sub = "show_recent"
+        show_engine = normalize_cli_engine(param.split(":", 1)[1])
+
+    if show_sub is not None:
+        target_engine = show_engine or active_engine
+        scanner = _get_or_create_resume_scanner(
+            context=context,
+            settings=settings,
+            engine=target_engine,
+        )
         await _resume_render_project_list(
             query=query,
             user_id=user_id,
@@ -1487,7 +1780,8 @@ async def handle_resume_callback(query, param, context):
             token_mgr=token_mgr,
             settings=settings,
             context=context,
-            show_all=(param == "show_all"),
+            show_all=(show_sub == "show_all"),
+            engine=target_engine,
         )
         return
 
@@ -1502,20 +1796,64 @@ async def handle_resume_callback(query, param, context):
         return
 
     sub, token = param.split(":", 1)
+    preview = token_mgr.resolve(
+        kind=sub,
+        user_id=user_id,
+        token=token,
+        consume=False,
+    )
+    target_engine = (
+        normalize_cli_engine((preview or {}).get("engine"))
+        if preview
+        else ENGINE_CLAUDE
+    )
+    scanner = _get_or_create_resume_scanner(
+        context=context,
+        settings=settings,
+        engine=target_engine,
+    )
 
     if sub == "p":
         await _resume_select_project(
-            query, user_id, token, token_mgr, scanner,
-            settings, context,
+            query,
+            user_id,
+            token,
+            token_mgr,
+            scanner,
+            settings,
+            context,
+            engine=target_engine,
         )
     elif sub == "s":
         await _resume_select_session(
-            query, user_id, token, token_mgr, scanner,
-            settings, context,
+            query,
+            user_id,
+            token,
+            token_mgr,
+            scanner,
+            settings,
+            context,
+            engine=target_engine,
         )
     elif sub == "f":
         await _resume_force_confirm(
-            query, user_id, token, token_mgr, settings, context,
+            query,
+            user_id,
+            token,
+            token_mgr,
+            settings,
+            context,
+            engine=target_engine,
+        )
+    elif sub == "n":
+        await _resume_start_new_session(
+            query,
+            user_id,
+            token,
+            token_mgr,
+            settings,
+            context,
+            engine=target_engine,
         )
     elif sub == "cancel":
         await query.edit_message_text("Resume cancelled.")
@@ -1534,14 +1872,16 @@ async def _resume_render_project_list(
     settings: Settings,
     context: ContextTypes.DEFAULT_TYPE,
     show_all: bool,
+    engine: str,
 ) -> None:
     """Render resume project selection in recent/all modes."""
     projects = await scanner.list_projects()
 
     if not projects:
+        engine_label = _resume_engine_label(engine)
         await query.edit_message_text(
-            "No desktop Claude Code sessions found.\n\n"
-            "Run /resume again after using Claude Code on desktop.",
+            f"No desktop {engine_label} sessions found.\n\n"
+            f"Run /resume again after using {engine_label} on desktop.",
             parse_mode="Markdown",
         )
         return
@@ -1555,6 +1895,8 @@ async def _resume_render_project_list(
         user_id=user_id,
         current_directory=current_dir,
         show_all=show_all,
+        payload_extra={"engine": engine},
+        engine=engine,
     )
     await query.edit_message_text(
         message_text,
@@ -1564,11 +1906,20 @@ async def _resume_render_project_list(
 
 
 async def _resume_select_project(
-    query, user_id, token, token_mgr, scanner, settings, context,
+    query,
+    user_id,
+    token,
+    token_mgr,
+    scanner,
+    settings,
+    context,
+    engine: str,
 ):
     """S1: User selected a project, show its sessions."""
     payload = token_mgr.resolve(
-        kind="p", user_id=user_id, token=token,
+        kind="p",
+        user_id=user_id,
+        token=token,
     )
     if payload is None:
         await query.edit_message_text(
@@ -1580,13 +1931,38 @@ async def _resume_select_project(
 
     project_cwd = Path(payload["cwd"])
     candidates = await scanner.list_sessions(project_cwd=project_cwd)
+    payload_engine_raw = payload.get("engine")
+    payload_engine = (
+        normalize_cli_engine(payload_engine_raw) if payload_engine_raw else engine
+    )
+
+    new_session_token = token_mgr.issue(
+        kind="n",
+        user_id=user_id,
+        payload={
+            "cwd": str(project_cwd),
+            "engine": payload_engine,
+        },
+    )
 
     if not candidates:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🆕 Start New Session Here",
+                        callback_data=f"resume:n:{new_session_token}",
+                    )
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="resume:cancel")],
+            ]
+        )
         await query.edit_message_text(
             f"No sessions found for project:\n"
             f"`{project_cwd.name}`\n\n"
-            f"Run /resume to try another project.",
+            f"Start a fresh session in this directory or run /resume again.",
             parse_mode="Markdown",
+            reply_markup=keyboard,
         )
         return
 
@@ -1606,18 +1982,33 @@ async def _resume_select_project(
                 "cwd": str(project_cwd),
                 "session_id": c.session_id,
                 "is_active": c.is_probably_active,
+                "engine": payload_engine,
             },
         )
         keyboard.append(
-            [InlineKeyboardButton(
-                label, callback_data=f"resume:s:{tok}",
-            )]
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"resume:s:{tok}",
+                )
+            ]
         )
 
     keyboard.append(
-        [InlineKeyboardButton(
-            "❌ Cancel", callback_data="resume:cancel",
-        )]
+        [
+            InlineKeyboardButton(
+                "🆕 Start New Session Here",
+                callback_data=f"resume:n:{new_session_token}",
+            )
+        ]
+    )
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "❌ Cancel",
+                callback_data="resume:cancel",
+            )
+        ]
     )
 
     try:
@@ -1627,18 +2018,27 @@ async def _resume_select_project(
 
     await query.edit_message_text(
         f"**Sessions in** `{rel}`\n\n"
-        f"Select a session to resume:",
+        f"Select a session to resume, or tap *Start New Session Here*:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 async def _resume_select_session(
-    query, user_id, token, token_mgr, scanner, settings, context,
+    query,
+    user_id,
+    token,
+    token_mgr,
+    scanner,
+    settings,
+    context,
+    engine: str,
 ):
     """S2: User selected a session. Adopt it or ask for force-confirm."""
     payload = token_mgr.resolve(
-        kind="s", user_id=user_id, token=token,
+        kind="s",
+        user_id=user_id,
+        token=token,
     )
     if payload is None:
         await query.edit_message_text(
@@ -1651,6 +2051,10 @@ async def _resume_select_session(
     project_cwd = Path(payload["cwd"])
     session_id = payload["session_id"]
     is_active = payload.get("is_active", False)
+    payload_engine_raw = payload.get("engine")
+    payload_engine = (
+        normalize_cli_engine(payload_engine_raw) if payload_engine_raw else engine
+    )
 
     # If session appears active, ask for confirmation
     if is_active:
@@ -1660,6 +2064,7 @@ async def _resume_select_session(
             payload={
                 "cwd": str(project_cwd),
                 "session_id": session_id,
+                "engine": payload_engine,
             },
         )
         keyboard = [
@@ -1689,16 +2094,30 @@ async def _resume_select_session(
 
     # Not active -> adopt directly
     await _do_adopt_session(
-        query, user_id, project_cwd, session_id, settings, context,
+        query,
+        user_id,
+        project_cwd,
+        session_id,
+        settings,
+        context,
+        engine=payload_engine,
     )
 
 
 async def _resume_force_confirm(
-    query, user_id, token, token_mgr, settings, context,
+    query,
+    user_id,
+    token,
+    token_mgr,
+    settings,
+    context,
+    engine: str,
 ):
     """S3: User confirmed force-resume of an active session."""
     payload = token_mgr.resolve(
-        kind="f", user_id=user_id, token=token,
+        kind="f",
+        user_id=user_id,
+        token=token,
     )
     if payload is None:
         await query.edit_message_text(
@@ -1710,14 +2129,127 @@ async def _resume_force_confirm(
 
     project_cwd = Path(payload["cwd"])
     session_id = payload["session_id"]
+    payload_engine_raw = payload.get("engine")
+    payload_engine = (
+        normalize_cli_engine(payload_engine_raw) if payload_engine_raw else engine
+    )
 
     await _do_adopt_session(
-        query, user_id, project_cwd, session_id, settings, context,
+        query,
+        user_id,
+        project_cwd,
+        session_id,
+        settings,
+        context,
+        engine=payload_engine,
     )
 
 
+async def _resume_start_new_session(
+    query,
+    user_id,
+    token,
+    token_mgr,
+    settings,
+    context,
+    engine: str,
+):
+    """Start a fresh session in selected project without resuming old sessions."""
+    payload = token_mgr.resolve(
+        kind="n",
+        user_id=user_id,
+        token=token,
+    )
+    if payload is None:
+        await query.edit_message_text(
+            "Token expired or invalid. Please run /resume again."
+        )
+        return
+
+    project_cwd = Path(payload["cwd"])
+    payload_engine_raw = payload.get("engine")
+    payload_engine = (
+        normalize_cli_engine(payload_engine_raw) if payload_engine_raw else engine
+    )
+
+    try:
+        resolved = project_cwd.resolve()
+        if not resolved.is_relative_to(settings.approved_directory.resolve()):
+            await query.edit_message_text(
+                "Path is outside the approved directory. Cannot start a new session."
+            )
+            return
+        project_cwd = resolved
+    except (OSError, ValueError):
+        await query.edit_message_text("Invalid project path. Please run /resume again.")
+        return
+
+    _, scope_state = _get_scope_state_for_query(query, context)
+    old_session_id = scope_state.get("claude_session_id")
+
+    set_active_cli_engine(scope_state, payload_engine)
+    scope_state["current_directory"] = project_cwd
+    scope_state["claude_session_id"] = None
+    scope_state["session_started"] = True
+    scope_state["force_new_session"] = True
+
+    if old_session_id:
+        permission_manager = context.bot_data.get("permission_manager")
+        if permission_manager:
+            permission_manager.clear_session(old_session_id)
+
+    await _sync_chat_menu_for_engine(
+        context=context,
+        chat_id=_get_query_chat_id(query),
+        engine=payload_engine,
+    )
+
+    try:
+        rel = project_cwd.relative_to(settings.approved_directory)
+    except ValueError:
+        rel = project_cwd.name
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "Start Coding",
+                callback_data="action:start_coding",
+            ),
+            InlineKeyboardButton(
+                "Context",
+                callback_data="action:context",
+            ),
+        ]
+    ]
+
+    await query.edit_message_text(
+        f"**New Session Ready**\n\n"
+        f"Engine: `{payload_engine}`\n"
+        f"Directory: `{rel}/`\n\n"
+        f"Old session binding was cleared.\n"
+        f"Send a message to start a fresh session now.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    if audit_logger:
+        await audit_logger.log_command(
+            user_id=user_id,
+            command="resume_new",
+            args=[str(rel)],
+            success=True,
+        )
+
+
 async def _do_adopt_session(
-    query, user_id, project_cwd, session_id, settings, context,
+    query,
+    user_id,
+    project_cwd,
+    session_id,
+    settings,
+    context,
+    engine: str,
 ):
     """S4: Actually adopt the session and switch cwd."""
     # Defensive: verify project_cwd is under approved_directory
@@ -1730,39 +2262,51 @@ async def _do_adopt_session(
             return
         project_cwd = resolved
     except (OSError, ValueError):
-        await query.edit_message_text(
-            "Invalid project path. Please run /resume again."
-        )
+        await query.edit_message_text("Invalid project path. Please run /resume again.")
         return
 
-    claude_integration: ClaudeIntegration = context.bot_data.get(
-        "claude_integration"
+    integrations = context.bot_data.get("cli_integrations") or {}
+    cli_integration: ClaudeIntegration = integrations.get(engine) or integrations.get(
+        ENGINE_CLAUDE
     )
-    if not claude_integration or not claude_integration.session_manager:
+    if cli_integration is None:
+        cli_integration = context.bot_data.get("claude_integration")
+
+    if not cli_integration or not cli_integration.session_manager:
+        engine_label = _resume_engine_label(engine)
         await query.edit_message_text(
-            "Claude integration not available. Cannot adopt session."
+            f"{engine_label} integration not available. Cannot adopt session."
         )
         return
 
     try:
+        engine_label = _resume_engine_label(engine)
         await query.edit_message_text(
-            f"Adopting session `{session_id[:8]}...`\n"
+            f"Adopting {engine_label} session `{session_id[:8]}...`\n"
             f"Please wait...",
             parse_mode="Markdown",
         )
 
-        adopted = (
-            await claude_integration.session_manager.adopt_external_session(
-                user_id=user_id,
-                project_path=project_cwd,
-                external_session_id=session_id,
-            )
+        adopted = await cli_integration.session_manager.adopt_external_session(
+            user_id=user_id,
+            project_path=project_cwd,
+            external_session_id=session_id,
         )
 
         # Switch user's working directory and session
         _, scope_state = _get_scope_state_for_query(query, context)
+        set_active_cli_engine(scope_state, engine)
         scope_state["current_directory"] = project_cwd
         scope_state["claude_session_id"] = adopted.session_id
+        message_obj = getattr(query, "message", None)
+        chat_id = getattr(message_obj, "chat_id", None)
+        if not isinstance(chat_id, int):
+            chat_id = getattr(getattr(message_obj, "chat", None), "id", None)
+        await _sync_chat_menu_for_engine(
+            context=context,
+            chat_id=chat_id,
+            engine=engine,
+        )
 
         try:
             rel = project_cwd.relative_to(settings.approved_directory)
@@ -1776,14 +2320,15 @@ async def _do_adopt_session(
                     callback_data="action:start_coding",
                 ),
                 InlineKeyboardButton(
-                    "Status",
-                    callback_data="action:status",
+                    "Context",
+                    callback_data="action:context",
                 ),
             ],
         ]
 
         await query.edit_message_text(
             f"**Session Resumed**\n\n"
+            f"Engine: `{engine}`\n"
             f"Session: `{adopted.session_id[:8]}...`\n"
             f"Directory: `{rel}/`\n\n"
             f"Send a message to continue where you left off.",
@@ -1805,6 +2350,7 @@ async def _do_adopt_session(
             user_id=user_id,
             session_id=session_id,
             project=str(project_cwd),
+            engine=engine,
         )
 
     except Exception as e:

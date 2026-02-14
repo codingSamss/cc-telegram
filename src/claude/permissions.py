@@ -2,8 +2,9 @@
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine, Dict, Optional, Set
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any, Callable, Coroutine, Dict, Optional, Protocol, Set
 
 import structlog
 
@@ -28,14 +29,69 @@ class PendingPermission:
     session_id: str
 
 
+class ApprovalRequestStore(Protocol):
+    """Storage contract for approval request persistence."""
+
+    async def create_request(
+        self,
+        *,
+        request_id: str,
+        user_id: int,
+        session_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        expires_at: datetime,
+    ) -> None: ...
+
+    async def resolve_request(
+        self,
+        *,
+        request_id: str,
+        status: str,
+        decision: Optional[str],
+        resolved_at: datetime,
+    ) -> bool: ...
+
+    async def expire_all_pending(self, *, resolved_at: datetime) -> int: ...
+
+
 class PermissionManager:
     """Manage tool permission requests bridging SDK callbacks to Telegram buttons."""
 
-    def __init__(self, timeout_seconds: int = 120):
+    def __init__(
+        self,
+        timeout_seconds: int = 120,
+        approval_repository: Optional[ApprovalRequestStore] = None,
+    ):
         self.timeout_seconds = timeout_seconds
         self.pending_requests: Dict[str, PendingPermission] = {}
         # Tools allowed for the rest of the session (per session_id)
         self.session_allowed_tools: Dict[str, Set[str]] = {}
+        self.approval_repository = approval_repository
+        # Cache latest resolution per request for better callback UX when
+        # users click stale/expired permission buttons.
+        self.request_resolution_cache: Dict[str, Dict[str, Any]] = {}
+        self.max_resolution_cache = 512
+
+    async def initialize(self) -> None:
+        """Run startup recovery for persisted pending approvals."""
+        if not self.approval_repository:
+            return
+
+        try:
+            expired_count = await self.approval_repository.expire_all_pending(
+                resolved_at=datetime.utcnow()
+            )
+            if expired_count > 0:
+                logger.info(
+                    "Expired stale pending approval requests on startup",
+                    count=expired_count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to recover persisted approval requests on startup",
+                error=str(exc),
+            )
 
     async def request_permission(
         self,
@@ -80,15 +136,19 @@ class PermissionManager:
         )
 
         try:
-            # Send Telegram buttons to user
-            await send_buttons_callback(
-                request_id, tool_name, tool_input, session_id
+            await self._persist_pending_request(
+                request_id=request_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                session_id=session_id,
             )
 
+            # Send Telegram buttons to user
+            await send_buttons_callback(request_id, tool_name, tool_input, session_id)
+
             # Wait for user response with timeout
-            result = await asyncio.wait_for(
-                future, timeout=self.timeout_seconds
-            )
+            result = await asyncio.wait_for(future, timeout=self.timeout_seconds)
             return result
 
         except asyncio.TimeoutError:
@@ -96,6 +156,60 @@ class PermissionManager:
                 "Permission request timed out",
                 request_id=request_id,
                 tool_name=tool_name,
+            )
+            self._record_resolution_snapshot(
+                request_id=request_id,
+                status="expired",
+                decision=None,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            await self._persist_resolution(
+                request_id=request_id,
+                status="expired",
+                decision=None,
+            )
+            return False
+
+        except asyncio.CancelledError:
+            self._record_resolution_snapshot(
+                request_id=request_id,
+                status="expired",
+                decision=None,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            await self._persist_resolution(
+                request_id=request_id,
+                status="expired",
+                decision=None,
+            )
+            raise
+
+        except Exception as exc:
+            logger.error(
+                "Permission request failed before user decision",
+                request_id=request_id,
+                tool_name=tool_name,
+                error=str(exc),
+            )
+            self._record_resolution_snapshot(
+                request_id=request_id,
+                status="denied",
+                decision="deny",
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            await self._persist_resolution(
+                request_id=request_id,
+                status="denied",
+                decision="deny",
             )
             return False
 
@@ -131,16 +245,45 @@ class PermissionManager:
         if pending.future.done():
             return False
 
+        allowed = False
+        status = "denied"
+        resolved_decision: Optional[str]
+
         if decision == "allow":
-            pending.future.set_result(True)
+            allowed = True
+            status = "approved"
+            resolved_decision = "allow"
         elif decision == "allow_all":
             # Allow this tool for the rest of the session
-            self._add_session_allowed(
-                pending.session_id, pending.tool_name
-            )
-            pending.future.set_result(True)
+            self._add_session_allowed(pending.session_id, pending.tool_name)
+            allowed = True
+            status = "approved"
+            resolved_decision = "allow_all"
+        elif decision == "deny":
+            resolved_decision = "deny"
         else:
-            pending.future.set_result(False)
+            logger.warning(
+                "Permission decision not recognized, coercing to deny",
+                request_id=request_id,
+                decision=decision,
+            )
+            resolved_decision = "deny"
+
+        pending.future.set_result(allowed)
+        self._record_resolution_snapshot(
+            request_id=request_id,
+            status=status,
+            decision=resolved_decision,
+            tool_name=pending.tool_name,
+            tool_input=pending.tool_input,
+            user_id=pending.user_id,
+            session_id=pending.session_id,
+        )
+        self._schedule_persist_resolution(
+            request_id=request_id,
+            status=status,
+            decision=resolved_decision,
+        )
 
         logger.info(
             "Permission resolved",
@@ -163,5 +306,132 @@ class PermissionManager:
         """Clear session-level permissions."""
         self.session_allowed_tools.pop(session_id, None)
 
+    def get_pending_request(
+        self, request_id: str, user_id: Optional[int] = None
+    ) -> Optional[PendingPermission]:
+        """Return pending approval request for diagnostics/UI rendering."""
+        pending = self.pending_requests.get(request_id)
+        if not pending:
+            return None
+        if user_id is not None and pending.user_id != user_id:
+            return None
+        return pending
+
     def get_pending_count(self) -> int:
         return len(self.pending_requests)
+
+    def get_resolution_snapshot(
+        self,
+        request_id: str,
+        user_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return cached resolution metadata for user-facing stale callbacks."""
+        snapshot = self.request_resolution_cache.get(request_id)
+        if not snapshot:
+            return None
+
+        if user_id is not None and snapshot.get("user_id") != user_id:
+            return None
+
+        return dict(snapshot)
+
+    def _record_resolution_snapshot(
+        self,
+        *,
+        request_id: str,
+        status: str,
+        decision: Optional[str],
+        tool_name: Optional[str],
+        tool_input: Optional[Dict[str, Any]],
+        user_id: int,
+        session_id: str,
+    ) -> None:
+        """Store latest resolution metadata for stale button explanations."""
+        self.request_resolution_cache[request_id] = {
+            "status": status,
+            "decision": decision,
+            "tool_name": tool_name,
+            "tool_input": dict(tool_input or {}),
+            "user_id": user_id,
+            "session_id": session_id,
+            "resolved_at": datetime.utcnow().isoformat(),
+        }
+        while len(self.request_resolution_cache) > self.max_resolution_cache:
+            oldest = next(iter(self.request_resolution_cache))
+            self.request_resolution_cache.pop(oldest, None)
+
+    async def _persist_pending_request(
+        self,
+        *,
+        request_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        user_id: int,
+        session_id: str,
+    ) -> None:
+        """Persist pending approval request state."""
+        if not self.approval_repository:
+            return
+
+        try:
+            await self.approval_repository.create_request(
+                request_id=request_id,
+                user_id=user_id,
+                session_id=session_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                expires_at=datetime.utcnow() + timedelta(seconds=self.timeout_seconds),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist pending approval request",
+                request_id=request_id,
+                tool_name=tool_name,
+                error=str(exc),
+            )
+
+    async def _persist_resolution(
+        self,
+        *,
+        request_id: str,
+        status: str,
+        decision: Optional[str],
+    ) -> None:
+        """Persist approval request transition."""
+        if not self.approval_repository:
+            return
+
+        try:
+            await self.approval_repository.resolve_request(
+                request_id=request_id,
+                status=status,
+                decision=decision,
+                resolved_at=datetime.utcnow(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist approval request resolution",
+                request_id=request_id,
+                status=status,
+                decision=decision,
+                error=str(exc),
+            )
+
+    def _schedule_persist_resolution(
+        self,
+        *,
+        request_id: str,
+        status: str,
+        decision: Optional[str],
+    ) -> None:
+        """Persist resolution asynchronously from sync callback context."""
+        if not self.approval_repository:
+            return
+
+        asyncio.create_task(
+            self._persist_resolution(
+                request_id=request_id,
+                status=status,
+                decision=decision,
+            )
+        )

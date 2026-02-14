@@ -8,7 +8,7 @@ Features:
 
 import json
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import structlog
 
@@ -17,6 +17,7 @@ from .models import (
     AuditLogModel,
     CostTrackingModel,
     MessageModel,
+    SessionEventModel,
     SessionModel,
     ToolUsageModel,
     UserModel,
@@ -448,6 +449,212 @@ class AuditLogRepository:
             )
             rows = await cursor.fetchall()
             return [AuditLogModel.from_row(row) for row in rows]
+
+    async def get_events(
+        self,
+        user_id: Optional[int] = None,
+        event_type: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: int = 100,
+    ) -> List[AuditLogModel]:
+        """Get audit events with optional filters."""
+        query = "SELECT * FROM audit_log"
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+
+        if event_type is not None:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+
+        if start_time is not None:
+            conditions.append("timestamp >= ?")
+            params.append(start_time)
+
+        if end_time is not None:
+            conditions.append("timestamp <= ?")
+            params.append(end_time)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+            return [AuditLogModel.from_row(row) for row in rows]
+
+    async def get_security_violations(
+        self,
+        user_id: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[AuditLogModel]:
+        """Get security violation events."""
+        return await self.get_events(
+            user_id=user_id,
+            event_type="security_violation",
+            limit=limit,
+        )
+
+
+class SessionEventRepository:
+    """Session event data access."""
+
+    def __init__(self, db_manager: DatabaseManager):
+        """Initialize repository."""
+        self.db = db_manager
+
+    async def save_event(self, event: SessionEventModel) -> int:
+        """Save one session event and return ID."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT INTO session_events
+                (session_id, event_type, event_data, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    event.session_id,
+                    event.event_type,
+                    json.dumps(event.event_data or {}),
+                    event.created_at,
+                ),
+            )
+            await conn.commit()
+            return cursor.lastrowid
+
+    async def save_events(self, events: List[SessionEventModel]) -> int:
+        """Save multiple session events and return persisted count."""
+        if not events:
+            return 0
+
+        rows = [
+            (
+                event.session_id,
+                event.event_type,
+                json.dumps(event.event_data or {}),
+                event.created_at,
+            )
+            for event in events
+        ]
+
+        async with self.db.get_connection() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO session_events
+                (session_id, event_type, event_data, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+            await conn.commit()
+
+        return len(rows)
+
+    async def get_session_events(
+        self,
+        session_id: str,
+        event_types: Optional[List[str]] = None,
+        limit: int = 200,
+    ) -> List[SessionEventModel]:
+        """Get session events ordered by newest first."""
+        query = "SELECT * FROM session_events WHERE session_id = ?"
+        params: List[Any] = [session_id]
+
+        if event_types:
+            placeholders = ", ".join(["?"] * len(event_types))
+            query += f" AND event_type IN ({placeholders})"
+            params.extend(event_types)
+
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+            return [SessionEventModel.from_row(row) for row in rows]
+
+
+class ApprovalRequestRepository:
+    """Approval request persistence for permission workflow."""
+
+    def __init__(self, db_manager: DatabaseManager):
+        """Initialize repository."""
+        self.db = db_manager
+
+    async def create_request(
+        self,
+        *,
+        request_id: str,
+        user_id: int,
+        session_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        expires_at: datetime,
+    ) -> None:
+        """Create a pending approval request."""
+        async with self.db.get_connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO approval_requests
+                (request_id, user_id, session_id, tool_name, tool_input, status, expires_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    request_id,
+                    user_id,
+                    session_id,
+                    tool_name,
+                    json.dumps(tool_input) if tool_input else None,
+                    expires_at,
+                ),
+            )
+            await conn.commit()
+
+    async def resolve_request(
+        self,
+        *,
+        request_id: str,
+        status: str,
+        decision: Optional[str],
+        resolved_at: datetime,
+    ) -> bool:
+        """Resolve a pending request into approved/denied/expired.
+
+        Returns True when the request transitioned from pending to target status.
+        Returns False when request was not found or already resolved.
+        """
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                UPDATE approval_requests
+                SET status = ?, decision = ?, resolved_at = ?
+                WHERE request_id = ? AND status = 'pending'
+                """,
+                (status, decision, resolved_at, request_id),
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def expire_all_pending(self, *, resolved_at: datetime) -> int:
+        """Expire all pending requests on startup recovery."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                UPDATE approval_requests
+                SET status = 'expired', decision = NULL, resolved_at = ?
+                WHERE status = 'pending'
+                """,
+                (resolved_at,),
+            )
+            await conn.commit()
+            return cursor.rowcount
 
 
 class CostTrackingRepository:

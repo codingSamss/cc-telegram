@@ -7,13 +7,14 @@ from telegram import Update
 
 SCOPE_STATE_CONTAINER_KEY = "scope_state"
 
-_SCOPED_SESSION_KEYS = {
+# Only these keys may be inherited from legacy user_data into a new scope.
+# Session-identity keys (claude_session_id, force_new_session, session_started,
+# last_message) are deliberately excluded so that each topic/thread starts with
+# a fresh, independent Claude session.  Using a whitelist ensures that any
+# future scoped key defaults to "not inherited", which is the safer default.
+_LEGACY_SEED_INHERIT_KEYS = {
     "current_directory",
-    "claude_session_id",
     "claude_model",
-    "force_new_session",
-    "session_started",
-    "last_message",
 }
 
 
@@ -73,13 +74,27 @@ def _seed_state_from_legacy(
     state: dict[str, Any],
     default_directory: Path,
 ) -> None:
-    """Seed newly created scoped state from legacy root keys."""
-    for key in _SCOPED_SESSION_KEYS:
+    """Seed newly created scoped state from legacy root keys.
+
+    Only configuration-like keys (current_directory, claude_model) are
+    inherited.  Session-identity keys (claude_session_id, etc.) are
+    intentionally excluded so that each topic/thread starts with a fresh,
+    independent Claude session.
+
+    We also set ``force_new_session = True`` so that the very first command
+    in this scope does NOT trigger the facade's auto-resume logic (which
+    matches by user + directory and would pull in another topic's session).
+    The flag is consumed (popped) by the message handler on first use.
+    """
+    for key in _LEGACY_SEED_INHERIT_KEYS:
         if key in user_data and key not in state:
             state[key] = user_data[key]
 
     if "current_directory" not in state:
         state["current_directory"] = default_directory
+
+    # Prevent auto-resume from binding another topic's session on first use.
+    state.setdefault("force_new_session", True)
 
 
 def get_scope_state(

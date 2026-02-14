@@ -230,6 +230,54 @@ class DatabaseManager:
                 GROUP BY u.user_id;
                 """,
             ),
+            (
+                3,
+                """
+                -- Approval requests for tool permission workflow persistence
+                CREATE TABLE IF NOT EXISTS approval_requests (
+                    request_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    tool_input JSON,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
+                    decision TEXT CHECK (decision IN ('allow', 'allow_all', 'deny') OR decision IS NULL),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    resolved_at TIMESTAMP,
+                    expires_at TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_approval_requests_user_id
+                    ON approval_requests(user_id);
+                CREATE INDEX IF NOT EXISTS idx_approval_requests_session_id
+                    ON approval_requests(session_id);
+                CREATE INDEX IF NOT EXISTS idx_approval_requests_status
+                    ON approval_requests(status);
+                CREATE INDEX IF NOT EXISTS idx_approval_requests_created_at
+                    ON approval_requests(created_at);
+                """,
+            ),
+            (
+                4,
+                """
+                -- Session events for semantic timeline replay
+                CREATE TABLE IF NOT EXISTS session_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    event_data JSON NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_session_events_session
+                    ON session_events(session_id);
+                CREATE INDEX IF NOT EXISTS idx_session_events_type
+                    ON session_events(event_type);
+                CREATE INDEX IF NOT EXISTS idx_session_events_created_at
+                    ON session_events(created_at);
+                """,
+            ),
         ]
 
     async def _init_pool(self):

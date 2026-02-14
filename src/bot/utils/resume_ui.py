@@ -72,6 +72,8 @@ def build_resume_project_selector(
     user_id: int,
     current_directory: Optional[Path] = None,
     show_all: bool = False,
+    payload_extra: Optional[dict] = None,
+    engine: Optional[str] = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build message text and keyboard for /resume project selection."""
     project_list = [p.resolve() for p in projects]
@@ -90,9 +92,7 @@ def build_resume_project_selector(
         )
 
     # Hide approved root when there are other meaningful project options.
-    non_root = [
-        p for p in project_list if _relative_path_text(p, approved_root) != "."
-    ]
+    non_root = [p for p in project_list if _relative_path_text(p, approved_root) != "."]
     display_pool = non_root if non_root else project_list
 
     if show_all:
@@ -108,7 +108,10 @@ def build_resume_project_selector(
         token = token_mgr.issue(
             kind="p",
             user_id=user_id,
-            payload={"cwd": str(proj)},
+            payload={
+                "cwd": str(proj),
+                **(payload_extra or {}),
+            },
         )
         keyboard.append(
             [InlineKeyboardButton(label, callback_data=f"resume:p:{token}")]
@@ -121,7 +124,11 @@ def build_resume_project_selector(
                 [
                     InlineKeyboardButton(
                         "⬅️ Show Recent Only",
-                        callback_data="resume:show_recent",
+                        callback_data=(
+                            f"resume:show_recent:{engine}"
+                            if engine
+                            else "resume:show_recent"
+                        ),
                     )
                 ]
             )
@@ -130,14 +137,14 @@ def build_resume_project_selector(
                 [
                     InlineKeyboardButton(
                         f"📚 Show All Projects ({total})",
-                        callback_data="resume:show_all",
+                        callback_data=(
+                            f"resume:show_all:{engine}" if engine else "resume:show_all"
+                        ),
                     )
                 ]
             )
 
-    keyboard.append(
-        [InlineKeyboardButton("❌ Cancel", callback_data="resume:cancel")]
-    )
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="resume:cancel")])
 
     mode_text = (
         f"Showing all `{total}` projects."

@@ -1,7 +1,12 @@
 """Tests for Claude subprocess integration parsing behavior."""
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
+
+from src.claude.exceptions import ClaudeProcessError
 from src.claude.integration import ClaudeProcessManager
 from src.config.settings import Settings
 
@@ -56,3 +61,256 @@ def test_extract_local_command_output_ignores_plain_user_text(tmp_path):
     extracted = manager._extract_local_command_output("hello world")
 
     assert extracted == ""
+
+
+def test_build_command_for_codex_exec_uses_codex_flags(tmp_path, monkeypatch):
+    """Codex CLI should use exec/json flags instead of Claude-only options."""
+    manager = _build_manager(tmp_path)
+    monkeypatch.setattr(
+        "src.claude.sdk_integration.find_claude_cli",
+        lambda _: "/usr/local/bin/codex",
+    )
+
+    cmd = manager._build_command(
+        prompt="hello codex",
+        session_id=None,
+        continue_session=False,
+    )
+
+    assert cmd[:4] == [
+        "/usr/local/bin/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+    ]
+    assert cmd[-1] == "hello codex"
+    assert "--output-format" not in cmd
+    assert "--allowedTools" not in cmd
+
+
+def test_build_command_for_codex_exec_includes_image_flags(tmp_path, monkeypatch):
+    """Codex CLI should map images[*].file_path to repeated --image options."""
+    manager = _build_manager(tmp_path)
+    monkeypatch.setattr(
+        "src.claude.sdk_integration.find_claude_cli",
+        lambda _: "/usr/local/bin/codex",
+    )
+
+    cmd = manager._build_command(
+        prompt="分析这张图",
+        session_id=None,
+        continue_session=False,
+        images=[
+            {"file_path": "/tmp/a.png"},
+            {"file_path": "/tmp/b.jpg"},
+        ],
+    )
+
+    assert cmd == [
+        "/usr/local/bin/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--image",
+        "/tmp/a.png",
+        "--image",
+        "/tmp/b.jpg",
+        "分析这张图",
+    ]
+
+
+def test_build_command_for_codex_resume_uses_resume_subcommand(tmp_path, monkeypatch):
+    """Codex continuation should use exec resume with session ID and prompt."""
+    manager = _build_manager(tmp_path)
+    monkeypatch.setattr(
+        "src.claude.sdk_integration.find_claude_cli",
+        lambda _: "/usr/local/bin/codex",
+    )
+
+    cmd = manager._build_command(
+        prompt="继续",
+        session_id="thread-123",
+        continue_session=True,
+        model="gpt-5",
+    )
+
+    assert cmd == [
+        "/usr/local/bin/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--model",
+        "gpt-5",
+        "resume",
+        "thread-123",
+        "继续",
+    ]
+
+
+def test_parse_result_supports_codex_turn_completed(tmp_path):
+    """Codex turn.completed event should map to unified response fields."""
+    manager = _build_manager(tmp_path)
+    result = {
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 120,
+            "cached_input_tokens": 40,
+            "output_tokens": 15,
+        },
+    }
+    messages = [
+        {"type": "thread.started", "thread_id": "019c-test-thread"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "中间回复"},
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "/bin/zsh -lc pwd",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "最终回复"},
+        },
+    ]
+
+    response = manager._parse_result(result, messages)
+
+    assert response.session_id == "019c-test-thread"
+    assert response.content == "最终回复"
+    assert response.model_usage == result["usage"]
+    assert response.num_turns == 1
+    assert response.tools_used[0]["name"] == "Bash"
+    assert response.tools_used[0]["exit_code"] == 0
+
+
+def test_parse_stream_message_supports_codex_agent_message(tmp_path):
+    """Codex item.completed agent_message should stream as assistant update."""
+    manager = _build_manager(tmp_path)
+    update = manager._parse_stream_message(
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "ok"},
+        }
+    )
+
+    assert update is not None
+    assert update.type == "assistant"
+    assert update.content == "ok"
+    assert update.metadata and update.metadata.get("engine") == "codex"
+
+
+def test_parse_stream_message_condenses_codex_reasoning(tmp_path):
+    """Codex reasoning should be condensed to avoid noisy markdown artifacts."""
+    manager = _build_manager(tmp_path)
+    update = manager._parse_stream_message(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "reasoning",
+                "text": "**Planning code review and tests**\n\n"
+                "I will inspect handlers and test files next.",
+            },
+        }
+    )
+
+    assert update is not None
+    assert update.type == "progress"
+    assert update.content == "Planning code review and tests"
+    assert update.metadata and update.metadata.get("engine") == "codex"
+
+
+def test_parse_stream_message_codex_command_execution_keeps_status_metadata(tmp_path):
+    """Codex command execution should preserve structured metadata for renderer."""
+    manager = _build_manager(tmp_path)
+    update = manager._parse_stream_message(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "status": "in_progress",
+                "command": "/bin/zsh -lc 'pwd'",
+                "exit_code": None,
+            },
+        }
+    )
+
+    assert update is not None
+    assert update.type == "progress"
+    assert update.content == "/bin/zsh -lc 'pwd'"
+    assert update.metadata and update.metadata.get("status") == "in_progress"
+    assert update.metadata and update.metadata.get("engine") == "codex"
+
+
+def test_parse_result_supports_codex_turn_failed(tmp_path):
+    """Codex turn.failed event should map to a unified error response."""
+    manager = _build_manager(tmp_path)
+    response = manager._parse_result(
+        {
+            "type": "turn.failed",
+            "error": {"message": "Model 'sonnet' is not available"},
+            "usage": {"input_tokens": 3},
+        },
+        [
+            {"type": "thread.started", "thread_id": "019c-thread-failed"},
+            {"type": "error", "message": "fallback error"},
+        ],
+    )
+
+    assert response.is_error is True
+    assert response.error_type == "turn.failed"
+    assert response.session_id == "019c-thread-failed"
+    assert "not available" in response.content
+
+
+def test_parse_stream_message_supports_codex_turn_failed(tmp_path):
+    """Codex turn.failed should be streamed as error update."""
+    manager = _build_manager(tmp_path)
+    update = manager._parse_stream_message(
+        {
+            "type": "turn.failed",
+            "error": {"message": "invalid model"},
+        }
+    )
+
+    assert update is not None
+    assert update.type == "error"
+    assert update.content == "invalid model"
+    assert update.metadata and update.metadata.get("engine") == "codex"
+
+
+@pytest.mark.asyncio
+async def test_handle_process_output_raises_codex_turn_failed_error(
+    tmp_path, monkeypatch
+):
+    """Codex turn.failed should return real error instead of missing-result parsing error."""
+    manager = _build_manager(tmp_path)
+    lines = [
+        '{"type":"thread.started","thread_id":"019c-thread"}',
+        '{"type":"turn.failed","error":{"message":"unexpected model"}}',
+    ]
+
+    async def _fake_stream(_):
+        for line in lines:
+            yield line
+
+    process = SimpleNamespace(
+        stdout=object(),
+        stderr=SimpleNamespace(read=AsyncMock(return_value=b"")),
+        wait=AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(manager, "_read_stream_bounded", _fake_stream)
+
+    with pytest.raises(ClaudeProcessError) as exc_info:
+        await manager._handle_process_output(
+            process,
+            stream_callback=None,
+            cli_kind="codex",
+        )
+
+    assert "unexpected model" in str(exc_info.value)
