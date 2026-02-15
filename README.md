@@ -1,6 +1,6 @@
 # CLI TG
 
-通过 Telegram Bot 远程控制本地机器上运行的 CLI 编码智能体（支持 Claude、Codex 及未来的 CLI 引擎），实现手机端下达指令、查看结果的工作流。
+Telegram Bot for Claude Code - 通过 Telegram 远程操控 Claude Code，支持多会话、图片分析、MCP 集成、流式输出，并规划与 Codex/其他 CLI 引擎的兼容。
 
 基于 Python，使用 `python-telegram-bot` (Polling 模式) + `claude-agent-sdk`，无需 Cloudflare Tunnel、tmux 等外部依赖。启动即用。
 
