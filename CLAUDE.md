@@ -28,10 +28,9 @@ poetry run mypy src
 ```
 
 ## 手动重启服务（macOS）
-1. `pkill -f cli-tg` 或上一次运行的进程名（例如 `claude-telegram-bot`），确认旧实例已退出。
-2. `cd /Users/suqi3/PycharmProjects/cli-tg && poetry run claude-telegram-bot`，在新的 shell/`tmux` 窗口中启动 bot。
-3. 如果需要后台运行，可使用 `tmux`/`screen` 或把命令包在一个 `while true; do ...; done` 的脚本里。
-4. 每次代码修改后你可重复上述步骤代替 systemd 重启，让 Telegram 端迅速跟上最新版本。
+1. `./scripts/restart-bot.sh` 会先 `pkill -f cli-tg`，再执行 `poetry run claude-telegram-bot`，把新版本跑起来。
+2. 在 `tmux`/`screen` 中运行脚本能让服务保持在后台，或者加 `nohup`/`setsid` 以脱离当前终端。
+3. 每次我在 TG 上修改后直接再执行一次脚本就相当于重新启动服务，后续 Codex/Claude 改动能立刻生效。
 
 ## 架构
 
