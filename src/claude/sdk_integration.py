@@ -170,10 +170,18 @@ class StreamUpdate:
 class ClaudeSDKManager:
     """Manage Claude Code SDK integration."""
 
+    @staticmethod
+    def _sanitize_runtime_env() -> None:
+        """Strip env flags that make Claude CLI think it's nested inside itself."""
+        removed = os.environ.pop("CLAUDECODE", None)
+        if removed is not None:
+            logger.info("Removed CLAUDECODE env for bot runtime isolation")
+
     def __init__(self, config: Settings):
         """Initialize SDK manager with configuration."""
         self.config = config
         self.active_sessions: Dict[str, Dict[str, Any]] = {}
+        self._sanitize_runtime_env()
 
         # Try to find and update PATH for Claude CLI
         if not update_path_for_claude(config.claude_cli_path):

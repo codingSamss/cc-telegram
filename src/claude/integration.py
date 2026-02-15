@@ -366,11 +366,15 @@ class ClaudeProcessManager:
 
     async def _start_process(self, cmd: List[str], cwd: Path) -> Process:
         """Start Claude Code subprocess."""
+        env = os.environ.copy()
+        # Avoid nested Claude session detection when bot is launched from CLAUDECODE env.
+        env.pop("CLAUDECODE", None)
         return await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd),
+            env=env,
             # Limit memory usage
             limit=1024 * 1024 * 512,  # 512MB
         )

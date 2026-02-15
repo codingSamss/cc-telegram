@@ -1,5 +1,6 @@
 """Tests for Claude subprocess integration parsing behavior."""
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -365,6 +366,25 @@ def test_parse_stream_message_supports_codex_turn_failed(tmp_path):
     assert update.type == "error"
     assert update.content == "invalid model"
     assert update.metadata and update.metadata.get("engine") == "codex"
+
+
+@pytest.mark.asyncio
+async def test_start_process_unsets_claudecode_env(tmp_path, monkeypatch):
+    """Subprocess mode should not inherit CLAUDECODE marker."""
+    manager = _build_manager(tmp_path)
+    monkeypatch.setenv("CLAUDECODE", "nested-session")
+
+    captured_env = {}
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return SimpleNamespace()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    await manager._start_process(["echo", "ok"], tmp_path)
+
+    assert "CLAUDECODE" not in captured_env
 
 
 @pytest.mark.asyncio

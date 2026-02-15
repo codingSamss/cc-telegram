@@ -115,6 +115,20 @@ class TestClaudeSDKManager:
             if original_api_key:
                 os.environ["ANTHROPIC_API_KEY"] = original_api_key
 
+    async def test_sdk_manager_initialization_unsets_claudecode(self, config):
+        """SDK manager should clear CLAUDECODE to avoid nested CLI runtime errors."""
+        original_claudecode = os.environ.get("CLAUDECODE")
+        os.environ["CLAUDECODE"] = "nested-session"
+
+        try:
+            ClaudeSDKManager(config)
+            assert "CLAUDECODE" not in os.environ
+        finally:
+            if original_claudecode is not None:
+                os.environ["CLAUDECODE"] = original_claudecode
+            else:
+                os.environ.pop("CLAUDECODE", None)
+
     async def test_execute_command_success(self, sdk_manager):
         """Test successful command execution."""
 
