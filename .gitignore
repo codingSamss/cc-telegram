@@ -154,6 +154,3 @@ claude-wrapper.sh
 
 # Claude Code
 .claude/
-
-# Local plans
-plan/
