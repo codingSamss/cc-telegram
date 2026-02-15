@@ -305,6 +305,11 @@ class ClaudeProcessManager:
         """Build Codex CLI command."""
         cmd = [cli_path, "exec", "--json", "--skip-git-repo-check"]
 
+        # Codex reads MCP servers from ~/.codex/config.toml by default.
+        # Keep MCP disabled unless explicitly requested by config.
+        if not self.config.codex_enable_mcp:
+            cmd.extend(["-c", "mcp_servers={}"])
+
         if model:
             cmd.extend(["--model", model])
 

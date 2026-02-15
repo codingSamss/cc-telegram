@@ -11,12 +11,13 @@ from src.claude.integration import ClaudeProcessManager
 from src.config.settings import Settings
 
 
-def _build_manager(tmp_path: Path) -> ClaudeProcessManager:
+def _build_manager(tmp_path: Path, **overrides) -> ClaudeProcessManager:
     config = Settings(
         telegram_bot_token="test:token",
         telegram_bot_username="testbot",
         approved_directory=tmp_path,
         claude_timeout_seconds=5,
+        **overrides,
     )
     return ClaudeProcessManager(config)
 
@@ -83,9 +84,28 @@ def test_build_command_for_codex_exec_uses_codex_flags(tmp_path, monkeypatch):
         "--json",
         "--skip-git-repo-check",
     ]
+    assert ["-c", "mcp_servers={}"] == cmd[4:6]
     assert cmd[-1] == "hello codex"
     assert "--output-format" not in cmd
     assert "--allowedTools" not in cmd
+
+
+def test_build_command_for_codex_exec_keeps_mcp_when_enabled(tmp_path, monkeypatch):
+    """Codex CLI should not inject MCP override when explicitly enabled."""
+    manager = _build_manager(tmp_path, codex_enable_mcp=True)
+    monkeypatch.setattr(
+        "src.claude.sdk_integration.find_claude_cli",
+        lambda _: "/usr/local/bin/codex",
+    )
+
+    cmd = manager._build_command(
+        prompt="hello codex",
+        session_id=None,
+        continue_session=False,
+    )
+
+    assert "-c" not in cmd
+    assert "mcp_servers={}" not in cmd
 
 
 def test_build_command_for_codex_exec_includes_image_flags(tmp_path, monkeypatch):
@@ -111,6 +131,8 @@ def test_build_command_for_codex_exec_includes_image_flags(tmp_path, monkeypatch
         "exec",
         "--json",
         "--skip-git-repo-check",
+        "-c",
+        "mcp_servers={}",
         "--image",
         "/tmp/a.png",
         "--image",
@@ -139,6 +161,8 @@ def test_build_command_for_codex_resume_uses_resume_subcommand(tmp_path, monkeyp
         "exec",
         "--json",
         "--skip-git-repo-check",
+        "-c",
+        "mcp_servers={}",
         "--model",
         "gpt-5",
         "resume",
@@ -169,6 +193,8 @@ def test_build_command_for_codex_resume_with_images_places_flags_after_resume(
         "exec",
         "--json",
         "--skip-git-repo-check",
+        "-c",
+        "mcp_servers={}",
         "resume",
         "thread-123",
         "--image",
@@ -196,6 +222,8 @@ def test_build_command_for_codex_resume_without_prompt_uses_default(tmp_path, mo
         "exec",
         "--json",
         "--skip-git-repo-check",
+        "-c",
+        "mcp_servers={}",
         "resume",
         "thread-123",
         "Please continue where we left off",
