@@ -147,6 +147,61 @@ def test_build_command_for_codex_resume_uses_resume_subcommand(tmp_path, monkeyp
     ]
 
 
+def test_build_command_for_codex_resume_with_images_places_flags_after_resume(
+    tmp_path, monkeypatch
+):
+    """Codex resume with images should scope --image flags to resume subcommand."""
+    manager = _build_manager(tmp_path)
+    monkeypatch.setattr(
+        "src.claude.sdk_integration.find_claude_cli",
+        lambda _: "/usr/local/bin/codex",
+    )
+
+    cmd = manager._build_command(
+        prompt="请结合这张图继续分析",
+        session_id="thread-123",
+        continue_session=True,
+        images=[{"file_path": "/tmp/a.png"}],
+    )
+
+    assert cmd == [
+        "/usr/local/bin/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "resume",
+        "thread-123",
+        "--image",
+        "/tmp/a.png",
+        "请结合这张图继续分析",
+    ]
+
+
+def test_build_command_for_codex_resume_without_prompt_uses_default(tmp_path, monkeypatch):
+    """Codex resume should always carry a non-empty prompt to satisfy CLI contract."""
+    manager = _build_manager(tmp_path)
+    monkeypatch.setattr(
+        "src.claude.sdk_integration.find_claude_cli",
+        lambda _: "/usr/local/bin/codex",
+    )
+
+    cmd = manager._build_command(
+        prompt="",
+        session_id="thread-123",
+        continue_session=True,
+    )
+
+    assert cmd == [
+        "/usr/local/bin/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "resume",
+        "thread-123",
+        "Please continue where we left off",
+    ]
+
+
 def test_parse_result_supports_codex_turn_completed(tmp_path):
     """Codex turn.completed event should map to unified response fields."""
     manager = _build_manager(tmp_path)

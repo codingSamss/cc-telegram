@@ -1,5 +1,6 @@
 """Handle inline keyboard callbacks."""
 
+from datetime import datetime
 from pathlib import Path
 
 import structlog
@@ -68,6 +69,90 @@ def _resume_engine_label(engine: str) -> str:
 def _engine_display_name(engine: str) -> str:
     """Render readable label for engine selector."""
     return "Codex" if engine == ENGINE_CODEX else "Claude"
+
+
+def _escape_markdown(text: str) -> str:
+    """Escape special chars for Telegram Markdown."""
+    escaped = text
+    for ch in ("\\", "`", "*", "_", "[", "]"):
+        escaped = escaped.replace(ch, f"\\{ch}")
+    return escaped
+
+
+def _normalize_preview_text(raw: str, *, max_len: int) -> str:
+    """Normalize preview text into one compact line."""
+    compact = " ".join(str(raw or "").split())
+    if not compact:
+        return "无预览"
+    if len(compact) <= max_len:
+        return compact
+    return compact[: max_len - 3].rstrip() + "..."
+
+
+def _candidate_event_time(candidate) -> datetime | None:
+    """Resolve candidate event time, fallback to file mtime."""
+    last_event_at = getattr(candidate, "last_event_at", None)
+    if isinstance(last_event_at, datetime):
+        return last_event_at
+
+    file_mtime = getattr(candidate, "file_mtime", None)
+    if isinstance(file_mtime, datetime):
+        return file_mtime
+    return None
+
+
+def _format_relative_time(target: datetime | None) -> str:
+    """Format relative age from UTC naive datetime."""
+    if target is None:
+        return "时间未知"
+
+    now = datetime.utcnow()
+    delta_sec = max(0, int((now - target).total_seconds()))
+    if delta_sec < 60:
+        return "刚刚"
+    if delta_sec < 3600:
+        return f"{delta_sec // 60}分钟前"
+    if delta_sec < 86400:
+        return f"{delta_sec // 3600}小时前"
+    if delta_sec < 86400 * 7:
+        return f"{delta_sec // 86400}天前"
+    return target.strftime("%m-%d %H:%M")
+
+
+def _candidate_preview(candidate, *, max_len: int) -> str:
+    """Pick the best preview text for one session candidate."""
+    last_user_message = str(getattr(candidate, "last_user_message", "") or "").strip()
+    if last_user_message:
+        return _normalize_preview_text(last_user_message, max_len=max_len)
+
+    first_message = str(getattr(candidate, "first_message", "") or "").strip()
+    return _normalize_preview_text(first_message, max_len=max_len)
+
+
+def _build_resume_session_button_label(candidate) -> str:
+    """Build concise button label for one resumable session."""
+    sid_short = str(getattr(candidate, "session_id", "") or "")[:8] or "unknown"
+    active = bool(getattr(candidate, "is_probably_active", False))
+    status = "🟢" if active else "⚪"
+    age = (
+        "活跃中" if active else _format_relative_time(_candidate_event_time(candidate))
+    )
+    preview = _candidate_preview(candidate, max_len=14)
+    label = f"{status} {sid_short} · {age} · {preview}"
+    if len(label) > 60:
+        return label[:57] + "..."
+    return label
+
+
+def _build_resume_session_preview_line(candidate) -> str:
+    """Build markdown-safe preview line for session list body."""
+    sid_short = str(getattr(candidate, "session_id", "") or "")[:8] or "unknown"
+    active = bool(getattr(candidate, "is_probably_active", False))
+    status = (
+        "活跃中" if active else _format_relative_time(_candidate_event_time(candidate))
+    )
+    preview = _escape_markdown(_candidate_preview(candidate, max_len=56))
+    return f"• `{sid_short}` · {status} · {preview}"
 
 
 def _build_engine_selector_keyboard(
@@ -1966,14 +2051,12 @@ async def _resume_select_project(
         )
         return
 
-    # Build session selection buttons
+    # Build session selection buttons + preview lines
     keyboard = []
+    session_preview_lines: list[str] = []
     for c in candidates[:10]:  # limit to 10 sessions
-        # Format label
-        preview = c.first_message[:40] if c.first_message else "..."
-        active_tag = " [ACTIVE]" if c.is_probably_active else ""
-        sid_short = c.session_id[:8]
-        label = f"{sid_short}{active_tag} {preview}"
+        label = _build_resume_session_button_label(c)
+        session_preview_lines.append(_build_resume_session_preview_line(c))
 
         tok = token_mgr.issue(
             kind="s",
@@ -2016,8 +2099,11 @@ async def _resume_select_project(
     except ValueError:
         rel = project_cwd.name
 
+    session_preview_text = "\n".join(session_preview_lines)
     await query.edit_message_text(
         f"**Sessions in** `{rel}`\n\n"
+        f"Session previews:\n"
+        f"{session_preview_text}\n\n"
         f"Select a session to resume, or tap *Start New Session Here*:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),

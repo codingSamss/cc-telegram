@@ -561,10 +561,11 @@ def _build_session_context_summary(snapshot: Optional[dict[str, Any]]) -> Option
     if not isinstance(snapshot, dict):
         return None
 
+    used_percent: Optional[float] = None
     try:
         used_percent = float(snapshot.get("used_percent"))
     except (TypeError, ValueError):
-        return None
+        used_percent = None
 
     total_tokens_raw = snapshot.get("total_tokens")
     remaining_tokens_raw = snapshot.get("remaining_tokens")
@@ -579,14 +580,13 @@ def _build_session_context_summary(snapshot: Optional[dict[str, Any]]) -> Option
     except (TypeError, ValueError):
         remaining_percent = None
 
-    if remaining_percent is None:
+    if remaining_percent is None and used_percent is not None:
         remaining_percent = max(min(100.0 - used_percent, 100.0), 0.0)
 
-    used_percent = max(min(used_percent, 100.0), 0.0)
-    return (
-        "🧠 Session context: "
-        f"`{used_percent:.1f}%` used · `{remaining_percent:.1f}%` remaining"
-    )
+    if remaining_percent is None:
+        return None
+
+    return "🧠 Session context: " f"`{remaining_percent:.1f}%` remaining"
 
 
 def _generate_thinking_summary(all_progress_lines: list[str]) -> str:

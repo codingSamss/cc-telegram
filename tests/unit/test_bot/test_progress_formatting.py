@@ -345,7 +345,10 @@ def test_build_context_tag_renders_claude_badge():
 
 def test_build_context_tag_shows_rate_limit_summary():
     """Context tag should append rate limit info when provided."""
-    summary = "5h window: 12.5% · 7d window: 37.0% (updated 2026-02-09T13:54:15Z)"
+    summary = (
+        "5h window: 87.5% remaining · "
+        "7d window: 63.0% remaining (updated 2026-02-09T13:54:15Z)"
+    )
     tag = _build_context_tag(
         scope_state={"current_directory": Path("/tmp/demo-project")},
         approved_directory=Path("/tmp"),
@@ -365,8 +368,8 @@ def test_build_context_tag_shows_session_context_summary():
         approved_directory=Path("/tmp"),
         active_engine=ENGINE_CODEX,
         session_id="session-codex-123456",
-        session_context_summary="🧠 Session context: `28.2%` used · `71.8%` remaining",
-        rate_limit_summary="5h window: 12.5%",
+        session_context_summary="🧠 Session context: `71.8%` remaining",
+        rate_limit_summary="5h window: 87.5% remaining",
     )
 
     lines = tag.splitlines()
@@ -386,8 +389,8 @@ def test_build_session_context_summary_prefers_explicit_remaining_tokens():
     )
 
     assert summary is not None
-    assert "`28.2%` used" in summary
     assert "`71.8%` remaining" in summary
+    assert "used" not in summary
 
 
 def test_with_engine_badge_prefixes_codex_bubble():

@@ -24,6 +24,7 @@ from src.bot.handlers.command import (
 )
 from src.bot.resume_tokens import ResumeTokenManager
 from src.bot.utils.cli_engine import ENGINE_CODEX, ENGINE_STATE_KEY, get_cli_integration
+from src.services.session_service import SessionService
 
 
 def _scope_key(user_id: int, chat_id: int) -> str:
@@ -152,7 +153,7 @@ async def test_switch_engine_syncs_chat_menu_by_target_engine(tmp_path):
     call_kwargs = set_my_commands.await_args.kwargs
     command_names = [cmd.command for cmd in call_kwargs["commands"]]
     assert "codexdiag" in command_names
-    assert "model" not in command_names
+    assert "model" in command_names
     assert "status" in command_names
     assert "context" not in command_names
 
@@ -290,8 +291,8 @@ async def test_start_command_uses_status_profile_for_codex(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_model_command_rejects_when_engine_does_not_support(tmp_path):
-    """Model command should be blocked when active engine is codex."""
+async def test_model_command_shows_read_only_model_for_codex_engine(tmp_path):
+    """Codex /model should show current model in read-only mode."""
     approved = tmp_path / "approved"
     approved.mkdir()
     user_id = 1004
@@ -311,8 +312,51 @@ async def test_model_command_rejects_when_engine_does_not_support(tmp_path):
     await model_command(update, context)
 
     rendered = update.message.reply_text.await_args.args[0]
-    assert "不支持 `/model`" in rendered
+    assert "当前引擎：`codex`" in rendered
+    assert "当前模型：`default`" in rendered
+    assert "只读查看" in rendered
     assert "/engine claude" in rendered
+
+
+@pytest.mark.asyncio
+async def test_model_command_codex_formats_reasoning_effort_from_snapshot(
+    tmp_path, monkeypatch
+):
+    """Codex /model should render normalized reasoning effort from local snapshot."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    user_id = 10041
+    scope_key = _scope_key(user_id, user_id)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(id=user_id),
+        effective_message=SimpleNamespace(message_thread_id=None),
+        message=SimpleNamespace(reply_text=AsyncMock()),
+    )
+    context = SimpleNamespace(
+        args=[],
+        bot_data={"settings": _build_settings(approved)},
+        user_data={
+            "scope_state": {
+                scope_key: {
+                    ENGINE_STATE_KEY: "codex",
+                    "claude_session_id": "session-codex-1",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        SessionService,
+        "get_cached_codex_snapshot",
+        classmethod(
+            lambda cls, _sid: {"resolved_model": "gpt-5", "reasoning_effort": "xhigh"}
+        ),
+    )
+
+    await model_command(update, context)
+
+    rendered = update.message.reply_text.await_args.args[0]
+    assert "当前模型：`gpt-5 (X High)`" in rendered
 
 
 @pytest.mark.asyncio
@@ -464,6 +508,7 @@ async def test_resume_project_selection_includes_start_new_session_option(tmp_pa
     await handle_resume_callback(query, f"p:{project_token}", context)
 
     rendered = query.edit_message_text.await_args.args[0]
+    assert "Session previews" in rendered
     assert "Start New Session Here" in rendered
     reply_markup = query.edit_message_text.await_args.kwargs["reply_markup"]
     callback_ids = [

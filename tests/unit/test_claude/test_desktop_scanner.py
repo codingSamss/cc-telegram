@@ -9,7 +9,9 @@ import pytest
 from src.claude.desktop_scanner import DesktopSessionScanner
 
 
-def _write_session_jsonl(path, cwd, session_id, first_message="hello"):
+def _write_session_jsonl(
+    path, cwd, session_id, first_message="hello", last_message=None
+):
     """Write a minimal valid session JSONL file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -20,6 +22,21 @@ def _write_session_jsonl(path, cwd, session_id, first_message="hello"):
             "timestamp": "2026-02-12T12:00:00.000Z",
         },
     ]
+    if last_message:
+        lines.append(
+            {
+                "type": "assistant",
+                "message": {"content": "ok"},
+                "timestamp": "2026-02-12T12:00:01.000Z",
+            }
+        )
+        lines.append(
+            {
+                "type": "user",
+                "message": {"content": last_message},
+                "timestamp": "2026-02-12T12:00:02.000Z",
+            }
+        )
     with open(path, "w", encoding="utf-8") as f:
         for line in lines:
             f.write(json.dumps(line, ensure_ascii=True) + "\n")
@@ -80,3 +97,33 @@ async def test_list_projects_filters_outside_approved_directory(tmp_path):
     projects = await scanner.list_projects()
 
     assert projects == [inside.resolve()]
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_extracts_last_user_message(tmp_path):
+    """Session candidate should expose latest user message preview."""
+    approved = tmp_path / "approved"
+    approved.mkdir(parents=True)
+    project = approved / "proj-a"
+    project.mkdir()
+
+    projects_dir = tmp_path / ".claude" / "projects"
+    session_file = projects_dir / "a" / "session-a.jsonl"
+    _write_session_jsonl(
+        session_file,
+        project,
+        "session-a",
+        first_message="first prompt",
+        last_message="latest prompt",
+    )
+
+    scanner = DesktopSessionScanner(
+        approved_directory=approved,
+        projects_dir=projects_dir,
+        cache_ttl_sec=0,
+    )
+    sessions = await scanner.list_sessions(project_cwd=project, active_window_sec=5)
+
+    assert len(sessions) == 1
+    assert sessions[0].first_message == "first prompt"
+    assert sessions[0].last_user_message == "latest prompt"

@@ -220,9 +220,10 @@ def _build_rate_limit_lines(rate_limits: Any) -> List[str]:
     for entry in entries:
         window_minutes = int(entry["window_minutes"])
         label = _window_label(window_minutes)
-        used_percent = float(entry["used_percent"])
+        used_percent = max(min(float(entry["used_percent"]), 100.0), 0.0)
+        remaining_percent = max(min(100.0 - used_percent, 100.0), 0.0)
         reset_text = _format_unix_timestamp(entry.get("resets_at"))
-        line = f"{label}: `{used_percent:.1f}%`"
+        line = f"{label}: `{remaining_percent:.1f}% remaining`"
         if reset_text:
             line += f" (resets `{reset_text}`)"
         lines.append(line)

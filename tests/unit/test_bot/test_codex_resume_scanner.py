@@ -18,6 +18,7 @@ def _write_codex_session(
     session_id: str,
     cwd: Path,
     first_message: str,
+    last_message: str | None,
     timestamp: datetime,
 ) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,21 @@ def _write_codex_session(
             "payload": {"type": "user_message", "message": first_message},
         },
     ]
+    if last_message:
+        rows.append(
+            {
+                "timestamp": (timestamp + timedelta(seconds=3)).isoformat() + "Z",
+                "type": "event_msg",
+                "payload": {"type": "assistant_message", "message": "ok"},
+            }
+        )
+        rows.append(
+            {
+                "timestamp": (timestamp + timedelta(seconds=4)).isoformat() + "Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": last_message},
+            }
+        )
     with open(file_path, "w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -60,6 +76,7 @@ async def test_codex_scanner_list_projects_filters_by_approved_directory(tmp_pat
         session_id="session-a",
         cwd=approved / "proj-a",
         first_message="hello a",
+        last_message=None,
         timestamp=now,
     )
     _write_codex_session(
@@ -67,6 +84,7 @@ async def test_codex_scanner_list_projects_filters_by_approved_directory(tmp_pat
         session_id="session-b",
         cwd=outside / "proj-b",
         first_message="hello b",
+        last_message=None,
         timestamp=now + timedelta(seconds=10),
     )
 
@@ -98,6 +116,7 @@ async def test_codex_scanner_list_sessions_extracts_message_and_activity(tmp_pat
         session_id="session-old",
         cwd=project,
         first_message="old message",
+        last_message="old latest",
         timestamp=old_ts,
     )
     _write_codex_session(
@@ -105,6 +124,7 @@ async def test_codex_scanner_list_sessions_extracts_message_and_activity(tmp_pat
         session_id="session-new",
         cwd=project,
         first_message="new message",
+        last_message="new latest",
         timestamp=new_ts,
     )
 
@@ -118,6 +138,8 @@ async def test_codex_scanner_list_sessions_extracts_message_and_activity(tmp_pat
     assert len(sessions) == 2
     assert sessions[0].session_id == "session-new"
     assert sessions[0].first_message == "new message"
+    assert sessions[0].last_user_message == "new latest"
     assert sessions[0].is_probably_active is True
     assert sessions[1].session_id == "session-old"
+    assert sessions[1].last_user_message == "old latest"
     assert sessions[1].is_probably_active is False

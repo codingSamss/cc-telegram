@@ -28,9 +28,19 @@ poetry run mypy src
 ```
 
 ## 手动重启服务（macOS）
-1. `./scripts/restart-bot.sh` 会先 `pkill -f cli-tg`，再执行 `poetry run claude-telegram-bot`，把新版本跑起来（对 Claude CLI 与 Codex CLI 都生效）。
-2. 在 `tmux`/`screen` 中运行脚本能让服务保持在后台，或者加 `nohup`/`setsid` 以脱离当前终端。
-3. 每次我在 TG 上修改后直接再执行一次脚本就相当于重新启动服务，后续 Codex/Claude 改动能立刻生效。
+“重启后有残留进程”的含义：新进程已经拉起，但旧的 bot 进程没有被正确回收，导致可能出现并发轮询、消息无响应或日志判断混乱。
+
+推荐使用 `tmux` 的标准重启流程（避免残留）：
+1. 停掉旧会话：`tmux kill-session -t cli_tg_bot`（若不存在可忽略错误）。
+2. 新建独立会话并启动：`tmux new-session -d -s cli_tg_bot -c /Users/suqi3/PycharmProjects/cli-tg './scripts/restart-bot.sh'`。
+3. 验证进程唯一性：`ps -Ao pid,ppid,command | rg -i 'cli-tg-bot|claude-telegram-bot|src.main' | rg -v 'rg -i'`，确认只有一个 bot 主进程。
+4. 验证运行日志：`tmux capture-pane -t cli_tg_bot -p | tail -n 80`，确认持续出现 Telegram `getUpdates 200 OK` 且无异常栈。
+
+补充说明：
+- `./scripts/restart-bot.sh` 会执行 `pkill -f cli-tg` 后再 `poetry run claude-telegram-bot`，对 Claude CLI 与 Codex CLI 都生效。
+- 执行约束：默认不自动重启；只有用户明确要求“重启”时，才执行重启流程。
+- 无响应排查顺序：先确认服务在线（`tmux` 会话、唯一进程、`getUpdates 200 OK`），再检查命令格式与路由。
+- 用户名一致性：`/engine@<bot_username>` 里的用户名必须与 Telegram `getMe` 返回一致；当前应为 `CodingSam_bot`，并保持 `.env` 的 `TELEGRAM_BOT_USERNAME` 同步。
 
 ## 架构
 

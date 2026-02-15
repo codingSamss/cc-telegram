@@ -78,6 +78,21 @@ def _engine_display_name(engine: str) -> str:
     return "Codex" if engine == ENGINE_CODEX else "Claude"
 
 
+def _normalize_reasoning_effort_label(raw: str) -> str:
+    """Normalize reasoning effort label for user-facing text."""
+    mapping = {
+        "high": "High",
+        "medium": "Medium",
+        "low": "Low",
+        "xhigh": "X High",
+        "x-high": "X High",
+    }
+    normalized = str(raw or "").strip().lower()
+    if not normalized:
+        return ""
+    return mapping.get(normalized, normalized.title())
+
+
 def _build_engine_selector_keyboard(
     *, active_engine: str, available_engines: set[str]
 ) -> InlineKeyboardMarkup | None:
@@ -286,7 +301,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     model_line = (
         "• `/model` - View or switch Claude model\n"
         if capabilities.supports_model_selection
-        else ""
+        else "• `/model` - View current Codex model (read-only)\n"
     )
 
     help_text = (
@@ -1573,6 +1588,39 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     active_engine = get_active_cli_engine(scope_state)
     capabilities = get_engine_capabilities(active_engine)
     if not capabilities.supports_model_selection:
+        if active_engine == ENGINE_CODEX:
+            session_id = str(scope_state.get("claude_session_id") or "").strip()
+            codex_snapshot: dict | None = None
+            if session_id:
+                codex_snapshot = SessionService.get_cached_codex_snapshot(session_id)
+                if codex_snapshot is None:
+                    codex_snapshot = SessionService._probe_codex_session_snapshot(
+                        session_id
+                    )
+
+            current_model = str(scope_state.get("claude_model") or "").strip()
+            resolved_model = ""
+            reasoning_effort = ""
+            if isinstance(codex_snapshot, dict):
+                resolved_model = str(codex_snapshot.get("resolved_model") or "").strip()
+                reasoning_effort = str(
+                    codex_snapshot.get("reasoning_effort") or ""
+                ).strip()
+
+            model_display = resolved_model or current_model or "default"
+            if reasoning_effort and model_display.lower() not in {"default", "current"}:
+                effort_display = _normalize_reasoning_effort_label(reasoning_effort)
+                model_display = f"{model_display} ({effort_display})"
+
+            await update.message.reply_text(
+                "ℹ️ 当前引擎：`codex`\n"
+                f"当前模型：`{model_display}`\n\n"
+                "`/model` 在 Codex 下为只读查看。\n"
+                "如需切换模型，请先执行：`/engine claude`",
+                parse_mode="Markdown",
+            )
+            return
+
         await update.message.reply_text(
             "ℹ️ 当前引擎不支持 `/model`。\n"
             f"当前引擎：`{active_engine}`\n"

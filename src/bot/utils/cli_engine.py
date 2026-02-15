@@ -39,7 +39,6 @@ ENGINE_CAPABILITIES: dict[str, EngineCapabilities] = {
 
 COMMAND_ENGINE_VISIBILITY: dict[str, tuple[str, ...]] = {
     "context": (ENGINE_CLAUDE,),
-    "model": (ENGINE_CLAUDE,),
     "codexdiag": (ENGINE_CODEX,),
     "status": (ENGINE_CODEX,),
 }

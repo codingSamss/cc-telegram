@@ -30,6 +30,7 @@ class CodexSessionCandidate:
     file_mtime: datetime
     is_probably_active: bool
     first_message: str
+    last_user_message: str
 
 
 @dataclass
@@ -261,7 +262,8 @@ class CodexSessionScanner:
         first_message = self._extract_first_message(jsonl_path)
 
         last_event_at: Optional[datetime] = None
-        tail_lines = self._read_tail_lines(jsonl_path, max_lines=10)
+        last_user_message = ""
+        tail_lines = self._read_tail_lines(jsonl_path, max_lines=200)
         for line in reversed(tail_lines):
             line = line.strip()
             if not line:
@@ -273,10 +275,18 @@ class CodexSessionScanner:
             if not isinstance(record, dict):
                 continue
             ts = record.get("timestamp")
-            if ts:
+            if ts and last_event_at is None:
                 last_event_at = self._parse_iso_timestamp(str(ts))
-                if last_event_at is not None:
-                    break
+
+            if not last_user_message and record.get("type") == "event_msg":
+                payload = record.get("payload")
+                if isinstance(payload, dict) and payload.get("type") == "user_message":
+                    message = str(payload.get("message") or "").strip()
+                    if message:
+                        last_user_message = message[:120]
+
+            if last_event_at is not None and last_user_message:
+                break
 
         try:
             mtime = jsonl_path.stat().st_mtime
@@ -293,4 +303,5 @@ class CodexSessionScanner:
             file_mtime=file_mtime,
             is_probably_active=is_active,
             first_message=first_message,
+            last_user_message=last_user_message,
         )

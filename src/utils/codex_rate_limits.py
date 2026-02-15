@@ -128,7 +128,9 @@ def format_rate_limit_summary(rate_limits: Any) -> Optional[str]:
 
     parts = []
     for entry in entries:
-        line = f"{entry['label']}: {entry['used_percent']:.1f}%"
+        used_percent = max(min(float(entry["used_percent"]), 100.0), 0.0)
+        remaining_percent = max(min(100.0 - used_percent, 100.0), 0.0)
+        line = f"{entry['label']}: {remaining_percent:.1f}% remaining"
         if entry.get("reset_text"):
             line += f" (resets {entry['reset_text']})"
         parts.append(line)

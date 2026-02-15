@@ -292,8 +292,8 @@ async def test_build_context_snapshot_codex_uses_local_snapshot_for_model_and_us
     assert "Cost:" not in rendered
     assert "Usage: `108,000` / `258,400` (41.8%)" in rendered
     assert "Usage Limits (/status)" in rendered
-    assert "5h window: `20.0%`" in rendered
-    assert "7d window: `36.0%`" in rendered
+    assert "5h window: `80.0% remaining`" in rendered
+    assert "7d window: `64.0% remaining`" in rendered
     claude_integration.get_precise_context_usage.assert_not_awaited()
 
 

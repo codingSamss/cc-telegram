@@ -31,6 +31,7 @@ class DesktopSessionCandidate:
     file_mtime: datetime
     is_probably_active: bool  # now - mtime <= active_window
     first_message: str  # first user message preview
+    last_user_message: str  # latest user message preview from file tail
 
 
 @dataclass
@@ -39,9 +40,9 @@ class _ScanCache:
 
     projects: Optional[List[Path]] = None
     projects_ts: float = 0.0
-    sessions: Dict[
-        str, Tuple[List[DesktopSessionCandidate], float]
-    ] = field(default_factory=dict)
+    sessions: Dict[str, Tuple[List[DesktopSessionCandidate], float]] = field(
+        default_factory=dict
+    )
 
 
 class DesktopSessionScanner:
@@ -308,7 +309,8 @@ class DesktopSessionScanner:
 
         # --- Tail scan: last timestamp ---
         last_event_at: Optional[datetime] = None
-        tail_lines = self._read_tail_lines(jsonl_path, max_lines=10)
+        last_user_message: str = ""
+        tail_lines = self._read_tail_lines(jsonl_path, max_lines=200)
         for line in reversed(tail_lines):
             line = line.strip()
             if not line:
@@ -320,10 +322,19 @@ class DesktopSessionScanner:
             if not isinstance(record, dict):
                 continue
             ts = record.get("timestamp")
-            if ts:
+            if ts and last_event_at is None:
                 last_event_at = self._parse_iso_timestamp(ts)
-                if last_event_at is not None:
-                    break
+
+            if not last_user_message and record.get("type") == "user":
+                message = record.get("message")
+                content = (
+                    message.get("content", "") if isinstance(message, dict) else ""
+                )
+                if isinstance(content, str) and content.strip():
+                    last_user_message = content.strip()[:120]
+
+            if last_event_at is not None and last_user_message:
+                break
 
         # --- File mtime ---
         try:
@@ -343,4 +354,5 @@ class DesktopSessionScanner:
             file_mtime=file_mtime,
             is_probably_active=is_active,
             first_message=first_message,
+            last_user_message=last_user_message,
         )

@@ -173,8 +173,8 @@ def test_build_precise_context_status_lines_renders_codex_usage_windows():
 
     joined = "\n".join(lines)
     assert "Usage Limits (/status)" in joined
-    assert "5h window: `17.0%`" in joined
-    assert "7d window: `44.0%`" in joined
+    assert "5h window: `83.0% remaining`" in joined
+    assert "7d window: `56.0% remaining`" in joined
     assert "Updated: `2026-02-09T13:54:15Z`" in joined
 
 
@@ -192,8 +192,8 @@ def test_build_precise_context_status_lines_can_render_windows_without_context()
     joined = "\n".join(lines)
     assert "Context (" not in joined
     assert "Usage Limits (/status)" in joined
-    assert "5h window: `22.0%`" in joined
-    assert "7d window: `55.0%`" in joined
+    assert "5h window: `78.0% remaining`" in joined
+    assert "7d window: `45.0% remaining`" in joined
 
 
 def test_build_model_usage_status_lines_supports_codex_flat_usage_payload():
