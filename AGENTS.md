@@ -15,7 +15,7 @@
 
 ## 重启服务
 本仓库在 macOS 上通常没有 systemd，推荐使用项目内脚本重启：
-1. `./scripts/restart-bot.sh`（在项目根目录下执行），这个脚本会 `pkill -f cli-tg` 并接着 `poetry run claude-telegram-bot` 启动最新版本。
+1. `./scripts/restart-bot.sh`（在项目根目录下执行），这个脚本会 `pkill -f cli-tg` 并接着 `poetry run claude-telegram-bot` 启动最新版本（对 Claude CLI 与 Codex CLI 都生效）。
 2. 如需后台运行，请在 `tmux`/`screen` 里执行脚本，或在脚本命令前加 `nohup`/`setsid`。
 3. 每次我在 TG 上修改代码后只需重复一次脚本调用即完成“重启服务”。
 
