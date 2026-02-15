@@ -5,13 +5,20 @@
 测试代码位于 `tests/`，当前以 `tests/unit/` 为主，目录结构尽量镜像 `src/`。文档在 `docs/`，运维与部署相关说明见 `README.md`、`SECURITY.md`、`SYSTEMD_SETUP.md`。
 
 ## 构建、测试与开发命令
-- `make dev`：安装开发依赖（Poetry）并尝试安装提交钩子。
-- `make install`：仅安装生产依赖。
-- `make run`：启动机器人。
-- `make run-debug`：调试模式启动，输出更详细日志。
-- `make test`：运行 `pytest` 与覆盖率统计。
-- `make lint`：执行 `black --check`、`isort --check-only`、`flake8`、`mypy`。
-- `make format`：自动格式化 `src` 与 `tests`。
+ - `make dev`：安装开发依赖（Poetry）并尝试安装提交钩子。
+ - `make install`：仅安装生产依赖。
+ - `make run`：启动机器人。
+ - `make run-debug`：调试模式启动，输出更详细日志。
+ - `make test`：运行 `pytest` 与覆盖率统计。
+ - `make lint`：执行 `black --check`、`isort --check-only`、`flake8`、`mypy`。
+ - `make format`：自动格式化 `src` 与 `tests`。
+
+## 重启服务
+本仓库在 macOS 上通常没有 systemd，推荐手动重启：
+1. `pkill -f cli-tg`（或者上次运行的进程名 `claude-telegram-bot`），确保旧进程退出。
+2. `cd /Users/suqi3/PycharmProjects/cli-tg && poetry run claude-telegram-bot`，手动启动新实例。
+3. 后续如果需要保持在后台运行，可在 `tmux`/`screen` 窗口里执行上述命令，或写个简单的 `while true` wrapper。
+4. 每次我提交完修改后，你可以重复这套流程，算作“重启服务”。
 
 ## 代码风格与命名约定
 使用 Python 3.10+，统一 4 空格缩进，行宽 88（Black 规则）。导入顺序由 isort（与 Black 兼容配置）管理。  

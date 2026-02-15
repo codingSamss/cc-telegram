@@ -10,7 +10,7 @@
 
 ```bash
 mkdir -p ~/.config/systemd/user
-nano ~/.config/systemd/user/claude-telegram-bot.service
+nano ~/.config/systemd/user/cli-tg.service
 ```
 
 添加以下内容：
@@ -23,7 +23,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/ubuntu/Code/oss/claude-code-telegram
-ExecStart=/home/ubuntu/.local/bin/poetry run claude-telegram-bot
+ExecStart=/home/ubuntu/.local/bin/poetry run cli-tg
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -45,16 +45,16 @@ WantedBy=default.target
 systemctl --user daemon-reload
 
 # 启用开机自启
-systemctl --user enable claude-telegram-bot.service
+systemctl --user enable cli-tg.service
 
 # 立即启动服务
-systemctl --user start claude-telegram-bot.service
+systemctl --user start cli-tg.service
 ```
 
 ### 3. 验证运行状态
 
 ```bash
-systemctl --user status claude-telegram-bot
+systemctl --user status cli-tg
 ```
 
 ### 4. 验证安全配置
@@ -63,14 +63,14 @@ systemctl --user status claude-telegram-bot
 
 ```bash
 # 检查日志中的环境模式
-journalctl --user -u claude-telegram-bot -n 50 | grep -i "environment\|development"
+journalctl --user -u cli-tg -n 50 | grep -i "environment\|development"
 
 # 应该显示：
 # "environment": "production"
 # "development_mode": false（如果为 false 则不显示）
 
 # 验证认证是否受限
-journalctl --user -u claude-telegram-bot -n 50 | grep -i "auth"
+journalctl --user -u cli-tg -n 50 | grep -i "auth"
 
 # 应该显示：
 # "allowed_users": 1（如果配置了多个用户则更多）
@@ -83,28 +83,28 @@ journalctl --user -u claude-telegram-bot -n 50 | grep -i "auth"
 
 ```bash
 # 启动服务
-systemctl --user start claude-telegram-bot
+systemctl --user start cli-tg
 
 # 停止服务
-systemctl --user stop claude-telegram-bot
+systemctl --user stop cli-tg
 
 # 重启服务
-systemctl --user restart claude-telegram-bot
+systemctl --user restart cli-tg
 
 # 查看状态
-systemctl --user status claude-telegram-bot
+systemctl --user status cli-tg
 
 # 查看实时日志
-journalctl --user -u claude-telegram-bot -f
+journalctl --user -u cli-tg -f
 
 # 查看最近日志（最后 50 行）
-journalctl --user -u claude-telegram-bot -n 50
+journalctl --user -u cli-tg -n 50
 
 # 禁用自启动
-systemctl --user disable claude-telegram-bot
+systemctl --user disable cli-tg
 
 # 启用自启动
-systemctl --user enable claude-telegram-bot
+systemctl --user enable cli-tg
 ```
 
 ## 更新服务
@@ -113,7 +113,7 @@ systemctl --user enable claude-telegram-bot
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user restart claude-telegram-bot
+systemctl --user restart cli-tg
 ```
 
 ## 故障排除
@@ -121,17 +121,17 @@ systemctl --user restart claude-telegram-bot
 **服务无法启动：**
 ```bash
 # 检查日志中的错误
-journalctl --user -u claude-telegram-bot -n 100
+journalctl --user -u cli-tg -n 100
 
 # 验证服务文件中的路径是否正确
-systemctl --user cat claude-telegram-bot
+systemctl --user cat cli-tg
 
 # 检查 Poetry 是否已安装
 poetry --version
 
 # 先手动测试 bot
 cd /home/ubuntu/Code/oss/claude-code-telegram
-poetry run claude-telegram-bot
+poetry run cli-tg
 ```
 
 **注销后服务停止：**
@@ -143,6 +143,6 @@ loginctl enable-linger $USER
 
 ## 相关文件
 
-- 服务文件：`~/.config/systemd/user/claude-telegram-bot.service`
-- 日志：使用 `journalctl --user -u claude-telegram-bot` 查看
+- 服务文件：`~/.config/systemd/user/cli-tg.service`
+- 日志：使用 `journalctl --user -u cli-tg` 查看
 - 项目目录：`/home/ubuntu/Code/oss/claude-code-telegram`
