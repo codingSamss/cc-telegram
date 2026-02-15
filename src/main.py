@@ -300,6 +300,13 @@ async def run_application(app: Dict[str, Any]) -> None:
             except asyncio.CancelledError:
                 pass
 
+        # Re-raise bot task exception so the process exits with non-zero
+        # code (allows systemd Restart=on-failure to kick in)
+        if bot_task in done and not bot_task.cancelled():
+            exc = bot_task.exception()
+            if exc is not None:
+                raise exc
+
     except Exception as e:
         logger.error("Application error", error=str(e))
         raise

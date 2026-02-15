@@ -105,16 +105,32 @@ class SessionService:
         return None
 
     @staticmethod
+    def _format_reasoning_effort(value: Any) -> str:
+        """Render reasoning effort in a compact user-facing format."""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        normalized = raw.lower().replace("-", "").replace("_", "")
+        mapping = {
+            "low": "Low",
+            "medium": "Medium",
+            "high": "High",
+            "xhigh": "X High",
+        }
+        return mapping.get(normalized, raw.title())
+
+    @staticmethod
     def _resolve_display_model(
         *,
         current_model: Optional[str],
         session_info: Optional[Dict[str, Any]],
         precise_context: Optional[Dict[str, Any]],
+        prefer_runtime_model: bool = False,
     ) -> str:
         """Resolve user-facing model name for /context status line."""
         current = str(current_model or "").strip()
-        if current and current.lower() not in {"default", "current"}:
-            return current
+        current_explicit = current and current.lower() not in {"default", "current"}
+        runtime_model = ""
 
         if isinstance(precise_context, dict):
             precise_model = str(
@@ -123,16 +139,37 @@ class SessionService:
                 or ""
             ).strip()
             if precise_model:
-                return precise_model
+                runtime_model = precise_model
 
-        if isinstance(session_info, dict):
+        if not runtime_model and isinstance(session_info, dict):
             usage_model = SessionService._extract_resolved_model_from_usage(
                 session_info.get("model_usage") or {}
             )
             if usage_model:
-                return usage_model
+                runtime_model = usage_model
 
-        return current or "default"
+        if prefer_runtime_model:
+            model = runtime_model or (current if current_explicit else "")
+        else:
+            model = (current if current_explicit else "") or runtime_model
+        if not model:
+            model = current or "default"
+
+        effort = ""
+        if isinstance(precise_context, dict):
+            effort = SessionService._format_reasoning_effort(
+                precise_context.get("reasoning_effort")
+                or precise_context.get("reasoningEffort")
+                or precise_context.get("effort")
+            )
+        if not effort and isinstance(session_info, dict):
+            effort = SessionService._format_reasoning_effort(
+                session_info.get("reasoning_effort")
+                or session_info.get("reasoningEffort")
+            )
+        if effort and model.lower() not in {"default", "current"}:
+            return f"{model} ({effort})"
+        return model
 
     @staticmethod
     def _probe_codex_session_snapshot(session_id: str) -> Optional[Dict[str, Any]]:
@@ -192,6 +229,7 @@ class SessionService:
             return None
 
         resolved_model: Optional[str] = None
+        reasoning_effort: Optional[str] = None
         usage_payload: Optional[Dict[str, Any]] = None
         rate_limits_payload: Optional[Dict[str, Any]] = None
         for line in reversed(lines):
@@ -213,6 +251,21 @@ class SessionService:
                 model = str(payload.get("model") or "").strip()
                 if model:
                     resolved_model = model
+                if reasoning_effort is None:
+                    effort = str(
+                        payload.get("effort") or payload.get("reasoning_effort") or ""
+                    ).strip()
+                    if not effort:
+                        collaboration_mode = payload.get("collaboration_mode")
+                        settings = (
+                            collaboration_mode.get("settings")
+                            if isinstance(collaboration_mode, dict)
+                            else None
+                        )
+                        if isinstance(settings, dict):
+                            effort = str(settings.get("reasoning_effort") or "").strip()
+                    if effort:
+                        reasoning_effort = effort
 
             if record_type != "event_msg" or not isinstance(payload, dict):
                 continue
@@ -288,12 +341,15 @@ class SessionService:
             usage_payload is None
             and resolved_model is None
             and rate_limits_payload is None
+            and reasoning_effort is None
         ):
             return None
 
         snapshot = dict(usage_payload or {})
         if resolved_model:
             snapshot["resolved_model"] = resolved_model
+        if reasoning_effort:
+            snapshot["reasoning_effort"] = reasoning_effort
         if rate_limits_payload:
             snapshot["rate_limits"] = rate_limits_payload
         SessionService._codex_snapshot_cache[sid] = (now, dict(snapshot))
@@ -471,6 +527,16 @@ class SessionService:
                             model=current_model,
                         )
                     )
+                if (
+                    cli_kind == "codex"
+                    and isinstance(precise_context, dict)
+                    and codex_local_snapshot
+                    and codex_local_snapshot.get("reasoning_effort")
+                    and not precise_context.get("reasoning_effort")
+                ):
+                    precise_context["reasoning_effort"] = codex_local_snapshot[
+                        "reasoning_effort"
+                    ]
                 if precise_context:
                     lines.extend(build_precise_context_status_lines(precise_context))
 
@@ -478,7 +544,13 @@ class SessionService:
                 if session_info:
                     lines.append(f"Messages: {session_info.get('messages', 0)}")
                     lines.append(f"Turns: {session_info.get('turns', 0)}")
-                    lines.append(f"Cost: `${session_info.get('cost', 0.0):.4f}`")
+                    cost_raw = session_info.get("cost", 0.0)
+                    try:
+                        cost_value = float(cost_raw or 0.0)
+                    except (TypeError, ValueError):
+                        cost_value = 0.0
+                    if cost_value > 0:
+                        lines.append(f"Cost: `${cost_value:.4f}`")
 
                     model_usage = session_info.get("model_usage")
                     if model_usage and not precise_context:
@@ -513,11 +585,15 @@ class SessionService:
                         precise_context = {
                             "resolved_model": codex_local_snapshot["resolved_model"]
                         }
+                        effort = codex_local_snapshot.get("reasoning_effort")
+                        if effort:
+                            precise_context["reasoning_effort"] = effort
 
                     model_display = SessionService._resolve_display_model(
                         current_model=current_model,
                         session_info=session_info,
                         precise_context=precise_context,
+                        prefer_runtime_model=cli_kind == "codex",
                     )
                     lines[model_line_idx] = f"Model: `{model_display}`"
 

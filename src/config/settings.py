@@ -153,13 +153,13 @@ class Settings(BaseSettings):
         le=3600,
     )
     stream_render_debounce_ms: int = Field(
-        400,
+        1000,
         description="Debounce interval for streaming progress message updates",
         ge=0,
         le=5000,
     )
     stream_render_min_edit_interval_ms: int = Field(
-        700,
+        1000,
         description="Minimum interval between Telegram progress message edits",
         ge=0,
         le=10000,

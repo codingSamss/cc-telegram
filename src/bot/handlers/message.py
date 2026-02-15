@@ -467,6 +467,15 @@ def _format_error_message(error_str: str, *, engine: str = ENGINE_CLAUDE) -> str
         )
 
 
+def _is_timeout_error(error: Exception | str | None) -> bool:
+    """Detect if a Telegram API error was caused by a timeout."""
+
+    if error is None:
+        return False
+    raw = error if isinstance(error, str) else str(error)
+    return "timeout" in raw.lower()
+
+
 def _get_stream_merge_key(update_obj: Any) -> Optional[str]:
     """Return merge key for high-frequency stream updates, or None if not mergeable."""
     if (
@@ -529,6 +538,7 @@ def _build_context_tag(
     approved_directory: Path,
     active_engine: str,
     session_id: Optional[str],
+    session_context_summary: Optional[str] = None,
     rate_limit_summary: Optional[str] = None,
 ) -> str:
     """Build a compact context tag line for display in thinking summary or reply header.
@@ -538,10 +548,45 @@ def _build_context_tag(
     current_dir = scope_state.get("current_directory", approved_directory)
     project_name = current_dir.name if current_dir and current_dir.name else "~"
     sid_short = (session_id or "no-session")[:8]
-    tag = f"{_engine_badge(active_engine)} | `{project_name}` | `{sid_short}`"
+    lines = [f"{_engine_badge(active_engine)} | `{project_name}` | `{sid_short}`"]
+    if session_context_summary:
+        lines.append(session_context_summary)
     if rate_limit_summary:
-        tag = f"{tag}\n🔋 {rate_limit_summary}"
-    return tag
+        lines.append(f"🔋 {rate_limit_summary}")
+    return "\n".join(lines)
+
+
+def _build_session_context_summary(snapshot: Optional[dict[str, Any]]) -> Optional[str]:
+    """Render current session context usage summary from cached Codex snapshot."""
+    if not isinstance(snapshot, dict):
+        return None
+
+    try:
+        used_percent = float(snapshot.get("used_percent"))
+    except (TypeError, ValueError):
+        return None
+
+    total_tokens_raw = snapshot.get("total_tokens")
+    remaining_tokens_raw = snapshot.get("remaining_tokens")
+    remaining_percent: Optional[float] = None
+    try:
+        total_tokens = int(total_tokens_raw or 0)
+        remaining_tokens = int(remaining_tokens_raw or 0)
+        if total_tokens > 0:
+            remaining_percent = max(
+                min(remaining_tokens / total_tokens * 100, 100.0), 0.0
+            )
+    except (TypeError, ValueError):
+        remaining_percent = None
+
+    if remaining_percent is None:
+        remaining_percent = max(min(100.0 - used_percent, 100.0), 0.0)
+
+    used_percent = max(min(used_percent, 100.0), 0.0)
+    return (
+        "🧠 Session context: "
+        f"`{used_percent:.1f}%` used · `{remaining_percent:.1f}%` remaining"
+    )
 
 
 def _generate_thinking_summary(all_progress_lines: list[str]) -> str:
@@ -764,9 +809,13 @@ async def handle_text_message(
             max(settings.stream_render_min_edit_interval_ms, 0) / 1000
         )
         last_progress_edit_ts = stream_loop.time()
+        progress_edit_attempts = 0
+        PROGRESS_EDIT_RETRY_LIMIT = 3
+        progress_edit_attempts = 0
+        PROGRESS_EDIT_RETRY_LIMIT = 3
 
         async def _flush_pending_progress(force: bool = False) -> None:
-            nonlocal last_progress_text, pending_progress_text, last_progress_edit_ts
+            nonlocal progress_msg, last_progress_text, pending_progress_text, last_progress_edit_ts
 
             async with progress_flush_lock:
                 if not pending_progress_text:
@@ -786,6 +835,19 @@ async def handle_text_message(
                 if not text_to_send or text_to_send == last_progress_text:
                     return
 
+                async def _refresh_with_new_message() -> None:
+                    nonlocal progress_msg, last_progress_edit_ts
+                    try:
+                        await progress_msg.edit_reply_markup(reply_markup=None)
+                    except Exception:
+                        pass
+                    progress_msg = await progress_msg.reply_text(
+                        text_to_send,
+                        parse_mode="Markdown",
+                        reply_markup=cancel_keyboard,
+                    )
+                    last_progress_edit_ts = stream_loop.time()
+
                 try:
                     await progress_msg.edit_text(
                         text_to_send,
@@ -800,7 +862,8 @@ async def handle_text_message(
                         last_progress_edit_ts = stream_loop.time()
                         return
 
-                    # Fallback: retry without parse_mode when markdown parsing fails.
+                    fallback_error: Exception | None = None
+                    timeout_error = _is_timeout_error(e)
                     try:
                         await progress_msg.edit_text(
                             text_to_send,
@@ -808,16 +871,22 @@ async def handle_text_message(
                         )
                         last_progress_text = text_to_send
                         last_progress_edit_ts = stream_loop.time()
-                    except Exception as fallback_error:
-                        if _is_noop_edit_error(fallback_error):
+                    except Exception as exc:
+                        fallback_error = exc
+                        if _is_noop_edit_error(exc):
                             last_progress_text = text_to_send
                             last_progress_edit_ts = stream_loop.time()
                             return
-                        logger.warning(
-                            "Failed to update progress message",
-                            error=str(e),
-                            fallback_error=str(fallback_error),
-                        )
+                        timeout_error = timeout_error or _is_timeout_error(exc)
+                    if timeout_error:
+                        await _refresh_with_new_message()
+                        last_progress_text = text_to_send
+                        return
+                    logger.warning(
+                        "Failed to update progress message",
+                        error=str(e),
+                        fallback_error=str(fallback_error) if fallback_error else None,
+                    )
 
         def _schedule_progress_flush() -> None:
             nonlocal progress_flush_task
@@ -1068,6 +1137,7 @@ async def handle_text_message(
 
         # Build context tag for display in thinking summary or reply header
         rate_limit_summary: Optional[str] = None
+        session_context_summary: Optional[str] = None
         session_id = claude_response.session_id if claude_response else None
         codex_snapshot = None
         if active_engine == ENGINE_CODEX and session_id:
@@ -1077,6 +1147,7 @@ async def handle_text_message(
                     session_id
                 )
         if codex_snapshot:
+            session_context_summary = _build_session_context_summary(codex_snapshot)
             rate_limit_summary = format_rate_limit_summary(
                 codex_snapshot.get("rate_limits")
             )
@@ -1085,6 +1156,7 @@ async def handle_text_message(
             approved_directory=settings.approved_directory,
             active_engine=active_engine,
             session_id=scope_state.get("claude_session_id"),
+            session_context_summary=session_context_summary,
             rate_limit_summary=rate_limit_summary,
         )
         has_thinking_summary = False
@@ -1092,7 +1164,7 @@ async def handle_text_message(
         # Collapse progress message into summary with expand button
         if all_progress_lines:
             summary_text = (
-                context_tag + "\n" + _generate_thinking_summary(all_progress_lines)
+                context_tag + "\n\n" + _generate_thinking_summary(all_progress_lines)
             )
             has_thinking_summary = True
             thinking_keyboard = InlineKeyboardMarkup(

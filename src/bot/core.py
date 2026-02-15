@@ -41,6 +41,10 @@ class ClaudeCodeBot:
         self.app: Optional[Application] = None
         self.is_running = False
         self.feature_registry: Optional[FeatureRegistry] = None
+        # Polling error tracking for rate-limited logging
+        self._polling_error_count: int = 0
+        self._polling_error_window_start: float = 0.0
+        self._last_polling_error_log: float = 0.0
 
     async def initialize(self) -> None:
         """Initialize bot application."""
@@ -99,11 +103,17 @@ class ClaudeCodeBot:
         logger.info("Bot initialization complete")
 
     async def _set_bot_commands(self) -> None:
-        """Set bot command menu."""
-        commands = build_bot_commands_for_engine(ENGINE_CLAUDE)
-
-        await self.app.bot.set_my_commands(commands)
-        logger.info("Bot commands set", commands=[cmd.command for cmd in commands])
+        """Set bot command menu (non-fatal on failure)."""
+        try:
+            commands = build_bot_commands_for_engine(ENGINE_CLAUDE)
+            await self.app.bot.set_my_commands(commands)
+            logger.info("Bot commands set", commands=[cmd.command for cmd in commands])
+        except Exception as e:
+            logger.warning(
+                "Failed to set bot commands, will retry on next startup",
+                error=str(e),
+                error_type=type(e).__name__,
+            )
 
     def _register_handlers(self) -> None:
         """Register all command and message handlers."""
@@ -303,6 +313,8 @@ class ClaudeCodeBot:
                 await self.app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
                     drop_pending_updates=True,
+                    bootstrap_retries=10,
+                    error_callback=self._polling_error_callback,
                 )
 
                 # Keep running until manually stopped
@@ -342,6 +354,32 @@ class ClaudeCodeBot:
         except Exception as e:
             logger.error("Error stopping bot", error=str(e))
             raise ClaudeCodeTelegramError(f"Failed to stop bot: {str(e)}") from e
+
+    def _polling_error_callback(self, error: Exception) -> None:
+        """Handle network errors during polling (sync callback, required by PTB)."""
+        import time
+
+        now = time.monotonic()
+
+        # Reset sliding window (60s window)
+        if now - self._polling_error_window_start > 60:
+            self._polling_error_count = 0
+            self._polling_error_window_start = now
+
+        self._polling_error_count += 1
+
+        # Rate limit: at most one log entry per 30 seconds
+        if now - self._last_polling_error_log < 30:
+            return
+
+        self._last_polling_error_log = now
+        log_fn = logger.error if self._polling_error_count > 5 else logger.warning
+        log_fn(
+            "Polling network error (PTB will retry automatically)",
+            error=str(error),
+            error_type=type(error).__name__,
+            error_count_in_window=self._polling_error_count,
+        )
 
     async def _error_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

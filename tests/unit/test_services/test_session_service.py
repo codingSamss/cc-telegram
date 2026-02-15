@@ -144,6 +144,7 @@ async def test_build_context_snapshot_for_active_session():
     assert "Session: `sess-abc...`" in rendered
     assert "Messages: 3" in rendered
     assert "Turns: 2" in rendered
+    assert "Cost: `$0.1200`" in rendered
     assert "Recent Session Events" in rendered
     assert snapshot.precise_context is not None
     assert snapshot.session_info is not None
@@ -226,6 +227,7 @@ async def test_build_context_snapshot_codex_without_precise_uses_status_hint():
     rendered = "\n".join(snapshot.lines)
     assert "Context (/status)" in rendered
     assert "请执行 `/status` 刷新" in rendered
+    assert "Cost:" not in rendered
     assert "Tokens: `156,647,370`" not in rendered
     claude_integration.get_precise_context_usage.assert_awaited_once()
 
@@ -255,23 +257,24 @@ async def test_build_context_snapshot_codex_uses_local_snapshot_for_model_and_us
     monkeypatch.setattr(
         SessionService,
         "_probe_codex_session_snapshot",
-            staticmethod(
-                lambda _session_id: {
-                    "used_tokens": 108_000,
-                    "total_tokens": 258_400,
-                    "remaining_tokens": 150_400,
-                    "used_percent": 41.8,
-                    "probe_command": "/status",
-                    "cached": False,
-                    "resolved_model": "gpt-5.2-codex",
-                    "rate_limits": {
-                        "primary": {"used_percent": 20.0, "window_minutes": 300},
-                        "secondary": {"used_percent": 36.0, "window_minutes": 10_080},
-                        "updated_at": "2026-02-14T09:06:49Z",
-                    },
-                }
-            ),
-        )
+        staticmethod(
+            lambda _session_id: {
+                "used_tokens": 108_000,
+                "total_tokens": 258_400,
+                "remaining_tokens": 150_400,
+                "used_percent": 41.8,
+                "probe_command": "/status",
+                "cached": False,
+                "resolved_model": "gpt-5.3-codex",
+                "reasoning_effort": "xhigh",
+                "rate_limits": {
+                    "primary": {"used_percent": 20.0, "window_minutes": 300},
+                    "secondary": {"used_percent": 36.0, "window_minutes": 10_080},
+                    "updated_at": "2026-02-14T09:06:49Z",
+                },
+            }
+        ),
+    )
 
     snapshot = await SessionService.build_context_snapshot(
         user_id=3012,
@@ -284,13 +287,61 @@ async def test_build_context_snapshot_codex_uses_local_snapshot_for_model_and_us
     )
 
     rendered = "\n".join(snapshot.lines)
-    assert "Model: `gpt-5.2-codex`" in rendered
+    assert "Model: `gpt-5.3-codex (X High)`" in rendered
     assert "Context (/status)" in rendered
+    assert "Cost:" not in rendered
     assert "Usage: `108,000` / `258,400` (41.8%)" in rendered
     assert "Usage Limits (/status)" in rendered
     assert "5h window: `20.0%`" in rendered
     assert "7d window: `36.0%`" in rendered
     claude_integration.get_precise_context_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_build_context_snapshot_codex_prefers_runtime_model_over_stale_state(
+    monkeypatch,
+):
+    """Codex should prefer latest runtime model over stale scoped model string."""
+    approved = Path("/tmp/project")
+    process_manager = SimpleNamespace(
+        _resolve_cli_path=lambda: "/usr/local/bin/codex",
+        _detect_cli_kind=lambda _: "codex",
+    )
+    claude_integration = SimpleNamespace(
+        process_manager=process_manager,
+        get_precise_context_usage=AsyncMock(return_value=None),
+        get_session_info=AsyncMock(
+            return_value={
+                "messages": 1,
+                "turns": 1,
+                "cost": 0.0,
+                "model_usage": None,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        SessionService,
+        "_probe_codex_session_snapshot",
+        staticmethod(
+            lambda _session_id: {
+                "resolved_model": "gpt-5.3-codex",
+                "reasoning_effort": "xhigh",
+            }
+        ),
+    )
+
+    snapshot = await SessionService.build_context_snapshot(
+        user_id=3013,
+        session_id="thread-codex-stale-model",
+        current_dir=approved,
+        approved_directory=approved,
+        current_model="gpt-5.1-codex-mini",
+        claude_integration=claude_integration,
+        allow_precise_context_probe=True,
+    )
+
+    rendered = "\n".join(snapshot.lines)
+    assert "Model: `gpt-5.3-codex (X High)`" in rendered
 
 
 def test_get_cached_codex_snapshot_respects_ttl(monkeypatch):

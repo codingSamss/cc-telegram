@@ -10,6 +10,7 @@ import pytest
 from src.bot.handlers.message import (
     _append_progress_line_with_merge,
     _build_context_tag,
+    _build_session_context_summary,
     _format_error_message,
     _format_progress_update,
     _get_stream_merge_key,
@@ -355,6 +356,38 @@ def test_build_context_tag_shows_rate_limit_summary():
 
     assert "🔋" in tag
     assert summary in tag
+
+
+def test_build_context_tag_shows_session_context_summary():
+    """Context tag should include session usage summary on a dedicated line."""
+    tag = _build_context_tag(
+        scope_state={"current_directory": Path("/tmp/demo-project")},
+        approved_directory=Path("/tmp"),
+        active_engine=ENGINE_CODEX,
+        session_id="session-codex-123456",
+        session_context_summary="🧠 Session context: `28.2%` used · `71.8%` remaining",
+        rate_limit_summary="5h window: 12.5%",
+    )
+
+    lines = tag.splitlines()
+    assert len(lines) == 3
+    assert lines[1].startswith("🧠 Session context")
+    assert lines[2].startswith("🔋")
+
+
+def test_build_session_context_summary_prefers_explicit_remaining_tokens():
+    """Session context summary should derive remaining percent from token fields."""
+    summary = _build_session_context_summary(
+        {
+            "used_percent": 28.2,
+            "total_tokens": 258_400,
+            "remaining_tokens": 185_549,
+        }
+    )
+
+    assert summary is not None
+    assert "`28.2%` used" in summary
+    assert "`71.8%` remaining" in summary
 
 
 def test_with_engine_badge_prefixes_codex_bubble():
