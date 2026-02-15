@@ -96,21 +96,15 @@ CODEX_ENABLE_MCP=false
 
 ### Step 5: 配置 claude-wrapper.sh
 
-如果使用 CLI 子进程模式 (`USE_SDK=false`)，需要创建包装脚本:
+如果使用 CLI 子进程模式 (`USE_SDK=false`)，建议从模板复制：
 
 ```bash
-cat > claude-wrapper.sh << 'EOF'
-#!/bin/bash
-# 根据需要配置代理 (不需要代理则删除以下三行)
-export http_proxy="http://127.0.0.1:7897"
-export https_proxy="http://127.0.0.1:7897"
-export no_proxy="localhost,127.0.0.1"
-exec /opt/homebrew/bin/npx -y @anthropic-ai/claude-code@latest "$@"
-EOF
+cp claude-wrapper.example.sh claude-wrapper.sh
 chmod +x claude-wrapper.sh
 ```
 
-> 此脚本已在 `.gitignore` 中屏蔽，不会提交到仓库。根据你的环境修改代理地址和 `npx` 路径。
+然后按你的本机环境修改 `claude-wrapper.sh`（例如代理地址、CLI 路径）。  
+本地 `claude-wrapper.sh` 保持在 `.gitignore` 中，避免把机器相关配置提交到仓库。
 
 ### Step 6: 确保 Claude CLI 已认证
 
