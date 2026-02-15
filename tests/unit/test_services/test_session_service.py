@@ -1,6 +1,7 @@
 """Tests for session/event services."""
 
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -227,6 +228,115 @@ async def test_build_context_snapshot_codex_without_precise_uses_status_hint():
     assert "请执行 `/status` 刷新" in rendered
     assert "Tokens: `156,647,370`" not in rendered
     claude_integration.get_precise_context_usage.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_build_context_snapshot_codex_uses_local_snapshot_for_model_and_usage(
+    monkeypatch,
+):
+    """Codex /context should render model and usage from local session snapshot."""
+    approved = Path("/tmp/project")
+    process_manager = SimpleNamespace(
+        _resolve_cli_path=lambda: "/usr/local/bin/codex",
+        _detect_cli_kind=lambda _: "codex",
+    )
+    claude_integration = SimpleNamespace(
+        process_manager=process_manager,
+        get_precise_context_usage=AsyncMock(return_value=None),
+        get_session_info=AsyncMock(
+            return_value={
+                "messages": 37,
+                "turns": 37,
+                "cost": 0.0,
+                "model_usage": None,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        SessionService,
+        "_probe_codex_session_snapshot",
+            staticmethod(
+                lambda _session_id: {
+                    "used_tokens": 108_000,
+                    "total_tokens": 258_400,
+                    "remaining_tokens": 150_400,
+                    "used_percent": 41.8,
+                    "probe_command": "/status",
+                    "cached": False,
+                    "resolved_model": "gpt-5.2-codex",
+                    "rate_limits": {
+                        "primary": {"used_percent": 20.0, "window_minutes": 300},
+                        "secondary": {"used_percent": 36.0, "window_minutes": 10_080},
+                        "updated_at": "2026-02-14T09:06:49Z",
+                    },
+                }
+            ),
+        )
+
+    snapshot = await SessionService.build_context_snapshot(
+        user_id=3012,
+        session_id="thread-codex-local",
+        current_dir=approved,
+        approved_directory=approved,
+        current_model="default",
+        claude_integration=claude_integration,
+        allow_precise_context_probe=True,
+    )
+
+    rendered = "\n".join(snapshot.lines)
+    assert "Model: `gpt-5.2-codex`" in rendered
+    assert "Context (/status)" in rendered
+    assert "Usage: `108,000` / `258,400` (41.8%)" in rendered
+    assert "Usage Limits (/status)" in rendered
+    assert "5h window: `20.0%`" in rendered
+    assert "7d window: `36.0%`" in rendered
+    claude_integration.get_precise_context_usage.assert_not_awaited()
+
+
+def test_get_cached_codex_snapshot_respects_ttl(monkeypatch):
+    """Cached Codex snapshot should obey TTL before expiring."""
+    session_id = "rate-limit-cache"
+    SessionService._codex_snapshot_cache.clear()
+    sample_snapshot = {"used_tokens": 1}
+    base_time = time.monotonic()
+    SessionService._codex_snapshot_cache[session_id] = (base_time, sample_snapshot)
+
+    first = SessionService.get_cached_codex_snapshot(session_id)
+    assert first == sample_snapshot
+
+    monkeypatch.setattr(
+        time,
+        "monotonic",
+        lambda: base_time + SessionService._codex_snapshot_ttl_seconds + 1,
+    )
+    expired = SessionService.get_cached_codex_snapshot(session_id)
+    assert expired is None
+
+
+def test_parse_codex_rate_limits_extracts_primary_secondary():
+    """Codex rate_limits payload should be normalized for status rendering."""
+    parsed = SessionService._parse_codex_rate_limits(
+        {
+            "primary": {
+                "used_percent": 11,
+                "window_minutes": 300,
+                "resets_at": 1_771_060_321,
+            },
+            "secondary": {
+                "used_percent": 42,
+                "window_minutes": 10_080,
+                "resets_at": 1_771_220_100,
+            },
+        },
+        event_timestamp="2026-02-09T13:54:15.687Z",
+    )
+
+    assert parsed is not None
+    assert parsed["primary"]["used_percent"] == 11.0
+    assert parsed["primary"]["window_minutes"] == 300
+    assert parsed["secondary"]["used_percent"] == 42.0
+    assert parsed["secondary"]["window_minutes"] == 10_080
+    assert parsed["updated_at"] == "2026-02-09T13:54:15.687000Z"
 
 
 @pytest.mark.asyncio

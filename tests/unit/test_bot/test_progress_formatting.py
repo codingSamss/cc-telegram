@@ -342,6 +342,21 @@ def test_build_context_tag_renders_claude_badge():
     assert "`claude-project`" in tag
 
 
+def test_build_context_tag_shows_rate_limit_summary():
+    """Context tag should append rate limit info when provided."""
+    summary = "5h window: 12.5% · 7d window: 37.0% (updated 2026-02-09T13:54:15Z)"
+    tag = _build_context_tag(
+        scope_state={"current_directory": Path("/tmp/demo-project")},
+        approved_directory=Path("/tmp"),
+        active_engine=ENGINE_CODEX,
+        session_id="session-codex-123456",
+        rate_limit_summary=summary,
+    )
+
+    assert "🔋" in tag
+    assert summary in tag
+
+
 def test_with_engine_badge_prefixes_codex_bubble():
     """Engine badge helper should prepend codex marker to bubble text."""
     text = _with_engine_badge("正在处理你的请求...", ENGINE_CODEX)

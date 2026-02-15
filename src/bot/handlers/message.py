@@ -17,6 +17,8 @@ from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
+from ...services.session_service import SessionService
+from ...utils.codex_rate_limits import format_rate_limit_summary
 from ..utils.cli_engine import (
     ENGINE_CLAUDE,
     ENGINE_CODEX,
@@ -527,6 +529,7 @@ def _build_context_tag(
     approved_directory: Path,
     active_engine: str,
     session_id: Optional[str],
+    rate_limit_summary: Optional[str] = None,
 ) -> str:
     """Build a compact context tag line for display in thinking summary or reply header.
 
@@ -535,7 +538,10 @@ def _build_context_tag(
     current_dir = scope_state.get("current_directory", approved_directory)
     project_name = current_dir.name if current_dir and current_dir.name else "~"
     sid_short = (session_id or "no-session")[:8]
-    return f"{_engine_badge(active_engine)} | `{project_name}` | `{sid_short}`"
+    tag = f"{_engine_badge(active_engine)} | `{project_name}` | `{sid_short}`"
+    if rate_limit_summary:
+        tag = f"{tag}\n🔋 {rate_limit_summary}"
+    return tag
 
 
 def _generate_thinking_summary(all_progress_lines: list[str]) -> str:
@@ -1061,11 +1067,25 @@ async def handle_text_message(
         await _cancel_progress_flush_task()
 
         # Build context tag for display in thinking summary or reply header
+        rate_limit_summary: Optional[str] = None
+        session_id = claude_response.session_id if claude_response else None
+        codex_snapshot = None
+        if active_engine == ENGINE_CODEX and session_id:
+            codex_snapshot = SessionService.get_cached_codex_snapshot(session_id)
+            if codex_snapshot is None:
+                codex_snapshot = SessionService._probe_codex_session_snapshot(
+                    session_id
+                )
+        if codex_snapshot:
+            rate_limit_summary = format_rate_limit_summary(
+                codex_snapshot.get("rate_limits")
+            )
         context_tag = _build_context_tag(
             scope_state=scope_state,
             approved_directory=settings.approved_directory,
             active_engine=active_engine,
             session_id=scope_state.get("claude_session_id"),
+            rate_limit_summary=rate_limit_summary,
         )
         has_thinking_summary = False
 

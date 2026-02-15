@@ -1,5 +1,6 @@
 """Helpers for formatting status context/token usage."""
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
@@ -142,28 +143,113 @@ def build_precise_context_status_lines(context_usage: Dict[str, Any]) -> List[st
     """Build status lines from exact /context probe output."""
     used_tokens = int(context_usage.get("used_tokens", 0) or 0)
     total_tokens = int(context_usage.get("total_tokens", 0) or 0)
-    if total_tokens <= 0:
+    lines: List[str] = []
+    if total_tokens > 0:
+        used_percent = float(
+            context_usage.get("used_percent", used_tokens / total_tokens * 100)
+        )
+        remaining_tokens = int(
+            context_usage.get("remaining_tokens", max(total_tokens - used_tokens, 0))
+        )
+        cached = bool(context_usage.get("cached", False))
+        probe_command = str(context_usage.get("probe_command") or "/context").strip()
+        if not probe_command.startswith("/"):
+            probe_command = f"/{probe_command}"
+        if not probe_command:
+            probe_command = "/context"
+        estimated = bool(context_usage.get("estimated", False))
+
+        header = f"\n*Context ({probe_command})*"
+        if cached:
+            header = f"\n*Context ({probe_command}, cached)*"
+        lines.extend(
+            [
+                header,
+                f"Usage: `{used_tokens:,}` / `{total_tokens:,}` ({used_percent:.1f}%)",
+                f"Remaining: `{remaining_tokens:,}` tokens",
+            ]
+        )
+
+    rate_limit_lines = _build_rate_limit_lines(context_usage.get("rate_limits"))
+    if rate_limit_lines:
+        lines.extend(rate_limit_lines)
+
+    return lines
+
+
+def _build_rate_limit_lines(rate_limits: Any) -> List[str]:
+    """Build Codex status window usage lines from token_count.rate_limits."""
+    if not isinstance(rate_limits, dict):
         return []
 
-    used_percent = float(
-        context_usage.get("used_percent", used_tokens / total_tokens * 100)
-    )
-    remaining_tokens = int(
-        context_usage.get("remaining_tokens", max(total_tokens - used_tokens, 0))
-    )
-    cached = bool(context_usage.get("cached", False))
-    probe_command = str(context_usage.get("probe_command") or "/context").strip()
-    if not probe_command.startswith("/"):
-        probe_command = f"/{probe_command}"
-    if not probe_command:
-        probe_command = "/context"
+    entries: List[Dict[str, Any]] = []
+    for key in ("primary", "secondary"):
+        entry = rate_limits.get(key)
+        if not isinstance(entry, dict):
+            continue
+        try:
+            used_percent = float(entry.get("used_percent"))
+            window_minutes = int(entry.get("window_minutes"))
+        except (TypeError, ValueError):
+            continue
+        if window_minutes <= 0:
+            continue
 
-    header = f"\n*Context ({probe_command})*"
-    if cached:
-        header = f"\n*Context ({probe_command}, cached)*"
+        normalized: Dict[str, Any] = {
+            "used_percent": used_percent,
+            "window_minutes": window_minutes,
+        }
+        try:
+            resets_at = int(entry.get("resets_at"))
+            if resets_at > 0:
+                normalized["resets_at"] = resets_at
+        except (TypeError, ValueError):
+            pass
+        entries.append(normalized)
 
-    return [
-        header,
-        f"Usage: `{used_tokens:,}` / `{total_tokens:,}` ({used_percent:.1f}%) _(exact)_",
-        f"Remaining: `{remaining_tokens:,}` tokens",
-    ]
+    if not entries:
+        return []
+
+    entries.sort(key=lambda item: int(item.get("window_minutes", 0)))
+
+    lines: List[str] = ["", "*Usage Limits (/status)*"]
+    updated_at = str(rate_limits.get("updated_at") or "").strip()
+    if updated_at:
+        lines.append(f"Updated: `{updated_at}`")
+
+    for entry in entries:
+        window_minutes = int(entry["window_minutes"])
+        label = _window_label(window_minutes)
+        used_percent = float(entry["used_percent"])
+        reset_text = _format_unix_timestamp(entry.get("resets_at"))
+        line = f"{label}: `{used_percent:.1f}%`"
+        if reset_text:
+            line += f" (resets `{reset_text}`)"
+        lines.append(line)
+
+    return lines
+
+
+def _window_label(window_minutes: int) -> str:
+    """Render compact rate-limit window labels."""
+    if window_minutes % 10_080 == 0:
+        days = window_minutes // 1_440
+        return f"{days}d window"
+    if window_minutes % 60 == 0:
+        hours = window_minutes // 60
+        return f"{hours}h window"
+    return f"{window_minutes}m window"
+
+
+def _format_unix_timestamp(value: Any) -> str:
+    """Format unix timestamp as local wall-clock text."""
+    try:
+        ts = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if ts <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return ""

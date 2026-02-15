@@ -130,7 +130,7 @@ async def test_session_status_with_codex_engine_renders_exact_usage_percent(tmp_
     codex_integration.get_precise_context_usage.assert_awaited_once()
     rendered = status_msg.edit_text.await_args.args[0]
     assert "Context (/status)" in rendered
-    assert "Usage: `84,000` / `200,000` (42.0%) _(exact)_" in rendered
+    assert "Usage: `84,000` / `200,000` (42.0%)" in rendered
 
 
 @pytest.mark.asyncio

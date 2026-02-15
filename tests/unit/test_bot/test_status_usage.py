@@ -106,7 +106,7 @@ def test_build_precise_context_status_lines_marks_exact_source():
 
     joined = "\n".join(lines)
     assert "Context (/context, cached)" in joined
-    assert "Usage: `55,000` / `200,000` (27.5%) _(exact)_" in joined
+    assert "Usage: `55,000` / `200,000` (27.5%)" in joined
 
 
 def test_build_precise_context_status_lines_supports_status_probe_label():
@@ -124,7 +124,76 @@ def test_build_precise_context_status_lines_supports_status_probe_label():
 
     joined = "\n".join(lines)
     assert "Context (/status)" in joined
-    assert "Usage: `84,000` / `200,000` (42.0%) _(exact)_" in joined
+    assert "Usage: `84,000` / `200,000` (42.0%)" in joined
+
+
+def test_build_precise_context_status_lines_just_render_usage():
+    """Context lines should render usage without any estimate suffix."""
+    lines = build_precise_context_status_lines(
+        {
+            "used_tokens": 108_000,
+            "total_tokens": 258_400,
+            "remaining_tokens": 150_400,
+            "used_percent": 41.8,
+            "probe_command": "/status",
+            "cached": False,
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "Context (/status)" in joined
+    assert "Usage: `108,000` / `258,400` (41.8%)" in joined
+
+
+def test_build_precise_context_status_lines_renders_codex_usage_windows():
+    """Codex snapshot should render 5h/7d usage windows from rate limits."""
+    lines = build_precise_context_status_lines(
+        {
+            "used_tokens": 108_000,
+            "total_tokens": 258_400,
+            "remaining_tokens": 150_400,
+            "used_percent": 41.8,
+            "probe_command": "/status",
+            "estimated": True,
+            "rate_limits": {
+                "primary": {
+                    "used_percent": 17.0,
+                    "window_minutes": 300,
+                    "resets_at": 1_771_060_321,
+                },
+                "secondary": {
+                    "used_percent": 44.0,
+                    "window_minutes": 10_080,
+                    "resets_at": 1_771_220_100,
+                },
+                "updated_at": "2026-02-09T13:54:15Z",
+            },
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "Usage Limits (/status)" in joined
+    assert "5h window: `17.0%`" in joined
+    assert "7d window: `44.0%`" in joined
+    assert "Updated: `2026-02-09T13:54:15Z`" in joined
+
+
+def test_build_precise_context_status_lines_can_render_windows_without_context():
+    """When context numbers are missing, window usage should still be shown."""
+    lines = build_precise_context_status_lines(
+        {
+            "rate_limits": {
+                "primary": {"used_percent": 22.0, "window_minutes": 300},
+                "secondary": {"used_percent": 55.0, "window_minutes": 10_080},
+            }
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "Context (" not in joined
+    assert "Usage Limits (/status)" in joined
+    assert "5h window: `22.0%`" in joined
+    assert "7d window: `55.0%`" in joined
 
 
 def test_build_model_usage_status_lines_supports_codex_flat_usage_payload():
