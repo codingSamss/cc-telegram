@@ -291,8 +291,8 @@ async def test_start_command_uses_status_profile_for_codex(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_model_command_shows_read_only_model_for_codex_engine(tmp_path):
-    """Codex /model should show current model in read-only mode."""
+async def test_model_command_shows_switch_hint_for_codex_engine(tmp_path):
+    """Codex /model without args should show current model and switch hint."""
     approved = tmp_path / "approved"
     approved.mkdir()
     user_id = 1004
@@ -314,8 +314,44 @@ async def test_model_command_shows_read_only_model_for_codex_engine(tmp_path):
     rendered = update.message.reply_text.await_args.args[0]
     assert "当前引擎：`codex`" in rendered
     assert "当前模型：`default`" in rendered
-    assert "只读查看" in rendered
-    assert "/engine claude" in rendered
+    assert "/model <model_name>" in rendered
+    assert "/model default" in rendered
+    keyboard = update.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard
+    callback_ids = [btn.callback_data for row in keyboard for btn in row]
+    assert "model:codex:gpt-5.3-codex" in callback_ids
+    assert "model:codex:default" in callback_ids
+
+
+@pytest.mark.asyncio
+async def test_model_command_codex_can_set_and_reset_model(tmp_path):
+    """Codex /model should support setting explicit model and resetting default."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    user_id = 10042
+    scope_key = _scope_key(user_id, user_id)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(id=user_id),
+        effective_message=SimpleNamespace(message_thread_id=None),
+        message=SimpleNamespace(reply_text=AsyncMock()),
+    )
+    context = SimpleNamespace(
+        args=["gpt-5.3-codex"],
+        bot_data={"settings": _build_settings(approved)},
+        user_data={"scope_state": {scope_key: {ENGINE_STATE_KEY: "codex"}}},
+    )
+
+    await model_command(update, context)
+
+    scope_state = context.user_data["scope_state"][scope_key]
+    assert scope_state["claude_model"] == "gpt-5.3-codex"
+    rendered = update.message.reply_text.await_args.args[0]
+    assert "已更新 Codex 模型设置" in rendered
+    assert "当前设置：`gpt-5.3-codex`" in rendered
+
+    context.args = ["default"]
+    await model_command(update, context)
+    assert "claude_model" not in scope_state
 
 
 @pytest.mark.asyncio
@@ -387,7 +423,7 @@ async def test_codex_diag_command_rejects_when_engine_not_codex(tmp_path):
 
 @pytest.mark.asyncio
 async def test_model_callback_rejects_when_engine_does_not_support(tmp_path):
-    """Model callback should safely reject stale buttons under codex engine."""
+    """Codex engine should reject stale Claude model buttons."""
     approved = tmp_path / "approved"
     approved.mkdir()
     user_id = 1006
@@ -407,8 +443,39 @@ async def test_model_callback_rejects_when_engine_does_not_support(tmp_path):
     await handle_model_callback(query, "sonnet", context)
 
     rendered = query.edit_message_text.await_args.args[0]
-    assert "不支持模型选择" in rendered
-    assert "/engine claude" in rendered
+    assert "当前引擎：`codex`" in rendered
+    assert "请使用 Codex 模型按钮" in rendered
+
+
+@pytest.mark.asyncio
+async def test_model_callback_sets_model_for_codex_engine(tmp_path):
+    """Codex model callback should persist model and refresh keyboard."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    user_id = 10061
+    scope_key = _scope_key(user_id, user_id)
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        message=SimpleNamespace(
+            chat=SimpleNamespace(id=user_id), message_thread_id=None
+        ),
+        edit_message_text=AsyncMock(),
+    )
+    context = SimpleNamespace(
+        bot_data={"settings": _build_settings(approved)},
+        user_data={"scope_state": {scope_key: {ENGINE_STATE_KEY: "codex"}}},
+    )
+
+    await handle_model_callback(query, "codex:gpt-5.3-codex", context)
+
+    scope_state = context.user_data["scope_state"][scope_key]
+    assert scope_state["claude_model"] == "gpt-5.3-codex"
+    rendered = query.edit_message_text.await_args.args[0]
+    assert "已更新 Codex 模型设置" in rendered
+    assert "当前设置：`gpt-5.3-codex`" in rendered
+    keyboard = query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+    callback_ids = [btn.callback_data for row in keyboard for btn in row]
+    assert "model:codex:default" in callback_ids
 
 
 @pytest.mark.asyncio

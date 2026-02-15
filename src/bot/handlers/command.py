@@ -117,6 +117,39 @@ def _build_engine_selector_keyboard(
     return InlineKeyboardMarkup([buttons])
 
 
+def _build_codex_model_keyboard(
+    *, selected_model: str | None, resolved_model: str | None = None
+) -> InlineKeyboardMarkup:
+    """Build inline keyboard for Codex model selection."""
+    selected = str(selected_model or "").strip()
+    candidates: list[str] = []
+    for candidate in (
+        resolved_model,
+        selected,
+        "gpt-5.3-codex",
+        "gpt-5.1-codex-mini",
+        "gpt-5",
+    ):
+        value = str(candidate or "").strip().replace("`", "")
+        if not value or value.lower() in {"default", "current"}:
+            continue
+        if value not in candidates:
+            candidates.append(value)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for value in candidates:
+        label = f"✅ {value}" if value == selected else value
+        rows.append(
+            [InlineKeyboardButton(label, callback_data=f"model:codex:{value}")]
+        )
+
+    default_label = "✅ default" if not selected else "default"
+    rows.append(
+        [InlineKeyboardButton(default_label, callback_data="model:codex:default")]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
 def _is_context_full_mode(context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Whether `/context` should render full detail output."""
     args = getattr(context, "args", None) or []
@@ -298,11 +331,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         status_alias_line = "• Compatibility alias: `/status [full]`"
         diagnostics_text = ""
         status_hint_line = "• Check `/context` to monitor your usage"
-    model_line = (
-        "• `/model` - View or switch Claude model\n"
-        if capabilities.supports_model_selection
-        else "• `/model` - View current Codex model (read-only)\n"
-    )
+    if active_engine == ENGINE_CODEX:
+        model_line = "• `/model [name|default]` - View or set Codex model\n"
+    elif capabilities.supports_model_selection:
+        model_line = "• `/model` - View or switch Claude model\n"
+    else:
+        model_line = "• `/model` - View current model\n"
 
     help_text = (
         "🤖 **CLI TG Help**\n\n"
@@ -1587,39 +1621,63 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     active_engine = get_active_cli_engine(scope_state)
     capabilities = get_engine_capabilities(active_engine)
-    if not capabilities.supports_model_selection:
-        if active_engine == ENGINE_CODEX:
-            session_id = str(scope_state.get("claude_session_id") or "").strip()
-            codex_snapshot: dict | None = None
-            if session_id:
-                codex_snapshot = SessionService.get_cached_codex_snapshot(session_id)
-                if codex_snapshot is None:
-                    codex_snapshot = SessionService._probe_codex_session_snapshot(
-                        session_id
-                    )
+    if active_engine == ENGINE_CODEX:
+        session_id = str(scope_state.get("claude_session_id") or "").strip()
+        codex_snapshot: dict | None = None
+        if session_id:
+            codex_snapshot = SessionService.get_cached_codex_snapshot(session_id)
+            if codex_snapshot is None:
+                codex_snapshot = SessionService._probe_codex_session_snapshot(session_id)
 
-            current_model = str(scope_state.get("claude_model") or "").strip()
-            resolved_model = ""
-            reasoning_effort = ""
-            if isinstance(codex_snapshot, dict):
-                resolved_model = str(codex_snapshot.get("resolved_model") or "").strip()
-                reasoning_effort = str(
-                    codex_snapshot.get("reasoning_effort") or ""
-                ).strip()
+        current_model = str(scope_state.get("claude_model") or "").strip()
+        resolved_model = ""
+        reasoning_effort = ""
+        if isinstance(codex_snapshot, dict):
+            resolved_model = str(codex_snapshot.get("resolved_model") or "").strip()
+            reasoning_effort = str(codex_snapshot.get("reasoning_effort") or "").strip()
 
-            model_display = resolved_model or current_model or "default"
-            if reasoning_effort and model_display.lower() not in {"default", "current"}:
-                effort_display = _normalize_reasoning_effort_label(reasoning_effort)
-                model_display = f"{model_display} ({effort_display})"
+        model_display = (resolved_model or current_model or "default").replace("`", "")
+        if reasoning_effort and model_display.lower() not in {"default", "current"}:
+            effort_display = _normalize_reasoning_effort_label(reasoning_effort)
+            model_display = f"{model_display} ({effort_display})"
+
+        requested_model = " ".join(context.args or []).strip()
+        if requested_model:
+            requested_norm = requested_model.lower()
+            if requested_norm in {"default", "clear", "reset"}:
+                scope_state.pop("claude_model", None)
+                selected_model = "default"
+            else:
+                selected_model = requested_model.replace("`", "")
+                scope_state["claude_model"] = selected_model
 
             await update.message.reply_text(
-                "ℹ️ 当前引擎：`codex`\n"
-                f"当前模型：`{model_display}`\n\n"
-                "`/model` 在 Codex 下为只读查看。\n"
-                "如需切换模型，请先执行：`/engine claude`",
+                "✅ 已更新 Codex 模型设置。\n"
+                f"当前设置：`{selected_model}`\n\n"
+                "该设置会用于后续 Codex 请求（通过 `--model` 传递）。\n"
+                "恢复默认：`/model default`",
                 parse_mode="Markdown",
+                reply_markup=_build_codex_model_keyboard(
+                    selected_model=str(scope_state.get("claude_model") or "").strip(),
+                    resolved_model=resolved_model,
+                ),
             )
             return
+
+        await update.message.reply_text(
+            "ℹ️ 当前引擎：`codex`\n"
+            f"当前模型：`{model_display}`\n\n"
+            "可直接切换：`/model <model_name>`，或点下方按钮选择。\n"
+            "恢复默认：`/model default`",
+            parse_mode="Markdown",
+            reply_markup=_build_codex_model_keyboard(
+                selected_model=current_model,
+                resolved_model=resolved_model,
+            ),
+        )
+        return
+
+    if not capabilities.supports_model_selection:
 
         await update.message.reply_text(
             "ℹ️ 当前引擎不支持 `/model`。\n"

@@ -179,6 +179,36 @@ def _build_engine_selector_keyboard(
     return InlineKeyboardMarkup([buttons])
 
 
+def _build_codex_model_keyboard(*, selected_model: str | None) -> InlineKeyboardMarkup:
+    """Build inline keyboard for Codex model selection callbacks."""
+    selected = str(selected_model or "").strip()
+    candidates: list[str] = []
+    for candidate in (
+        selected,
+        "gpt-5.3-codex",
+        "gpt-5.1-codex-mini",
+        "gpt-5",
+    ):
+        value = str(candidate or "").strip().replace("`", "")
+        if not value or value.lower() in {"default", "current"}:
+            continue
+        if value not in candidates:
+            candidates.append(value)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for value in candidates:
+        label = f"✅ {value}" if value == selected else value
+        rows.append(
+            [InlineKeyboardButton(label, callback_data=f"model:codex:{value}")]
+        )
+
+    default_label = "✅ default" if not selected else "default"
+    rows.append(
+        [InlineKeyboardButton(default_label, callback_data="model:codex:default")]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
 def _get_query_chat_id(query) -> int | None:
     """Extract chat id from callback query message."""
     message_obj = getattr(query, "message", None)
@@ -851,6 +881,44 @@ async def handle_model_callback(
     """Handle model selection callback from inline keyboard."""
     _, scope_state = _get_scope_state_for_query(query, context)
     active_engine = get_active_cli_engine(scope_state)
+
+    if active_engine == ENGINE_CODEX:
+        codex_param = str(param or "").strip()
+        if not codex_param.startswith("codex:"):
+            await query.edit_message_text(
+                "ℹ️ 当前引擎：`codex`\n"
+                "请使用 Codex 模型按钮，或手动执行 `/model <model_name>`。",
+                parse_mode="Markdown",
+            )
+            return
+
+        selected_raw = codex_param.split(":", 1)[1].strip()
+        if not selected_raw:
+            await query.edit_message_text(
+                "❌ 无效模型参数，请重新执行 `/model` 选择。",
+                parse_mode="Markdown",
+            )
+            return
+
+        normalized = selected_raw.lower()
+        if normalized in {"default", "clear", "reset"}:
+            scope_state.pop("claude_model", None)
+            selected = "default"
+        else:
+            selected = selected_raw.replace("`", "")
+            scope_state["claude_model"] = selected
+
+        await query.edit_message_text(
+            "✅ 已更新 Codex 模型设置。\n"
+            f"当前设置：`{selected}`\n\n"
+            "你也可以手动输入：`/model <model_name>`",
+            parse_mode="Markdown",
+            reply_markup=_build_codex_model_keyboard(
+                selected_model=str(scope_state.get("claude_model") or "").strip()
+            ),
+        )
+        return
+
     capabilities = get_engine_capabilities(active_engine)
     if not capabilities.supports_model_selection:
         await query.edit_message_text(
