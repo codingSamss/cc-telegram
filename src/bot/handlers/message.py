@@ -120,6 +120,57 @@ def _engine_badge(engine: str | None) -> str:
     return f"{marker} `{_engine_label(normalized)} CLI`"
 
 
+def _is_claude_model_name(value: str | None) -> bool:
+    """Return whether model id is a Claude alias/name."""
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"sonnet", "opus", "haiku"}:
+        return True
+    return any(token in normalized for token in ("claude", "sonnet", "opus", "haiku"))
+
+
+def _detect_integration_cli_kind(cli_integration: Any | None) -> str | None:
+    """Best-effort detect CLI kind from integration; None means unknown."""
+    process_manager = getattr(cli_integration, "process_manager", None)
+    resolve_cli_path = getattr(process_manager, "_resolve_cli_path", None)
+    detect_cli_kind = getattr(process_manager, "_detect_cli_kind", None)
+    if not callable(resolve_cli_path) or not callable(detect_cli_kind):
+        return None
+    try:
+        detected = str(detect_cli_kind(resolve_cli_path()) or "").strip().lower()
+    except Exception:
+        return None
+    if detected in {"claude", "codex"}:
+        return detected
+    return None
+
+
+def _resolve_model_override(
+    scope_state: dict[str, Any],
+    active_engine: str | None,
+    cli_integration: Any | None = None,
+) -> str | None:
+    """Resolve safe model override for current engine."""
+    selected_model = str(scope_state.get("claude_model") or "").strip()
+    if not selected_model:
+        return None
+    normalized_engine = normalize_cli_engine(active_engine)
+    if cli_integration is not None:
+        detected_kind = _detect_integration_cli_kind(cli_integration)
+        if detected_kind:
+            normalized_engine = normalize_cli_engine(detected_kind)
+    if normalized_engine == ENGINE_CODEX:
+        return selected_model
+    if _is_claude_model_name(selected_model):
+        return selected_model
+    logger.warning(
+        "Ignoring non-Claude model override in Claude mode",
+        model=selected_model,
+    )
+    return None
+
+
 def _with_engine_badge(text: str, engine: str | None) -> str:
     """Attach engine badge to a bubble text, keeping payload readable."""
     body = str(text or "").strip()
@@ -998,7 +1049,9 @@ async def handle_text_message(
                 on_stream=stream_handler,
                 force_new_session=force_new_session,
                 permission_handler=permission_handler,
-                model=scope_state.get("claude_model"),
+                model=_resolve_model_override(
+                    scope_state, active_engine, cli_integration
+                ),
             )
 
         task = asyncio.create_task(_run_claude())
@@ -1523,7 +1576,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 session_id=session_id,
                 force_new_session=force_new_session,
                 permission_handler=permission_handler,
-                model=scope_state.get("claude_model"),
+                model=_resolve_model_override(
+                    scope_state, active_engine, cli_integration
+                ),
             )
 
             # Update session ID
@@ -1837,7 +1892,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             on_stream=_image_stream_handler,
                             force_new_session=force_new_session,
                             permission_handler=permission_handler,
-                            model=scope_state.get("claude_model"),
+                            model=_resolve_model_override(
+                                scope_state, active_engine, cli_integration
+                            ),
                             images=images,
                         ),
                         update_status=_set_image_status,

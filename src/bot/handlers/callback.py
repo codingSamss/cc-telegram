@@ -32,7 +32,7 @@ from ..utils.recent_projects import build_recent_projects_message, scan_recent_p
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.scope_state import get_scope_state_from_query
 from ..utils.ui_adapter import build_reply_markup_from_spec
-from .message import build_permission_handler
+from .message import _resolve_model_override, build_permission_handler
 
 logger = structlog.get_logger()
 
@@ -198,15 +198,23 @@ def _build_codex_model_keyboard(*, selected_model: str | None) -> InlineKeyboard
     rows: list[list[InlineKeyboardButton]] = []
     for value in candidates:
         label = f"✅ {value}" if value == selected else value
-        rows.append(
-            [InlineKeyboardButton(label, callback_data=f"model:codex:{value}")]
-        )
+        rows.append([InlineKeyboardButton(label, callback_data=f"model:codex:{value}")])
 
     default_label = "✅ default" if not selected else "default"
     rows.append(
         [InlineKeyboardButton(default_label, callback_data="model:codex:default")]
     )
     return InlineKeyboardMarkup(rows)
+
+
+def _is_claude_model_name(value: str | None) -> bool:
+    """Return whether model id is a Claude alias/name."""
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"sonnet", "opus", "haiku"}:
+        return True
+    return any(token in normalized for token in ("claude", "sonnet", "opus", "haiku"))
 
 
 def _get_query_chat_id(query) -> int | None:
@@ -929,12 +937,26 @@ async def handle_model_callback(
         )
         return
 
-    if param == "default":
+    param_norm = str(param or "").strip().lower()
+    if param_norm.startswith("codex:"):
+        await query.edit_message_text(
+            "ℹ️ 当前引擎：`claude`\n" "请使用 Claude 模型按钮，或手动执行 `/model`。",
+            parse_mode="Markdown",
+        )
+        return
+    if param_norm not in {"sonnet", "opus", "haiku", "default"}:
+        await query.edit_message_text(
+            "❌ 无效模型参数，请重新执行 `/model` 选择。",
+            parse_mode="Markdown",
+        )
+        return
+
+    if param_norm == "default":
         scope_state.pop("claude_model", None)
         selected = "default"
     else:
-        scope_state["claude_model"] = param
-        selected = param
+        scope_state["claude_model"] = param_norm
+        selected = param_norm
 
     # Rebuild keyboard with updated selection indicator
     current = scope_state.get("claude_model")
@@ -1015,6 +1037,10 @@ async def handle_engine_callback(
     scope_state["claude_session_id"] = None
     scope_state["session_started"] = True
     scope_state["force_new_session"] = True
+    if requested_engine == ENGINE_CLAUDE:
+        selected_model = str(scope_state.get("claude_model") or "").strip()
+        if selected_model and not _is_claude_model_name(selected_model):
+            scope_state.pop("claude_model", None)
     if old_session_id:
         permission_manager = context.bot_data.get("permission_manager")
         if permission_manager:
@@ -1341,6 +1367,7 @@ async def handle_quick_action_callback(
             permission_handler=build_permission_handler(
                 bot=context.bot, chat_id=query.message.chat_id, settings=settings
             ),
+            model=_resolve_model_override(scope_state, active_engine, cli_integration),
         )
 
         if claude_response:

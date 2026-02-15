@@ -59,6 +59,18 @@ class SessionService:
         return "claude"
 
     @staticmethod
+    def _is_claude_model_name(value: Any) -> bool:
+        """Whether model name belongs to Claude aliases/families."""
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return False
+        if normalized in {"sonnet", "opus", "haiku"}:
+            return True
+        return any(
+            token in normalized for token in ("claude", "sonnet", "opus", "haiku")
+        )
+
+    @staticmethod
     def _usage_has_context_window(model_usage: Dict[str, Any]) -> bool:
         """Whether usage payload already contains explicit context-window metadata."""
         if not isinstance(model_usage, dict):
@@ -456,6 +468,11 @@ class SessionService:
         current_dir = scope_state.get("current_directory", approved_directory)
         current_model = scope_state.get("claude_model")
         session_id = scope_state.get("claude_session_id")
+        if SessionService._resolve_cli_kind(claude_integration) == "claude":
+            if current_model and not SessionService._is_claude_model_name(
+                current_model
+            ):
+                current_model = None
         event_provider = None
         if include_event_summary and session_service:
             candidate = getattr(session_service, "get_context_event_lines", None)

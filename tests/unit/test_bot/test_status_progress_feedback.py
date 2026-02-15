@@ -73,6 +73,37 @@ async def test_status_command_alias_uses_context_rendering(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_session_status_claude_sanitizes_stale_codex_model(tmp_path):
+    """Claude `/context` should not display codex-only model overrides."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+
+    status_msg = SimpleNamespace(edit_text=AsyncMock())
+    message = SimpleNamespace(reply_text=AsyncMock(return_value=status_msg))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=10031),
+        message=message,
+    )
+    context = SimpleNamespace(
+        bot_data={"settings": SimpleNamespace(approved_directory=approved)},
+        user_data=_scoped_user_data(
+            10031,
+            {
+                "current_directory": approved,
+                "claude_model": "gpt-5.3-codex",
+            },
+        ),
+        args=[],
+    )
+
+    await session_status(update, context)
+
+    rendered = status_msg.edit_text.await_args.args[0]
+    assert "Model: `default`" in rendered
+    assert "gpt-5.3-codex" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_session_status_with_codex_engine_renders_exact_usage_percent(tmp_path):
     """Codex `/context` should show exact usage percentage when `/status` probe succeeds."""
     approved = tmp_path / "approved"

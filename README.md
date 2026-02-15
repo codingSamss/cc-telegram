@@ -1,6 +1,6 @@
 # CLI TG
 
-Telegram Bot for Claude Code - 通过 Telegram 远程操控 Claude Code，支持多会话、图片分析、MCP 集成、流式输出，并规划与 Codex/其他 CLI 引擎的兼容。
+Telegram Bot for Claude Code - 通过 Telegram 远程操控 Claude Code，支持 Claude/Codex 双引擎切换、多会话、图片分析、MCP 集成、流式输出。
 
 基于 Python，使用 `python-telegram-bot` (Polling 模式) + `claude-agent-sdk`，无需 Cloudflare Tunnel、tmux 等外部依赖。启动即用。
 
@@ -83,6 +83,13 @@ USE_SDK=false
 CLAUDE_CLI_PATH=./claude-wrapper.sh
 CLAUDE_MAX_TURNS=50
 CLAUDE_TIMEOUT_SECONDS=600
+
+# 可选：开启 Codex 引擎适配
+ENABLE_CODEX_CLI=true
+CODEX_CLI_PATH=
+
+# 建议默认 false，避免 MCP 启动卡顿；需要 MCP 工具时再临时打开
+CODEX_ENABLE_MCP=false
 ```
 
 完整配置项参考 `.env.example`。
@@ -135,28 +142,38 @@ poetry run python -m src.main
 
 ## 日常使用
 
-### Bot 命令
+### Bot 命令（与当前版本同步）
 
-| 命令 | 说明 |
-|------|------|
-| `/start` | 启动 Bot |
-| `/help` | 查看帮助 |
-| `/cd <path>` | 切换工作目录 |
-| `/ls` | 列出当前目录文件 |
-| `/pwd` | 显示当前目录 |
-| `/projects` | 显示可用项目 |
-| `/new` | 清除上下文，开始新会话 |
-| `/status` | 查看 Bot 状态和用量 |
-| `/git` | 查看 Git 仓库信息 |
-| `/actions` | 显示快捷操作按钮 |
-| `/export` | 导出会话记录 |
+| 命令 | 说明 | 适用引擎 |
+|------|------|------|
+| `/start` | 显示欢迎页与快捷入口 | 全部 |
+| `/help` | 查看完整命令说明 | 全部 |
+| `/engine [claude|codex]` | 切换 CLI 引擎（也可不带参数走按钮） | 全部 |
+| `/resume` | 恢复桌面端最近会话 | 全部 |
+| `/new` | 清除当前绑定并新建会话 | 全部 |
+| `/continue [message]` | 显式续接当前会话 | 全部 |
+| `/end` | 结束当前会话 | 全部 |
+| `/context [full]` | 查看会话上下文与用量 | 全部（Claude 主展示） |
+| `/status [full]` | `/context` 的兼容别名 | 全部（Codex 主展示） |
+| `/model` | Claude：按钮切换 Sonnet/Opus/Haiku | Claude |
+| `/model [name|default]` | Codex：设置/清除 `--model` | Codex |
+| `/codexdiag [root|<session_id>]` | 诊断 Codex MCP 调用情况 | Codex |
+| `/cd <path>` | 切换目录（带安全校验） | 全部 |
+| `/ls` | 列出当前目录内容 | 全部 |
+| `/pwd` | 查看当前目录 | 全部 |
+| `/projects` | 显示可用项目 | 全部 |
+| `/git` | Git 仓库信息与操作入口 | 全部 |
+| `/actions` | 快捷动作菜单 | 全部 |
+| `/export` | 导出当前会话 | 全部 |
+| `/cancel` | 取消当前运行中的任务 | 全部 |
 
 ### 使用方式
 
-- 直接发送文本消息 = 向 Claude Code 下达指令
-- 发送文件 = Claude 分析文件内容 (支持代码、配置、文档)
-- 发送图片 = Claude 分析截图/图表
-- 会话按 用户+目录 维度自动保持，切换目录自动恢复对应会话
+- 直接发送文本消息 = 向当前引擎（Claude/Codex）下达指令
+- 发送文件 = 由当前引擎分析文件内容（支持代码、配置、文档）
+- 发送图片 = 引擎分析截图/图表（能力取决于当前引擎与模式）
+- 会话按“用户 + 会话作用域（私聊/群聊话题）+ 目录”维护
+- 引擎切换后会清理旧会话绑定，并引导你重新选择目录与可恢复会话
 
 ## 安全模型
 
@@ -182,6 +199,7 @@ poetry run python -m src.main
 | `Authentication failed` | User ID 不在白名单 | 检查 `ALLOWED_USERS` |
 | `Rate limit exceeded` | 请求过于频繁 | 调整 `RATE_LIMIT_*` 配置 |
 | Bot 无响应 | Token 错误或进程未启动 | 检查 `TELEGRAM_BOT_TOKEN` 和进程状态 |
+| `Claude process error: exit code 1` | 常见于引擎/模型不匹配 | 先 `/engine claude`，再 `/model` 选 Claude 模型或执行 `/model default` |
 
 ## 开发命令
 

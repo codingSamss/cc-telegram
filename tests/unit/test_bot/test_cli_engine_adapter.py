@@ -90,6 +90,45 @@ async def test_switch_engine_updates_scope_state_and_clears_old_session(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_switch_engine_to_claude_clears_non_claude_model(tmp_path):
+    """Switching back to claude should drop stale codex model override."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    user_id = 1012
+    scope_key = _scope_key(user_id, user_id)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(id=user_id),
+        effective_message=SimpleNamespace(message_thread_id=None),
+        message=SimpleNamespace(reply_text=AsyncMock()),
+    )
+    context = SimpleNamespace(
+        args=["claude"],
+        bot_data={
+            "settings": _build_settings(approved),
+            "cli_integrations": {"claude": object(), "codex": object()},
+            "desktop_scanner": SimpleNamespace(
+                list_projects=AsyncMock(return_value=[])
+            ),
+        },
+        user_data={
+            "scope_state": {
+                scope_key: {
+                    ENGINE_STATE_KEY: "codex",
+                    "claude_model": "gpt-5.3-codex",
+                }
+            }
+        },
+    )
+
+    await switch_engine(update, context)
+
+    scope_state = context.user_data["scope_state"][scope_key]
+    assert scope_state[ENGINE_STATE_KEY] == "claude"
+    assert "claude_model" not in scope_state
+
+
+@pytest.mark.asyncio
 async def test_switch_engine_rejects_unavailable_target(tmp_path):
     """Switching to unavailable engine should keep current state unchanged."""
     approved = tmp_path / "approved"
@@ -316,10 +355,46 @@ async def test_model_command_shows_switch_hint_for_codex_engine(tmp_path):
     assert "当前模型：`default`" in rendered
     assert "/model <model_name>" in rendered
     assert "/model default" in rendered
-    keyboard = update.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard
+    keyboard = update.message.reply_text.await_args.kwargs[
+        "reply_markup"
+    ].inline_keyboard
     callback_ids = [btn.callback_data for row in keyboard for btn in row]
     assert "model:codex:gpt-5.3-codex" in callback_ids
     assert "model:codex:default" in callback_ids
+
+
+@pytest.mark.asyncio
+async def test_model_command_clears_stale_codex_model_for_claude_engine(tmp_path):
+    """Claude /model should sanitize stale codex model values."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    user_id = 10043
+    scope_key = _scope_key(user_id, user_id)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(id=user_id),
+        effective_message=SimpleNamespace(message_thread_id=None),
+        message=SimpleNamespace(reply_text=AsyncMock()),
+    )
+    context = SimpleNamespace(
+        args=[],
+        bot_data={"settings": _build_settings(approved)},
+        user_data={
+            "scope_state": {
+                scope_key: {
+                    ENGINE_STATE_KEY: "claude",
+                    "claude_model": "gpt-5.3-codex",
+                }
+            }
+        },
+    )
+
+    await model_command(update, context)
+
+    scope_state = context.user_data["scope_state"][scope_key]
+    assert "claude_model" not in scope_state
+    rendered = update.message.reply_text.await_args.args[0]
+    assert "Current model: `default`" in rendered
 
 
 @pytest.mark.asyncio
@@ -445,6 +520,34 @@ async def test_model_callback_rejects_when_engine_does_not_support(tmp_path):
     rendered = query.edit_message_text.await_args.args[0]
     assert "当前引擎：`codex`" in rendered
     assert "请使用 Codex 模型按钮" in rendered
+
+
+@pytest.mark.asyncio
+async def test_model_callback_rejects_codex_param_when_engine_is_claude(tmp_path):
+    """Claude model callback should reject codex-prefixed values."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    user_id = 10062
+    scope_key = _scope_key(user_id, user_id)
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        message=SimpleNamespace(
+            chat=SimpleNamespace(id=user_id), message_thread_id=None
+        ),
+        edit_message_text=AsyncMock(),
+    )
+    context = SimpleNamespace(
+        bot_data={"settings": _build_settings(approved)},
+        user_data={"scope_state": {scope_key: {ENGINE_STATE_KEY: "claude"}}},
+    )
+
+    await handle_model_callback(query, "codex:gpt-5.3-codex", context)
+
+    scope_state = context.user_data["scope_state"][scope_key]
+    assert "claude_model" not in scope_state
+    rendered = query.edit_message_text.await_args.args[0]
+    assert "当前引擎：`claude`" in rendered
+    assert "请使用 Claude 模型按钮" in rendered
 
 
 @pytest.mark.asyncio
@@ -800,6 +903,7 @@ async def test_quick_action_callback_runs_with_active_engine_integration(tmp_pat
                     "current_directory": approved,
                     "claude_session_id": "session-old",
                     "force_new_session": True,
+                    "claude_model": "gpt-5.3-codex",
                     ENGINE_STATE_KEY: "codex",
                 }
             }
@@ -815,8 +919,73 @@ async def test_quick_action_callback_runs_with_active_engine_integration(tmp_pat
     assert scope_state["claude_session_id"] == "session-codex-1"
     assert "force_new_session" not in scope_state
 
+    kwargs = codex_integration.run_command.await_args.kwargs
+    assert kwargs["model"] == "gpt-5.3-codex"
+
     rendered = query.message.reply_text.await_args.args[0]
     assert "Engine: codex" in rendered
+
+
+@pytest.mark.asyncio
+async def test_quick_action_callback_sanitizes_model_when_fallbacks_to_claude(
+    tmp_path,
+):
+    """Codex active with Claude fallback should not pass codex-only model id."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+
+    user_id = 2002
+    chat_id = 3002
+    scope_key = _scope_key(user_id, chat_id)
+    claude_integration = SimpleNamespace(
+        process_manager=SimpleNamespace(
+            _resolve_cli_path=lambda: "/usr/local/bin/claude",
+            _detect_cli_kind=lambda _path: "claude",
+        ),
+        run_command=AsyncMock(
+            return_value=SimpleNamespace(
+                content="执行完成",
+                session_id="session-claude-fallback-1",
+            )
+        )
+    )
+    action = SimpleNamespace(icon="🧪", name="Run Tests", prompt="pytest")
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        message=SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id),
+            chat_id=chat_id,
+            reply_text=AsyncMock(),
+        ),
+        edit_message_text=AsyncMock(),
+    )
+    context = SimpleNamespace(
+        bot=SimpleNamespace(send_message=AsyncMock()),
+        bot_data={
+            "settings": _build_settings(approved),
+            "quick_actions": SimpleNamespace(actions={"test": action}),
+            "cli_integrations": {
+                "claude": claude_integration,
+            },
+        },
+        user_data={
+            "scope_state": {
+                scope_key: {
+                    "current_directory": approved,
+                    "claude_session_id": "session-old",
+                    "force_new_session": True,
+                    "claude_model": "gpt-5.3-codex",
+                    ENGINE_STATE_KEY: "codex",
+                }
+            }
+        },
+    )
+
+    await handle_quick_action_callback(query, "test", context)
+
+    claude_integration.run_command.assert_awaited_once()
+    kwargs = claude_integration.run_command.await_args.kwargs
+    assert kwargs["model"] is None
 
 
 @pytest.mark.asyncio

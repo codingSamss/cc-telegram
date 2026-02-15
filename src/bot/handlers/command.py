@@ -16,6 +16,7 @@ from ...services.session_interaction_service import SessionInteractionService
 from ...services.session_lifecycle_service import SessionLifecycleService
 from ...services.session_service import SessionService
 from ..utils.cli_engine import (
+    ENGINE_CLAUDE,
     ENGINE_CODEX,
     SUPPORTED_CLI_ENGINES,
     get_active_cli_engine,
@@ -93,6 +94,16 @@ def _normalize_reasoning_effort_label(raw: str) -> str:
     return mapping.get(normalized, normalized.title())
 
 
+def _is_claude_model_name(value: str | None) -> bool:
+    """Return whether model id is a Claude alias/name."""
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"sonnet", "opus", "haiku"}:
+        return True
+    return any(token in normalized for token in ("claude", "sonnet", "opus", "haiku"))
+
+
 def _build_engine_selector_keyboard(
     *, active_engine: str, available_engines: set[str]
 ) -> InlineKeyboardMarkup | None:
@@ -139,9 +150,7 @@ def _build_codex_model_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     for value in candidates:
         label = f"✅ {value}" if value == selected else value
-        rows.append(
-            [InlineKeyboardButton(label, callback_data=f"model:codex:{value}")]
-        )
+        rows.append([InlineKeyboardButton(label, callback_data=f"model:codex:{value}")])
 
     default_label = "✅ default" if not selected else "default"
     rows.append(
@@ -461,6 +470,10 @@ async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     scope_state["claude_session_id"] = None
     scope_state["session_started"] = True
     scope_state["force_new_session"] = True
+    if requested_engine == ENGINE_CLAUDE:
+        selected_model = str(scope_state.get("claude_model") or "").strip()
+        if selected_model and not _is_claude_model_name(selected_model):
+            scope_state.pop("claude_model", None)
     if old_session_id:
         permission_manager = context.bot_data.get("permission_manager")
         if permission_manager:
@@ -1627,7 +1640,9 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if session_id:
             codex_snapshot = SessionService.get_cached_codex_snapshot(session_id)
             if codex_snapshot is None:
-                codex_snapshot = SessionService._probe_codex_session_snapshot(session_id)
+                codex_snapshot = SessionService._probe_codex_session_snapshot(
+                    session_id
+                )
 
         current_model = str(scope_state.get("claude_model") or "").strip()
         resolved_model = ""
@@ -1687,6 +1702,9 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
+    current_raw = str(scope_state.get("claude_model") or "").strip()
+    if current_raw and not _is_claude_model_name(current_raw):
+        scope_state.pop("claude_model", None)
     current = scope_state.get("claude_model")
 
     keyboard = [
