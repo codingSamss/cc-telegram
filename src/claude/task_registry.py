@@ -146,3 +146,12 @@ class TaskRegistry:
                 if self._tasks[key].state == TaskState.RUNNING:
                     return True
             return False
+
+    async def list_running(self) -> list[ActiveTask]:
+        """Return shallow copies of all running tasks."""
+        async with self._lock:
+            return [
+                copy.copy(active)
+                for active in self._tasks.values()
+                if active.state == TaskState.RUNNING
+            ]

@@ -82,3 +82,4 @@ async def test_cancel_button_shows_alert_when_no_active_task(tmp_path: Path):
         "No active task to cancel.",
         show_alert=True,
     )
+    query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)

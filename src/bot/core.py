@@ -262,6 +262,59 @@ class ClaudeCodeBot:
         )
         logger.info("Image cleanup job scheduled", interval_hours=1)
 
+    async def _finalize_running_tasks_before_shutdown(self) -> None:
+        """Mark running tasks as interrupted and clear stale cancel buttons."""
+        if not self.app:
+            return
+        task_registry = self.deps.get("task_registry")
+        if not isinstance(task_registry, TaskRegistry):
+            return
+
+        running_tasks = await task_registry.list_running()
+        if not running_tasks:
+            return
+
+        logger.info(
+            "Finalizing running tasks before shutdown", count=len(running_tasks)
+        )
+
+        for active in running_tasks:
+            try:
+                await task_registry.cancel(active.user_id, scope_key=active.scope_key)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to cancel running task during shutdown",
+                    user_id=active.user_id,
+                    scope_key=active.scope_key,
+                    error=str(exc),
+                )
+
+            if active.chat_id and active.progress_message_id:
+                try:
+                    await self.app.bot.edit_message_text(
+                        chat_id=active.chat_id,
+                        message_id=active.progress_message_id,
+                        text="⚠️ 服务已重启，本次任务已中断。请重新发送消息继续。",
+                        reply_markup=None,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to mark progress message as interrupted",
+                        chat_id=active.chat_id,
+                        message_id=active.progress_message_id,
+                        error=str(exc),
+                    )
+                    try:
+                        await self.app.bot.edit_message_reply_markup(
+                            chat_id=active.chat_id,
+                            message_id=active.progress_message_id,
+                            reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+
+            await task_registry.remove(active.user_id, scope_key=active.scope_key)
+
     def _check_gitignore(self) -> None:
         """Warn if .claude-images/ is not in .gitignore."""
         gitignore = self.settings.approved_directory / ".gitignore"
@@ -336,6 +389,10 @@ class ClaudeCodeBot:
 
         try:
             self.is_running = False  # Stop the main loop first
+
+            # Best effort: notify users and clear stale "Cancel" buttons
+            # before the app is torn down.
+            await self._finalize_running_tasks_before_shutdown()
 
             # Shutdown feature registry
             if self.feature_registry:

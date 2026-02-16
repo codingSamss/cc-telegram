@@ -9,6 +9,7 @@ import pytest
 
 from src.bot.handlers.message import (
     _append_progress_line_with_merge,
+    _build_collapsed_thinking_summary,
     _build_context_tag,
     _build_session_context_summary,
     _format_error_message,
@@ -408,6 +409,35 @@ def test_build_session_context_summary_prefers_explicit_remaining_tokens():
     assert summary is not None
     assert "`71.8%` remaining" in summary
     assert "used" not in summary
+
+
+def test_build_collapsed_thinking_summary_keeps_model_and_context():
+    """Collapsed thinking summary should keep model line and append context info."""
+    collapsed = _build_collapsed_thinking_summary(
+        all_progress_lines=[
+            "🚀 *Starting Codex* with 15 tools available",
+            "🧠 *Using model:* o4-mini",
+            "🔧 Read: `src/main.py`",
+        ],
+        context_tag="⬜ `Codex CLI` | `cli-tg` | `019c6252`",
+    )
+
+    lines = collapsed.splitlines()
+    assert lines[0] == "🧠 *Using model:* o4-mini"
+    assert "⬜ `Codex CLI` | `cli-tg` | `019c6252`" in lines
+    assert lines[-1].startswith("💭 Thinking done")
+
+
+def test_build_collapsed_thinking_summary_falls_back_when_no_model_line():
+    """Collapsed thinking summary should still render context + summary without model."""
+    collapsed = _build_collapsed_thinking_summary(
+        all_progress_lines=["🔧 Read: `src/main.py`"],
+        context_tag="🟧 `Claude CLI` | `cli-tg` | `019c6252`",
+    )
+
+    assert "🧠 *Using model:*" not in collapsed
+    assert "🟧 `Claude CLI` | `cli-tg` | `019c6252`" in collapsed
+    assert "💭 Thinking done" in collapsed
 
 
 def test_with_engine_badge_prefixes_codex_bubble():

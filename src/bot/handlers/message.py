@@ -680,6 +680,35 @@ def _generate_thinking_summary(all_progress_lines: list[str]) -> str:
     return summary
 
 
+def _extract_resolved_model_line(all_progress_lines: list[str]) -> Optional[str]:
+    """Extract the latest resolved model line from progress updates."""
+    for line in reversed(all_progress_lines):
+        if line.strip().startswith("🧠 *Using model:*"):
+            return line.strip()
+    return None
+
+
+def _build_collapsed_thinking_summary(
+    all_progress_lines: list[str],
+    context_tag: str,
+) -> str:
+    """Build final collapsed thinking summary text with model and context."""
+    lines: list[str] = []
+    model_line = _extract_resolved_model_line(all_progress_lines)
+    if model_line:
+        lines.append(model_line)
+
+    if context_tag:
+        if lines:
+            lines.append("")
+        lines.append(context_tag)
+
+    if lines:
+        lines.append("")
+    lines.append(f"💭 {_generate_thinking_summary(all_progress_lines)}")
+    return "\n".join(lines)
+
+
 def _cache_thinking_data(
     context: ContextTypes.DEFAULT_TYPE,
     message_id: int,
@@ -1234,8 +1263,9 @@ async def handle_text_message(
 
         # Collapse progress message into summary with expand button
         if all_progress_lines:
-            summary_text = (
-                context_tag + "\n\n" + _generate_thinking_summary(all_progress_lines)
+            summary_text = _build_collapsed_thinking_summary(
+                all_progress_lines,
+                context_tag,
             )
             has_thinking_summary = True
             thinking_keyboard = InlineKeyboardMarkup(
@@ -2016,10 +2046,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
                 # Collapse progress message into thinking summary when available
                 if thinking_lines:
-                    summary_text = (
-                        img_context_tag
-                        + "\n"
-                        + _generate_thinking_summary(thinking_lines)
+                    summary_text = _build_collapsed_thinking_summary(
+                        thinking_lines,
+                        img_context_tag,
                     )
                     img_has_thinking = True
                     thinking_keyboard = InlineKeyboardMarkup(

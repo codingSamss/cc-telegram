@@ -390,6 +390,13 @@ async def handle_callback_query(
                     pass
             else:
                 await query.answer("No active task to cancel.", show_alert=True)
+                # Stale button cleanup: after restart/crash there may be no
+                # in-memory task, but the old progress bubble still shows
+                # a cancel button.
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
             audit_logger: AuditLogger = context.bot_data.get("audit_logger")
             if audit_logger:
                 await audit_logger.log_command(

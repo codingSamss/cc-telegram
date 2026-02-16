@@ -68,3 +68,28 @@ async def test_cancel_without_scope_cancels_all_user_tasks() -> None:
     task_u2.cancel()
     with suppress(asyncio.CancelledError):
         await task_u2
+
+
+@pytest.mark.asyncio
+async def test_list_running_returns_only_running_tasks() -> None:
+    """list_running should exclude tasks already marked completed/failed."""
+    registry = TaskRegistry()
+    task_running = asyncio.create_task(_long_running())
+    task_done = asyncio.create_task(_long_running())
+
+    await registry.register(user_id=11, task=task_running, scope_key="11:-1:1")
+    await registry.register(user_id=12, task=task_done, scope_key="12:-1:1")
+    await registry.complete(user_id=12, scope_key="12:-1:1")
+
+    running = await registry.list_running()
+
+    assert len(running) == 1
+    assert running[0].user_id == 11
+    assert running[0].scope_key == "11:-1:1"
+
+    task_running.cancel()
+    task_done.cancel()
+    with suppress(asyncio.CancelledError):
+        await task_running
+    with suppress(asyncio.CancelledError):
+        await task_done
