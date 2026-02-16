@@ -8,16 +8,20 @@ Features:
 """
 
 import asyncio
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import structlog
 from telegram import Update
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    MessageReactionHandler,
+    TypeHandler,
     filters,
 )
 
@@ -27,6 +31,9 @@ from ..exceptions import ClaudeCodeTelegramError
 from .features.registry import FeatureRegistry
 from .utils.cli_engine import ENGINE_CLAUDE
 from .utils.command_menu import build_bot_commands_for_engine
+from .utils.telegram_send import send_message_resilient
+from .utils.update_dedupe import UpdateDedupeCache
+from .utils.update_offset_store import UpdateOffsetStore
 
 logger = structlog.get_logger()
 
@@ -45,6 +52,10 @@ class ClaudeCodeBot:
         self._polling_error_count: int = 0
         self._polling_error_window_start: float = 0.0
         self._last_polling_error_log: float = 0.0
+        # Update dedupe and persisted offset tracking
+        self._update_dedupe_cache = UpdateDedupeCache(ttl_seconds=300, max_size=5000)
+        self._update_offset_store: Optional[UpdateOffsetStore] = None
+        self._startup_min_update_id: Optional[int] = None
 
     async def initialize(self) -> None:
         """Initialize bot application."""
@@ -81,6 +92,7 @@ class ClaudeCodeBot:
 
         # Initialize task registry for cancel support
         self.deps["task_registry"] = TaskRegistry()
+        self._initialize_update_tracking()
 
         # Set bot commands for menu
         await self._set_bot_commands()
@@ -118,6 +130,12 @@ class ClaudeCodeBot:
     def _register_handlers(self) -> None:
         """Register all command and message handlers."""
         from .handlers import callback, command, message
+
+        # Global update guard (dedupe + stale offset filtering)
+        self.app.add_handler(
+            TypeHandler(Update, self._handle_update_guard),
+            group=-10,
+        )
 
         # Command handlers
         handlers = [
@@ -166,12 +184,107 @@ class ClaudeCodeBot:
             group=10,
         )
 
+        # Message reaction handler (emoji reactions on messages)
+        self.app.add_handler(
+            MessageReactionHandler(
+                self._inject_deps(message.handle_message_reaction),
+                message_reaction_types=(
+                    MessageReactionHandler.MESSAGE_REACTION_UPDATED
+                    | MessageReactionHandler.MESSAGE_REACTION_COUNT_UPDATED
+                ),
+            ),
+            group=10,
+        )
+        # Generic fallback for reaction updates in case specialized handler misses.
+        self.app.add_handler(
+            TypeHandler(
+                Update,
+                self._inject_deps(message.handle_reaction_update_fallback),
+            ),
+            group=10,
+        )
+
         # Callback query handler
         self.app.add_handler(
             CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
         )
 
         logger.info("Bot handlers registered")
+
+    def _build_update_offset_state_file(self) -> Optional[Path]:
+        """Build persisted update offset state file path."""
+        approved_directory = getattr(self.settings, "approved_directory", None)
+        if not isinstance(approved_directory, Path):
+            return None
+        return approved_directory / "data/state/telegram/update-offset.json"
+
+    def _initialize_update_tracking(self) -> None:
+        """Initialize update dedupe and persisted offset tracking."""
+        state_file = self._build_update_offset_state_file()
+        if state_file is None:
+            logger.warning(
+                "Approved directory missing, update offset persistence disabled"
+            )
+            self._update_offset_store = None
+            self._startup_min_update_id = None
+            return
+
+        store = UpdateOffsetStore(state_file)
+        self._update_offset_store = store
+
+        try:
+            last_update_id = store.load()
+        except Exception as exc:
+            logger.warning(
+                "Failed to load Telegram update offset, starting without persisted offset",
+                state_file=str(state_file),
+                error=str(exc),
+            )
+            self._startup_min_update_id = None
+            return
+
+        self._startup_min_update_id = (
+            last_update_id + 1 if isinstance(last_update_id, int) else None
+        )
+        logger.info(
+            "Telegram update tracking initialized",
+            state_file=str(state_file),
+            last_update_id=last_update_id,
+            startup_min_update_id=self._startup_min_update_id,
+        )
+
+    async def _handle_update_guard(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Drop stale/duplicate updates before entering business handlers."""
+        update_id = getattr(update, "update_id", None)
+        if not isinstance(update_id, int):
+            return
+
+        if (
+            self._startup_min_update_id is not None
+            and update_id < self._startup_min_update_id
+        ):
+            logger.debug(
+                "Skipping stale Telegram update below persisted offset",
+                update_id=update_id,
+                startup_min_update_id=self._startup_min_update_id,
+            )
+            raise ApplicationHandlerStop
+
+        if self._update_dedupe_cache.check_and_mark(update_id):
+            logger.debug("Skipping duplicate Telegram update", update_id=update_id)
+            raise ApplicationHandlerStop
+
+        if self._update_offset_store is not None:
+            try:
+                self._update_offset_store.record(update_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to persist Telegram update offset",
+                    update_id=update_id,
+                    error=str(exc),
+                )
 
     def _inject_deps(self, handler: Callable) -> Callable:
         """Inject dependencies into handlers."""
@@ -398,6 +511,15 @@ class ClaudeCodeBot:
             if self.feature_registry:
                 self.feature_registry.shutdown()
 
+            if self._update_offset_store is not None:
+                try:
+                    self._update_offset_store.flush(force=True)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to flush Telegram update offset on shutdown",
+                        error=str(exc),
+                    )
+
             if self.app:
                 # Stop the updater if it's running
                 if self.app.updater.running:
@@ -438,6 +560,35 @@ class ClaudeCodeBot:
             error_count_in_window=self._polling_error_count,
         )
 
+    async def _reply_update_message_resilient(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+    ) -> Any:
+        """Reply to effective message with fallback to resilient send helper."""
+        message = getattr(update, "effective_message", None)
+        if message is None:
+            return None
+
+        try:
+            return await message.reply_text(text)
+        except Exception:
+            bot = getattr(context, "bot", None)
+            if bot is None and self.app is not None:
+                bot = self.app.bot
+
+            chat = getattr(update, "effective_chat", None)
+            chat_id = getattr(chat, "id", None)
+            if bot is None or not isinstance(chat_id, int):
+                raise
+
+            return await send_message_resilient(
+                bot=bot,
+                chat_id=chat_id,
+                text=text,
+                reply_to_message_id=getattr(message, "message_id", None),
+                message_thread_id=getattr(message, "message_thread_id", None),
+                chat_type=getattr(chat, "type", None),
+            )
+
     async def _error_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -476,7 +627,9 @@ class ClaudeCodeBot:
         # Try to notify user
         if update and update.effective_message:
             try:
-                await update.effective_message.reply_text(user_message)
+                await self._reply_update_message_resilient(
+                    update, context, user_message
+                )
             except Exception:
                 logger.exception("Failed to send error message to user")
 

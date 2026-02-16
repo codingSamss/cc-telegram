@@ -5,8 +5,44 @@ from typing import Any, Callable, Dict
 
 import structlog
 
+from ..utils.telegram_send import send_message_resilient
+
 logger = structlog.get_logger()
 BEIJING_TZ = timezone(timedelta(hours=8), name="UTC+8")
+
+
+async def _reply_event_message_resilient(event: Any, text: str) -> Any:
+    """Reply via message first, then fallback to resilient send helper."""
+    message = getattr(event, "effective_message", None)
+    if message is None:
+        return None
+
+    try:
+        return await message.reply_text(text)
+    except Exception:
+        get_bot = getattr(message, "get_bot", None)
+        bot = None
+        if callable(get_bot):
+            try:
+                bot = get_bot()
+            except Exception:
+                bot = None
+
+        chat_obj = getattr(message, "chat", None)
+        chat_id = getattr(message, "chat_id", None)
+        if not isinstance(chat_id, int):
+            chat_id = getattr(chat_obj, "id", None)
+        if bot is None or not isinstance(chat_id, int):
+            raise
+
+        return await send_message_resilient(
+            bot=bot,
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=getattr(message, "message_thread_id", None),
+            chat_type=getattr(chat_obj, "type", None),
+            reply_to_message_id=getattr(message, "message_id", None),
+        )
 
 
 async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -> Any:
@@ -37,8 +73,8 @@ async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -
     if not auth_manager:
         logger.error("Authentication manager not available in middleware context")
         if event.effective_message:
-            await event.effective_message.reply_text(
-                "🔒 Authentication system unavailable. Please try again later."
+            await _reply_event_message_resilient(
+                event, "🔒 Authentication system unavailable. Please try again later."
             )
         return
 
@@ -86,9 +122,10 @@ async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -
         # Welcome message for new session
         if event.effective_message:
             session_started_bjt = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
-            await event.effective_message.reply_text(
+            await _reply_event_message_resilient(
+                event,
                 f"🔓 Welcome! You are now authenticated.\n"
-                f"Session started at {session_started_bjt} Beijing Time (UTC+8)"
+                f"Session started at {session_started_bjt} Beijing Time (UTC+8)",
             )
 
         # Continue to handler
@@ -99,12 +136,13 @@ async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -
         logger.warning("Authentication failed", user_id=user_id, username=username)
 
         if event.effective_message:
-            await event.effective_message.reply_text(
+            await _reply_event_message_resilient(
+                event,
                 "🔒 **Authentication Required**\n\n"
                 "You are not authorized to use this bot.\n"
                 "Please contact the administrator for access.\n\n"
                 f"Your Telegram ID: `{user_id}`\n"
-                "Share this ID with the administrator to request access."
+                "Share this ID with the administrator to request access.",
             )
         return  # Stop processing
 
@@ -119,8 +157,8 @@ async def require_auth(handler: Callable, event: Any, data: Dict[str, Any]) -> A
 
     if not auth_manager or not auth_manager.is_authenticated(user_id):
         if event.effective_message:
-            await event.effective_message.reply_text(
-                "🔒 Authentication required to use this command."
+            await _reply_event_message_resilient(
+                event, "🔒 Authentication required to use this command."
             )
         return
 
@@ -138,14 +176,14 @@ async def admin_required(handler: Callable, event: Any, data: Dict[str, Any]) ->
 
     if not auth_manager or not auth_manager.is_authenticated(user_id):
         if event.effective_message:
-            await event.effective_message.reply_text("🔒 Authentication required.")
+            await _reply_event_message_resilient(event, "🔒 Authentication required.")
         return
 
     session = auth_manager.get_session(user_id)
     if not session or not session.user_info:
         if event.effective_message:
-            await event.effective_message.reply_text(
-                "🔒 Session information unavailable."
+            await _reply_event_message_resilient(
+                event, "🔒 Session information unavailable."
             )
         return
 
@@ -153,9 +191,10 @@ async def admin_required(handler: Callable, event: Any, data: Dict[str, Any]) ->
     permissions = session.user_info.get("permissions", [])
     if "admin" not in permissions:
         if event.effective_message:
-            await event.effective_message.reply_text(
+            await _reply_event_message_resilient(
+                event,
                 "🔒 **Admin Access Required**\n\n"
-                "This command requires administrator privileges."
+                "This command requires administrator privileges.",
             )
         return
 

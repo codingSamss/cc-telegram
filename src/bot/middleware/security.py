@@ -4,7 +4,43 @@ from typing import Any, Callable, Dict
 
 import structlog
 
+from ..utils.telegram_send import send_message_resilient
+
 logger = structlog.get_logger()
+
+
+async def _reply_event_message_resilient(event: Any, text: str) -> Any:
+    """Reply via message first, then fallback to resilient send helper."""
+    message = getattr(event, "effective_message", None)
+    if message is None:
+        return None
+
+    try:
+        return await message.reply_text(text)
+    except Exception:
+        get_bot = getattr(message, "get_bot", None)
+        bot = None
+        if callable(get_bot):
+            try:
+                bot = get_bot()
+            except Exception:
+                bot = None
+
+        chat_obj = getattr(message, "chat", None)
+        chat_id = getattr(message, "chat_id", None)
+        if not isinstance(chat_id, int):
+            chat_id = getattr(chat_obj, "id", None)
+        if bot is None or not isinstance(chat_id, int):
+            raise
+
+        return await send_message_resilient(
+            bot=bot,
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=getattr(message, "message_thread_id", None),
+            chat_type=getattr(chat_obj, "type", None),
+            reply_to_message_id=getattr(message, "message_id", None),
+        )
 
 
 async def security_middleware(
@@ -45,11 +81,12 @@ async def security_middleware(
             message.text, security_validator, user_id, audit_logger
         )
         if not is_safe:
-            await message.reply_text(
+            await _reply_event_message_resilient(
+                event,
                 f"🛡️ **Security Alert**\n\n"
                 f"Your message contains potentially dangerous content and has been blocked.\n"
                 f"Violation: {violation_type}\n\n"
-                "If you believe this is an error, please contact the administrator."
+                "If you believe this is an error, please contact the administrator.",
             )
             return  # Block processing
 
@@ -59,10 +96,11 @@ async def security_middleware(
             message.document, security_validator, user_id, audit_logger
         )
         if not is_safe:
-            await message.reply_text(
+            await _reply_event_message_resilient(
+                event,
                 f"🛡️ **File Upload Blocked**\n\n"
                 f"{error_message}\n\n"
-                "Please ensure your file meets security requirements."
+                "Please ensure your file meets security requirements.",
             )
             return  # Block processing
 
@@ -381,11 +419,12 @@ async def threat_detection_middleware(
             )
 
             if event.effective_message:
-                await event.effective_message.reply_text(
+                await _reply_event_message_resilient(
+                    event,
                     "🔍 **Suspicious Activity Detected**\n\n"
                     "Multiple reconnaissance-style commands detected. "
                     "This activity has been logged.\n\n"
-                    "If you have legitimate needs, please contact the administrator."
+                    "If you have legitimate needs, please contact the administrator.",
                 )
 
     return await handler(event, data)

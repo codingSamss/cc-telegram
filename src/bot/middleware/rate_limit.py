@@ -4,7 +4,43 @@ from typing import Any, Callable, Dict
 
 import structlog
 
+from ..utils.telegram_send import send_message_resilient
+
 logger = structlog.get_logger()
+
+
+async def _reply_event_message_resilient(event: Any, text: str) -> Any:
+    """Reply via message first, then fallback to resilient send helper."""
+    message = getattr(event, "effective_message", None)
+    if message is None:
+        return None
+
+    try:
+        return await message.reply_text(text)
+    except Exception:
+        get_bot = getattr(message, "get_bot", None)
+        bot = None
+        if callable(get_bot):
+            try:
+                bot = get_bot()
+            except Exception:
+                bot = None
+
+        chat_obj = getattr(message, "chat", None)
+        chat_id = getattr(message, "chat_id", None)
+        if not isinstance(chat_id, int):
+            chat_id = getattr(chat_obj, "id", None)
+        if bot is None or not isinstance(chat_id, int):
+            raise
+
+        return await send_message_resilient(
+            bot=bot,
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=getattr(message, "message_thread_id", None),
+            chat_type=getattr(chat_obj, "type", None),
+            reply_to_message_id=getattr(message, "message_id", None),
+        )
 
 
 async def rate_limit_middleware(
@@ -75,7 +111,7 @@ async def rate_limit_middleware(
 
         # Send user-friendly rate limit message
         if event.effective_message:
-            await event.effective_message.reply_text(f"⏱️ {message}")
+            await _reply_event_message_resilient(event, f"⏱️ {message}")
         return  # Stop processing
 
     # Rate limit check passed
@@ -236,22 +272,25 @@ async def burst_protection_middleware(
         # Progressive response based on warning count
         if user_burst_data["warnings_sent"] == 1:
             if event.effective_message:
-                await event.effective_message.reply_text(
+                await _reply_event_message_resilient(
+                    event,
                     "⚠️ **Slow down!**\n\n"
                     "You're sending requests too quickly. "
-                    "Please wait a moment between messages."
+                    "Please wait a moment between messages.",
                 )
         elif user_burst_data["warnings_sent"] <= 3:
             if event.effective_message:
-                await event.effective_message.reply_text(
+                await _reply_event_message_resilient(
+                    event,
                     "🛑 **Rate limit warning**\n\n"
-                    "Please reduce your request frequency to avoid being temporarily blocked."
+                    "Please reduce your request frequency to avoid being temporarily blocked.",
                 )
         else:
             if event.effective_message:
-                await event.effective_message.reply_text(
+                await _reply_event_message_resilient(
+                    event,
                     "🚫 **Temporarily blocked**\n\n"
-                    "Too many rapid requests. Please wait 30 seconds before trying again."
+                    "Too many rapid requests. Please wait 30 seconds before trying again.",
                 )
             return  # Block this request
 

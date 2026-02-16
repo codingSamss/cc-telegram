@@ -32,10 +32,95 @@ from ..utils.recent_projects import build_recent_projects_message, scan_recent_p
 from ..utils.resume_history import ResumeHistoryMessage, load_resume_history_preview
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.scope_state import get_scope_state_from_query
+from ..utils.telegram_send import is_markdown_parse_error, send_message_resilient
 from ..utils.ui_adapter import build_reply_markup_from_spec
 from .message import _resolve_model_override, build_permission_handler
 
 logger = structlog.get_logger()
+_PARSE_MODE_UNSET = object()
+
+
+async def _reply_query_message_resilient(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    reply_to_message_id: int | None = None,
+):
+    """Reply to callback message with fallback to resilient send helper."""
+    message = getattr(query, "message", None)
+    if message is None:
+        return None
+
+    send_kwargs = {}
+    if parse_mode is not None:
+        send_kwargs["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        send_kwargs["reply_markup"] = reply_markup
+    if isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
+        send_kwargs["reply_to_message_id"] = reply_to_message_id
+
+    try:
+        return await message.reply_text(text, **send_kwargs)
+    except Exception:
+        bot = getattr(context, "bot", None)
+        chat_obj = getattr(message, "chat", None)
+        chat_id = getattr(message, "chat_id", None)
+        if not isinstance(chat_id, int):
+            chat_id = getattr(chat_obj, "id", None)
+        if bot is None or not isinstance(chat_id, int):
+            raise
+
+        return await send_message_resilient(
+            bot=bot,
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=getattr(message, "message_thread_id", None),
+            chat_type=getattr(chat_obj, "type", None),
+        )
+
+
+def _is_noop_edit_error(error: Exception) -> bool:
+    """Whether Telegram rejected edit because target text is unchanged."""
+    return "message is not modified" in str(error).lower()
+
+
+async def _edit_query_message_resilient(
+    query,
+    text: str,
+    *,
+    parse_mode: str | None | object = _PARSE_MODE_UNSET,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """Edit callback message with markdown/no-op fallback."""
+    edit_kwargs = {}
+    if parse_mode is not _PARSE_MODE_UNSET:
+        edit_kwargs["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        edit_kwargs["reply_markup"] = reply_markup
+
+    try:
+        return await query.edit_message_text(text, **edit_kwargs)
+    except Exception as edit_error:
+        if _is_noop_edit_error(edit_error):
+            return None
+        if parse_mode not in (None, _PARSE_MODE_UNSET) and is_markdown_parse_error(
+            edit_error
+        ):
+            fallback_kwargs = dict(edit_kwargs)
+            fallback_kwargs.pop("parse_mode", None)
+            try:
+                return await query.edit_message_text(text, **fallback_kwargs)
+            except Exception as fallback_error:
+                if _is_noop_edit_error(fallback_error):
+                    return None
+                raise
+        raise
 
 
 async def _cancel_task_with_fallback(
@@ -428,10 +513,11 @@ async def handle_callback_query(
         if handler:
             await handler(query, param, context)
         else:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 "❌ **Unknown Action**\n\n"
                 "This button action is not recognized. "
-                "The bot may have been updated since this message was sent."
+                "The bot may have been updated since this message was sent.",
             )
 
     except Exception as e:
@@ -443,16 +529,19 @@ async def handle_callback_query(
         )
 
         try:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 "❌ **Error Processing Action**\n\n"
                 "An error occurred while processing your request.\n"
-                "Please try again or use text commands."
+                "Please try again or use text commands.",
             )
         except Exception:
             # If we can't edit the message, send a new one
-            await query.message.reply_text(
+            await _reply_query_message_resilient(
+                query,
+                context,
                 "❌ **Error Processing Action**\n\n"
-                "An error occurred while processing your request."
+                "An error occurred while processing your request.",
             )
 
 
@@ -487,16 +576,19 @@ async def handle_cd_callback(
                 str(new_path), settings.approved_directory
             )
             if not valid:
-                await query.edit_message_text(f"❌ **Access Denied**\n\n{error}")
+                await _edit_query_message_resilient(
+                    query, f"❌ **Access Denied**\n\n{error}"
+                )
                 return
             # Use the validated path
             new_path = resolved_path
 
         # Check if directory exists
         if not new_path.exists() or not new_path.is_dir():
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 f"❌ **Directory Not Found**\n\n"
-                f"The directory `{project_name}` no longer exists or is not accessible."
+                f"The directory `{project_name}` no longer exists or is not accessible.",
             )
             return
 
@@ -530,7 +622,8 @@ async def handle_cd_callback(
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"✅ **Directory Changed**\n\n"
             f"📂 Current directory: `{relative_path}/`\n\n"
             f"🔄 Claude session cleared. You can now start coding in this directory!",
@@ -545,7 +638,9 @@ async def handle_cd_callback(
             )
 
     except Exception as e:
-        await query.edit_message_text(f"❌ **Error changing directory**\n\n{str(e)}")
+        await _edit_query_message_resilient(
+            query, f"❌ **Error changing directory**\n\n{str(e)}"
+        )
 
         if audit_logger:
             await audit_logger.log_command(
@@ -580,9 +675,10 @@ async def handle_action_callback(
     if handler:
         await handler(query, context)
     else:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"❌ **Unknown Action: {action_type}**\n\n"
-            "This action is not implemented yet."
+            "This action is not implemented yet.",
         )
 
 
@@ -591,11 +687,17 @@ async def handle_confirm_callback(
 ) -> None:
     """Handle confirmation dialogs."""
     if confirmation_type == "yes":
-        await query.edit_message_text("✅ **Confirmed**\n\nAction will be processed.")
+        await _edit_query_message_resilient(
+            query, "✅ **Confirmed**\n\nAction will be processed."
+        )
     elif confirmation_type == "no":
-        await query.edit_message_text("❌ **Cancelled**\n\nAction was cancelled.")
+        await _edit_query_message_resilient(
+            query, "❌ **Cancelled**\n\nAction was cancelled."
+        )
     else:
-        await query.edit_message_text("❓ **Unknown confirmation response**")
+        await _edit_query_message_resilient(
+            query, "❓ **Unknown confirmation response**"
+        )
 
 
 # Action handlers
@@ -630,8 +732,8 @@ async def _handle_help_action(query, context: ContextTypes.DEFAULT_TYPE) -> None
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_text(
-        help_text, parse_mode="Markdown", reply_markup=reply_markup
+    await _edit_query_message_resilient(
+        query, help_text, parse_mode="Markdown", reply_markup=reply_markup
     )
 
 
@@ -649,10 +751,11 @@ async def _handle_show_projects_action(
                 projects.append(item.name)
 
         if not projects:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 "📁 **No Projects Found**\n\n"
                 "No subdirectories found in your approved directory.\n"
-                "Create some directories to organize your projects!"
+                "Create some directories to organize your projects!",
             )
             return
 
@@ -683,7 +786,8 @@ async def _handle_show_projects_action(
         reply_markup = InlineKeyboardMarkup(keyboard)
         project_list = "\n".join([f"• `{project}/`" for project in projects])
 
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"📁 **Available Projects**\n\n"
             f"{project_list}\n\n"
             f"Click a project to navigate to it:",
@@ -692,7 +796,9 @@ async def _handle_show_projects_action(
         )
 
     except Exception as e:
-        await query.edit_message_text(f"❌ Error loading projects: {str(e)}")
+        await _edit_query_message_resilient(
+            query, f"❌ Error loading projects: {str(e)}"
+        )
 
 
 async def _handle_new_session_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -717,7 +823,8 @@ async def _handle_new_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
         for_callback=True,
     )
 
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         session_message.text,
         parse_mode="Markdown",
         reply_markup=build_reply_markup_from_spec(session_message.keyboard),
@@ -743,7 +850,8 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
         no_active_message = session_interaction.build_end_no_active_message(
             for_callback=True
         )
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             no_active_message.text,
             reply_markup=build_reply_markup_from_spec(no_active_message.keyboard),
         )
@@ -758,7 +866,8 @@ async def _handle_end_session_action(query, context: ContextTypes.DEFAULT_TYPE) 
         title="Session Ended",
     )
 
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         end_message.text,
         parse_mode="Markdown",
         reply_markup=build_reply_markup_from_spec(end_message.keyboard),
@@ -787,8 +896,8 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         if not cli_integration:
-            await query.edit_message_text(
-                session_interaction.get_integration_unavailable_text()
+            await _edit_query_message_resilient(
+                query, session_interaction.get_integration_unavailable_text()
             )
             return
 
@@ -798,6 +907,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
             bot=context.bot,
             chat_id=query.message.chat_id,
             settings=settings,
+            chat_type=getattr(getattr(query.message, "chat", None), "type", None),
             message_thread_id=getattr(query.message, "message_thread_id", None),
         )
 
@@ -807,7 +917,11 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
             approved_directory=settings.approved_directory,
             prompt=None,
         )
-        await query.edit_message_text(progress_text, parse_mode="Markdown")
+        await _edit_query_message_resilient(
+            query,
+            progress_text,
+            parse_mode="Markdown",
+        )
 
         continue_result = await session_lifecycle.continue_session(
             user_id=user_id,
@@ -825,7 +939,9 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
         if continue_result.status == "continued" and claude_response:
 
             # Send Claude's response
-            await query.message.reply_text(
+            await _reply_query_message_resilient(
+                query,
+                context,
                 session_interaction.build_continue_callback_success_text(
                     claude_response.content
                 )
@@ -839,14 +955,15 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
                 approved_directory=settings.approved_directory,
                 for_callback=True,
             )
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 not_found_message.text,
                 parse_mode="Markdown",
                 reply_markup=build_reply_markup_from_spec(not_found_message.keyboard),
             )
         else:
-            await query.edit_message_text(
-                session_interaction.get_integration_unavailable_text()
+            await _edit_query_message_resilient(
+                query, session_interaction.get_integration_unavailable_text()
             )
 
     except Exception as e:
@@ -854,7 +971,8 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
         error_message = session_interaction.build_continue_callback_error_message(
             str(e)
         )
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             error_message.text,
             parse_mode="Markdown",
             reply_markup=build_reply_markup_from_spec(error_message.keyboard),
@@ -874,7 +992,8 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
     loading_kwargs = {}
     if view_spec.loading_parse_mode:
         loading_kwargs["parse_mode"] = view_spec.loading_parse_mode
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         view_spec.loading_text,
         **loading_kwargs,
     )
@@ -902,13 +1021,14 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
             approved_directory=settings.approved_directory,
             full_mode=False,
         )
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             render_result.primary_text,
             parse_mode=render_result.parse_mode,
         )
     except Exception as exc:
         logger.error("Error in context callback", error=str(exc), user_id=user_id)
-        await query.edit_message_text(view_spec.error_text)
+        await _edit_query_message_resilient(query, view_spec.error_text)
 
 
 async def handle_model_callback(
@@ -921,7 +1041,8 @@ async def handle_model_callback(
     if active_engine == ENGINE_CODEX:
         codex_param = str(param or "").strip()
         if not codex_param.startswith("codex:"):
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 "ℹ️ 当前引擎：`codex`\n"
                 "请使用 Codex 模型按钮，或手动执行 `/model <model_name>`。",
                 parse_mode="Markdown",
@@ -930,7 +1051,8 @@ async def handle_model_callback(
 
         selected_raw = codex_param.split(":", 1)[1].strip()
         if not selected_raw:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 "❌ 无效模型参数，请重新执行 `/model` 选择。",
                 parse_mode="Markdown",
             )
@@ -944,7 +1066,8 @@ async def handle_model_callback(
             selected = selected_raw.replace("`", "")
             scope_state["claude_model"] = selected
 
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "✅ 已更新 Codex 模型设置。\n"
             f"当前设置：`{selected}`\n\n"
             "你也可以手动输入：`/model <model_name>`",
@@ -957,7 +1080,8 @@ async def handle_model_callback(
 
     capabilities = get_engine_capabilities(active_engine)
     if not capabilities.supports_model_selection:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "ℹ️ 当前引擎不支持模型选择。\n"
             f"当前引擎：`{active_engine}`\n"
             "请先切换：`/engine claude`",
@@ -967,13 +1091,15 @@ async def handle_model_callback(
 
     param_norm = str(param or "").strip().lower()
     if param_norm.startswith("codex:"):
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "ℹ️ 当前引擎：`claude`\n" "请使用 Claude 模型按钮，或手动执行 `/model`。",
             parse_mode="Markdown",
         )
         return
     if param_norm not in {"sonnet", "opus", "haiku", "default"}:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "❌ 无效模型参数，请重新执行 `/model` 选择。",
             parse_mode="Markdown",
         )
@@ -1011,7 +1137,8 @@ async def handle_model_callback(
         ],
     ]
 
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         f"Model switched to `{selected}`.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1035,7 +1162,8 @@ async def handle_engine_callback(
     )
 
     if not param or not param.startswith("switch:"):
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "❌ 无效的引擎切换操作，请重新执行 `/engine`。",
             parse_mode="Markdown",
             reply_markup=selector_keyboard,
@@ -1044,7 +1172,8 @@ async def handle_engine_callback(
 
     requested_engine = normalize_cli_engine(param.split(":", 1)[1])
     if requested_engine not in integrations:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"❌ 引擎 `{requested_engine}` 当前不可用。\n"
             "请检查对应 CLI 是否安装，并在配置中启用。",
             parse_mode="Markdown",
@@ -1053,7 +1182,8 @@ async def handle_engine_callback(
         return
 
     if requested_engine == active_engine:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"ℹ️ 当前已经是 `{active_engine}` 引擎。",
             parse_mode="Markdown",
             reply_markup=selector_keyboard,
@@ -1099,7 +1229,8 @@ async def handle_engine_callback(
             payload_extra={"engine": requested_engine},
             engine=requested_engine,
         )
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "✅ **CLI 引擎已切换**\n\n"
             f"从 `{active_engine}` 切换到 `{requested_engine}`。\n"
             "已清空当前会话绑定。请先选目录，再选会话；也可在下一步直接新建会话。\n\n"
@@ -1108,7 +1239,8 @@ async def handle_engine_callback(
             reply_markup=resume_keyboard,
         )
     else:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "✅ **CLI 引擎已切换**\n\n"
             f"从 `{active_engine}` 切换到 `{requested_engine}`。\n"
             "未发现可恢复的桌面会话，请直接发送消息开始新会话，"
@@ -1191,19 +1323,22 @@ async def _handle_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_text(
-            message, parse_mode="Markdown", reply_markup=reply_markup
+        await _edit_query_message_resilient(
+            query, message, parse_mode="Markdown", reply_markup=reply_markup
         )
 
     except Exception as e:
-        await query.edit_message_text(f"❌ Error listing directory: {str(e)}")
+        await _edit_query_message_resilient(
+            query, f"❌ Error listing directory: {str(e)}"
+        )
 
 
 async def _handle_start_coding_action(
     query, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Handle start coding action."""
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         "🚀 **Ready to Code!**\n\n"
         "Send me any message to start coding with Claude:\n\n"
         "**Examples:**\n"
@@ -1211,7 +1346,7 @@ async def _handle_start_coding_action(
         '• _"Help me debug this code..."_\n'
         '• _"Explain how this file works..."_\n'
         "• Upload a file for review\n\n"
-        "I'm here to help with all your coding needs!"
+        "I'm here to help with all your coding needs!",
     )
 
 
@@ -1240,7 +1375,8 @@ async def _handle_quick_actions_action(
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         "🛠️ **Quick Actions**\n\n"
         "Choose a common development task:\n\n"
         "_Note: These will be fully functional once Claude Code integration is complete._",
@@ -1272,19 +1408,23 @@ async def _handle_recent_cd_action(query, context: ContextTypes.DEFAULT_TYPE) ->
                 approved_directory=settings.approved_directory,
                 active_engine=active_engine,
             )
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 text,
                 parse_mode="Markdown",
                 reply_markup=markup,
             )
         else:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 "No recent projects found.\n\nUse `/cd <path>` to navigate directly.",
                 parse_mode="Markdown",
             )
     except Exception as e:
         logger.error("Failed to scan recent projects in callback", error=str(e))
-        await query.edit_message_text(f"Failed to load recent projects: {str(e)}")
+        await _edit_query_message_resilient(
+            query, f"Failed to load recent projects: {str(e)}"
+        )
 
 
 async def _handle_refresh_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1308,7 +1448,8 @@ async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
     session_exporter = features.get_session_export() if features else None
 
     if not session_exporter:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             session_interaction.build_export_unavailable_text(for_callback=True),
             parse_mode="Markdown",
         )
@@ -1316,7 +1457,8 @@ async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
 
     claude_session_id = session_lifecycle.get_active_session_id(scope_state)
     if not claude_session_id:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             session_interaction.build_export_no_active_session_text(),
             parse_mode="Markdown",
         )
@@ -1326,7 +1468,8 @@ async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
         claude_session_id
     )
 
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         export_selector.text,
         parse_mode="Markdown",
         reply_markup=build_reply_markup_from_spec(export_selector.keyboard),
@@ -1345,9 +1488,10 @@ async def handle_quick_action_callback(
     quick_actions = context.bot_data.get("quick_actions")
 
     if not quick_actions:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "❌ **Quick Actions Not Available**\n\n"
-            "Quick actions feature is not available."
+            "Quick actions feature is not available.",
         )
         return
 
@@ -1357,8 +1501,9 @@ async def handle_quick_action_callback(
         scope_state=scope_state,
     )
     if not cli_integration:
-        await query.edit_message_text(
-            "❌ **CLI 引擎不可用**\n\n" "当前引擎未正确配置，请联系管理员检查配置。"
+        await _edit_query_message_resilient(
+            query,
+            "❌ **CLI 引擎不可用**\n\n" "当前引擎未正确配置，请联系管理员检查配置。",
         )
         return
 
@@ -1368,14 +1513,16 @@ async def handle_quick_action_callback(
         # Get the action from the manager
         action = quick_actions.actions.get(action_id)
         if not action:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 f"❌ **Action Not Found**\n\n"
-                f"Quick action '{action_id}' is not available."
+                f"Quick action '{action_id}' is not available.",
             )
             return
 
         # Execute the action
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"🚀 **Executing {action.icon} {action.name}**\n\n"
             f"Running quick action in directory: `{current_dir.relative_to(settings.approved_directory)}/`\n\n"
             f"Please wait...",
@@ -1396,6 +1543,7 @@ async def handle_quick_action_callback(
                 bot=context.bot,
                 chat_id=query.message.chat_id,
                 settings=settings,
+                chat_type=getattr(getattr(query.message, "chat", None), "type", None),
                 message_thread_id=getattr(query.message, "message_thread_id", None),
             ),
             model=_resolve_model_override(scope_state, active_engine, cli_integration),
@@ -1410,21 +1558,25 @@ async def handle_quick_action_callback(
             if len(response_text) > 4000:
                 response_text = response_text[:4000] + "...\n\n_(Response truncated)_"
 
-            await query.message.reply_text(
+            await _reply_query_message_resilient(
+                query,
+                context,
                 f"✅ **{action.icon} {action.name} Complete**\n\n{response_text}\n\n`Engine: {active_engine}`",
                 parse_mode="Markdown",
             )
         else:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 f"❌ **Action Failed**\n\n"
-                f"Failed to execute {action.name}. Please try again."
+                f"Failed to execute {action.name}. Please try again.",
             )
 
     except Exception as e:
         logger.error("Quick action execution failed", error=str(e), user_id=user_id)
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"❌ **Action Error**\n\n"
-            f"An error occurred while executing {action_id}: {str(e)}"
+            f"An error occurred while executing {action_id}: {str(e)}",
         )
 
 
@@ -1438,23 +1590,25 @@ async def handle_followup_callback(
     conversation_enhancer = context.bot_data.get("conversation_enhancer")
 
     if not conversation_enhancer:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "❌ **Follow-up Not Available**\n\n"
-            "Conversation enhancement features are not available."
+            "Conversation enhancement features are not available.",
         )
         return
 
     try:
         # Get stored suggestions (this would need to be implemented in the enhancer)
         # For now, we'll provide a generic response
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "💡 **Follow-up Suggestion Selected**\n\n"
             "This follow-up suggestion will be implemented once the conversation "
             "enhancement system is fully integrated with the message handler.\n\n"
             "**Current Status:**\n"
             "• Suggestion received ✅\n"
             "• Integration pending 🔄\n\n"
-            "_You can continue the conversation by sending a new message._"
+            "_You can continue the conversation by sending a new message._",
         )
 
         logger.info(
@@ -1471,9 +1625,10 @@ async def handle_followup_callback(
             suggestion_hash=suggestion_hash,
         )
 
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "❌ **Error Processing Follow-up**\n\n"
-            "An error occurred while processing your follow-up suggestion."
+            "An error occurred while processing your follow-up suggestion.",
         )
 
 
@@ -1487,7 +1642,8 @@ async def handle_conversation_callback(
 
     if action_type == "continue":
         # Remove suggestion buttons and show continue message
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "✅ **Continuing Conversation**\n\n"
             "Send me your next message to continue coding!\n\n"
             "I'm ready to help with:\n"
@@ -1496,7 +1652,7 @@ async def handle_conversation_callback(
             "• Architecture decisions\n"
             "• Testing and optimization\n"
             "• Documentation\n\n"
-            "_Just type your request or upload files._"
+            "_Just type your request or upload files._",
         )
 
     elif action_type == "end":
@@ -1524,7 +1680,8 @@ async def handle_conversation_callback(
             title="Conversation Ended",
         )
 
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             end_message.text,
             parse_mode="Markdown",
             reply_markup=build_reply_markup_from_spec(end_message.keyboard),
@@ -1533,9 +1690,10 @@ async def handle_conversation_callback(
         logger.info("Conversation ended via callback", user_id=user_id)
 
     else:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"❌ **Unknown Conversation Action: {action_type}**\n\n"
-            "This conversation action is not recognized."
+            "This conversation action is not recognized.",
         )
 
 
@@ -1549,9 +1707,10 @@ async def handle_git_callback(
     features = context.bot_data.get("features")
 
     if not features or not features.is_enabled("git"):
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "❌ **Git Integration Disabled**\n\n"
-            "Git integration feature is not enabled."
+            "Git integration feature is not enabled.",
         )
         return
 
@@ -1560,9 +1719,10 @@ async def handle_git_callback(
     try:
         git_integration = features.get_git_integration()
         if not git_integration:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 "❌ **Git Integration Unavailable**\n\n"
-                "Git integration service is not available."
+                "Git integration service is not available.",
             )
             return
 
@@ -1583,8 +1743,8 @@ async def handle_git_callback(
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await query.edit_message_text(
-                status_message, parse_mode="Markdown", reply_markup=reply_markup
+            await _edit_query_message_resilient(
+                query, status_message, parse_mode="Markdown", reply_markup=reply_markup
             )
 
         elif git_action == "diff":
@@ -1617,8 +1777,8 @@ async def handle_git_callback(
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await query.edit_message_text(
-                diff_message, parse_mode="Markdown", reply_markup=reply_markup
+            await _edit_query_message_resilient(
+                query, diff_message, parse_mode="Markdown", reply_markup=reply_markup
             )
 
         elif git_action == "log":
@@ -1644,14 +1804,15 @@ async def handle_git_callback(
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await query.edit_message_text(
-                log_message, parse_mode="Markdown", reply_markup=reply_markup
+            await _edit_query_message_resilient(
+                query, log_message, parse_mode="Markdown", reply_markup=reply_markup
             )
 
         else:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 f"❌ **Unknown Git Action: {git_action}**\n\n"
-                "This git action is not recognized."
+                "This git action is not recognized.",
             )
 
     except Exception as e:
@@ -1661,7 +1822,7 @@ async def handle_git_callback(
             git_action=git_action,
             user_id=user_id,
         )
-        await query.edit_message_text(f"❌ **Git Error**\n\n{str(e)}")
+        await _edit_query_message_resilient(query, f"❌ **Git Error**\n\n{str(e)}")
 
 
 async def handle_export_callback(
@@ -1673,14 +1834,15 @@ async def handle_export_callback(
     features = context.bot_data.get("features")
 
     if export_format == "cancel":
-        await query.edit_message_text(
-            "📤 **Export Cancelled**\n\n" "Session export has been cancelled."
+        await _edit_query_message_resilient(
+            query, "📤 **Export Cancelled**\n\n" "Session export has been cancelled."
         )
         return
 
     parsed_format = _parse_export_format(export_format)
     if not parsed_format:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "❌ **Invalid Export Format**\n\n"
             f"Unsupported export format: `{export_format}`",
             parse_mode="Markdown",
@@ -1689,22 +1851,24 @@ async def handle_export_callback(
 
     session_exporter = features.get_session_export() if features else None
     if not session_exporter:
-        await query.edit_message_text(
-            "❌ **Export Unavailable**\n\n" "Session export service is not available."
+        await _edit_query_message_resilient(
+            query,
+            "❌ **Export Unavailable**\n\n" "Session export service is not available.",
         )
         return
 
     # Get current session
     claude_session_id = scope_state.get("claude_session_id")
     if not claude_session_id:
-        await query.edit_message_text(
-            "❌ **No Active Session**\n\n" "There's no active session to export."
+        await _edit_query_message_resilient(
+            query, "❌ **No Active Session**\n\n" "There's no active session to export."
         )
         return
 
     try:
         # Show processing message
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"📤 **Exporting Session**\n\n"
             f"Generating {parsed_format.value.upper()} export...",
             parse_mode="Markdown",
@@ -1736,7 +1900,8 @@ async def handle_export_callback(
         )
 
         # Update the original message
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"✅ **Export Complete**\n\n"
             f"Your session has been exported as {exported_session.filename}.\n"
             f"Check the file above for your complete conversation history.",
@@ -1747,7 +1912,7 @@ async def handle_export_callback(
         logger.error(
             "Export failed", error=str(e), user_id=user_id, format=export_format
         )
-        await query.edit_message_text(f"❌ **Export Failed**\n\n{str(e)}")
+        await _edit_query_message_resilient(query, f"❌ **Export Failed**\n\n{str(e)}")
 
 
 async def handle_permission_callback(
@@ -1764,7 +1929,8 @@ async def handle_permission_callback(
     )
 
     try:
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             result.message,
             parse_mode=result.parse_mode,
         )
@@ -1777,7 +1943,7 @@ async def handle_permission_callback(
                 request_id=result.request_id,
                 decision=result.decision,
             )
-            await query.edit_message_text(result.message)
+            await _edit_query_message_resilient(query, result.message)
         else:
             raise
 
@@ -1797,7 +1963,7 @@ async def handle_thinking_callback(
 ) -> None:
     """Handle thinking expand/collapse callbacks."""
     if not param or ":" not in param:
-        await query.edit_message_text("Invalid thinking callback data.")
+        await _edit_query_message_resilient(query, "Invalid thinking callback data.")
         return
 
     action, message_id = param.split(":", 1)
@@ -1805,8 +1971,8 @@ async def handle_thinking_callback(
     cached = context.user_data.get(cache_key)
 
     if not cached:
-        await query.edit_message_text(
-            "Thinking process cache has expired and cannot be expanded."
+        await _edit_query_message_resilient(
+            query, "Thinking process cache has expired and cannot be expanded."
         )
         return
 
@@ -1821,7 +1987,8 @@ async def handle_thinking_callback(
     ) -> bool:
         """Try Markdown first, then fallback to plain text if entity parsing fails."""
         try:
-            await query.edit_message_text(
+            await _edit_query_message_resilient(
+                query,
                 text,
                 parse_mode="Markdown",
                 reply_markup=reply_markup,
@@ -1836,7 +2003,8 @@ async def handle_thinking_callback(
                 action=action,
             )
             try:
-                await query.edit_message_text(
+                await _edit_query_message_resilient(
+                    query,
                     text,
                     reply_markup=reply_markup,
                 )
@@ -1882,9 +2050,10 @@ async def handle_thinking_callback(
         ):
             return
 
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             "Unable to expand thinking details right now. "
-            "The content may be too long or the message has expired."
+            "The content may be too long or the message has expired.",
         )
 
     elif action == "collapse":
@@ -1903,10 +2072,12 @@ async def handle_thinking_callback(
             reply_markup=expand_keyboard,
         ):
             return
-        await query.edit_message_text(cached["summary"], reply_markup=expand_keyboard)
+        await _edit_query_message_resilient(
+            query, cached["summary"], reply_markup=expand_keyboard
+        )
 
     else:
-        await query.edit_message_text("Unknown thinking action.")
+        await _edit_query_message_resilient(query, "Unknown thinking action.")
 
 
 def _truncate_thinking(lines: list[str], max_chars: int = 3800) -> str:
@@ -2012,10 +2183,10 @@ async def handle_resume_callback(query, param, context):
     # Parse tokenized sub-action: "p:<token>" / "s:<token>" / "f:<token>"
     if not param or ":" not in param:
         if param == "cancel":
-            await query.edit_message_text("Resume cancelled.")
+            await _edit_query_message_resilient(query, "Resume cancelled.")
             return
-        await query.edit_message_text(
-            "Invalid resume action. Please run /resume again."
+        await _edit_query_message_resilient(
+            query, "Invalid resume action. Please run /resume again."
         )
         return
 
@@ -2081,10 +2252,10 @@ async def handle_resume_callback(query, param, context):
             engine=target_engine,
         )
     elif sub == "cancel":
-        await query.edit_message_text("Resume cancelled.")
+        await _edit_query_message_resilient(query, "Resume cancelled.")
     else:
-        await query.edit_message_text(
-            "Unknown resume action. Please run /resume again."
+        await _edit_query_message_resilient(
+            query, "Unknown resume action. Please run /resume again."
         )
 
 
@@ -2104,7 +2275,8 @@ async def _resume_render_project_list(
 
     if not projects:
         engine_label = _resume_engine_label(engine)
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"No desktop {engine_label} sessions found.\n\n"
             f"Run /resume again after using {engine_label} on desktop.",
             parse_mode="Markdown",
@@ -2123,7 +2295,8 @@ async def _resume_render_project_list(
         payload_extra={"engine": engine},
         engine=engine,
     )
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         message_text,
         parse_mode="Markdown",
         reply_markup=keyboard,
@@ -2147,8 +2320,8 @@ async def _resume_select_project(
         token=token,
     )
     if payload is None:
-        await query.edit_message_text(
-            "Token expired or invalid. Please run /resume again."
+        await _edit_query_message_resilient(
+            query, "Token expired or invalid. Please run /resume again."
         )
         return
 
@@ -2182,7 +2355,8 @@ async def _resume_select_project(
                 [InlineKeyboardButton("❌ Cancel", callback_data="resume:cancel")],
             ]
         )
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"No sessions found for project:\n"
             f"`{project_cwd.name}`\n\n"
             f"Start a fresh session in this directory or run /resume again.",
@@ -2240,7 +2414,8 @@ async def _resume_select_project(
         rel = project_cwd.name
 
     session_preview_text = "\n".join(session_preview_lines)
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         f"**Sessions in** `{rel}`\n\n"
         f"Session previews:\n"
         f"{session_preview_text}\n\n"
@@ -2267,8 +2442,8 @@ async def _resume_select_session(
         token=token,
     )
     if payload is None:
-        await query.edit_message_text(
-            "Token expired or invalid. Please run /resume again."
+        await _edit_query_message_resilient(
+            query, "Token expired or invalid. Please run /resume again."
         )
         return
 
@@ -2307,7 +2482,8 @@ async def _resume_select_session(
                 ),
             ],
         ]
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"**Session may be active**\n\n"
             f"Session `{session_id[:8]}...` was modified very recently "
             f"and might still be running on your desktop.\n\n"
@@ -2348,8 +2524,8 @@ async def _resume_force_confirm(
         token=token,
     )
     if payload is None:
-        await query.edit_message_text(
-            "Token expired or invalid. Please run /resume again."
+        await _edit_query_message_resilient(
+            query, "Token expired or invalid. Please run /resume again."
         )
         return
 
@@ -2390,8 +2566,8 @@ async def _resume_start_new_session(
         token=token,
     )
     if payload is None:
-        await query.edit_message_text(
-            "Token expired or invalid. Please run /resume again."
+        await _edit_query_message_resilient(
+            query, "Token expired or invalid. Please run /resume again."
         )
         return
 
@@ -2404,13 +2580,16 @@ async def _resume_start_new_session(
     try:
         resolved = project_cwd.resolve()
         if not resolved.is_relative_to(settings.approved_directory.resolve()):
-            await query.edit_message_text(
-                "Path is outside the approved directory. Cannot start a new session."
+            await _edit_query_message_resilient(
+                query,
+                "Path is outside the approved directory. Cannot start a new session.",
             )
             return
         project_cwd = resolved
     except (OSError, ValueError):
-        await query.edit_message_text("Invalid project path. Please run /resume again.")
+        await _edit_query_message_resilient(
+            query, "Invalid project path. Please run /resume again."
+        )
         return
 
     _, scope_state = _get_scope_state_for_query(query, context)
@@ -2451,7 +2630,8 @@ async def _resume_start_new_session(
         ]
     ]
 
-    await query.edit_message_text(
+    await _edit_query_message_resilient(
+        query,
         f"**New Session Ready**\n\n"
         f"Engine: `{payload_engine}`\n"
         f"Directory: `{rel}/`\n\n"
@@ -2486,13 +2666,15 @@ async def _do_adopt_session(
     try:
         resolved = project_cwd.resolve()
         if not resolved.is_relative_to(settings.approved_directory.resolve()):
-            await query.edit_message_text(
-                "Path is outside the approved directory. Cannot adopt session."
+            await _edit_query_message_resilient(
+                query, "Path is outside the approved directory. Cannot adopt session."
             )
             return
         project_cwd = resolved
     except (OSError, ValueError):
-        await query.edit_message_text("Invalid project path. Please run /resume again.")
+        await _edit_query_message_resilient(
+            query, "Invalid project path. Please run /resume again."
+        )
         return
 
     integrations = context.bot_data.get("cli_integrations") or {}
@@ -2504,14 +2686,15 @@ async def _do_adopt_session(
 
     if not cli_integration or not cli_integration.session_manager:
         engine_label = _resume_engine_label(engine)
-        await query.edit_message_text(
-            f"{engine_label} integration not available. Cannot adopt session."
+        await _edit_query_message_resilient(
+            query, f"{engine_label} integration not available. Cannot adopt session."
         )
         return
 
     try:
         engine_label = _resume_engine_label(engine)
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"Adopting {engine_label} session `{session_id[:8]}...`\n"
             f"Please wait...",
             parse_mode="Markdown",
@@ -2594,7 +2777,8 @@ async def _do_adopt_session(
         if history_preview:
             history_block = "\n\n" + _build_resume_history_preview_text(history_preview)
 
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"**Session Resumed**\n\n"
             f"Engine: `{engine}`\n"
             f"Session: `{adopted.session_id[:8]}...`\n"
@@ -2629,7 +2813,8 @@ async def _do_adopt_session(
             user_id=user_id,
             session_id=session_id,
         )
-        await query.edit_message_text(
+        await _edit_query_message_resilient(
+            query,
             f"**Failed to Resume Session**\n\n"
             f"Error: `{str(e)}`\n\n"
             f"Please run /resume to try again.",

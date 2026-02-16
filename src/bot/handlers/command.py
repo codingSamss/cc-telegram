@@ -30,10 +30,95 @@ from ..utils.command_menu import sync_chat_command_menu
 from ..utils.recent_projects import build_recent_projects_message, scan_recent_projects
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.scope_state import get_scope_state_from_update
+from ..utils.telegram_send import is_markdown_parse_error, send_message_resilient
 from ..utils.ui_adapter import build_reply_markup_from_spec
 from .message import build_permission_handler
 
 logger = structlog.get_logger()
+_PARSE_MODE_UNSET = object()
+
+
+async def _reply_update_message_resilient(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    reply_to_message_id: int | None = None,
+):
+    """Reply to update message with fallback to resilient send helper."""
+    message = getattr(update, "message", None)
+    if message is None:
+        return None
+
+    send_kwargs = {}
+    if parse_mode is not None:
+        send_kwargs["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        send_kwargs["reply_markup"] = reply_markup
+    if isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
+        send_kwargs["reply_to_message_id"] = reply_to_message_id
+
+    try:
+        return await message.reply_text(text, **send_kwargs)
+    except Exception:
+        bot = getattr(context, "bot", None)
+        chat = getattr(update, "effective_chat", None)
+        chat_id = getattr(chat, "id", None)
+        if bot is None or not isinstance(chat_id, int):
+            raise
+
+        return await send_message_resilient(
+            bot=bot,
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=getattr(
+                update.effective_message, "message_thread_id", None
+            ),
+            chat_type=getattr(chat, "type", None),
+        )
+
+
+def _is_noop_edit_error(error: Exception) -> bool:
+    """Whether Telegram rejected edit because target text is unchanged."""
+    return "message is not modified" in str(error).lower()
+
+
+async def _edit_message_resilient(
+    message,
+    text: str,
+    *,
+    parse_mode: str | None | object = _PARSE_MODE_UNSET,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """Edit message with markdown/no-op fallback."""
+    edit_kwargs = {}
+    if parse_mode is not _PARSE_MODE_UNSET:
+        edit_kwargs["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        edit_kwargs["reply_markup"] = reply_markup
+
+    try:
+        return await message.edit_text(text, **edit_kwargs)
+    except Exception as edit_error:
+        if _is_noop_edit_error(edit_error):
+            return None
+        if parse_mode not in (None, _PARSE_MODE_UNSET) and is_markdown_parse_error(
+            edit_error
+        ):
+            fallback_kwargs = dict(edit_kwargs)
+            fallback_kwargs.pop("parse_mode", None)
+            try:
+                return await message.edit_text(text, **fallback_kwargs)
+            except Exception as fallback_error:
+                if _is_noop_edit_error(fallback_error):
+                    return None
+                raise
+        raise
 
 
 def _get_or_create_resume_token_manager(context: ContextTypes.DEFAULT_TYPE):
@@ -302,8 +387,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        welcome_message, parse_mode="Markdown", reply_markup=reply_markup
+    await _reply_update_message_resilient(
+        update,
+        context,
+        welcome_message,
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
     )
 
     # Log command
@@ -393,7 +482,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Need more help? Contact your administrator."
     )
 
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    await _reply_update_message_resilient(
+        update, context, help_text, parse_mode="Markdown"
+    )
 
 
 async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -436,7 +527,9 @@ async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if selector_keyboard is None:
             selector_text += "\n\n⚠️ 当前未检测到可用引擎，请检查配置。"
 
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             selector_text,
             parse_mode="Markdown",
             reply_markup=selector_keyboard,
@@ -446,7 +539,9 @@ async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     requested_engine = normalize_cli_engine(args[0])
     integrations = context.bot_data.get("cli_integrations") or {}
     if requested_engine not in integrations:
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             f"❌ 引擎 `{requested_engine}` 当前不可用。\n"
             "请检查对应 CLI 是否安装，并在配置中启用。",
             parse_mode="Markdown",
@@ -459,7 +554,9 @@ async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             chat_id=getattr(update.effective_chat, "id", None),
             engine=active_engine,
         )
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             f"ℹ️ 当前已经是 `{active_engine}` 引擎。",
             parse_mode="Markdown",
         )
@@ -518,13 +615,17 @@ async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             payload_extra={"engine": requested_engine},
             engine=requested_engine,
         )
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             f"{switch_success_text}\n\n{resume_text}",
             parse_mode="Markdown",
             reply_markup=resume_keyboard,
         )
     else:
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             f"{switch_success_text}\n\n"
             "未发现可恢复的桌面会话，请直接发送消息开始新会话，"
             "或先 `/cd` 到目标目录后再发送。",
@@ -570,7 +671,9 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         for_callback=False,
     )
 
-    await update.message.reply_text(
+    await _reply_update_message_resilient(
+        update,
+        context,
         session_message.text,
         parse_mode="Markdown",
         reply_markup=build_reply_markup_from_spec(session_message.keyboard),
@@ -610,8 +713,8 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     try:
         if not cli_integration:
-            await update.message.reply_text(
-                session_interaction.get_integration_unavailable_text()
+            await _reply_update_message_resilient(
+                update, context, session_interaction.get_integration_unavailable_text()
             )
             return
 
@@ -621,6 +724,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             bot=context.bot,
             chat_id=update.effective_chat.id,
             settings=settings,
+            chat_type=getattr(update.effective_chat, "type", None),
             message_thread_id=getattr(
                 update.effective_message, "message_thread_id", None
             ),
@@ -632,7 +736,9 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             approved_directory=settings.approved_directory,
             prompt=prompt,
         )
-        status_msg = await update.message.reply_text(
+        status_msg = await _reply_update_message_resilient(
+            update,
+            context,
             status_msg_text,
             parse_mode="Markdown",
         )
@@ -664,7 +770,9 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
 
             for msg in formatted_messages:
-                await update.message.reply_text(
+                await _reply_update_message_resilient(
+                    update,
+                    context,
                     msg.text,
                     parse_mode=msg.parse_mode,
                     reply_markup=msg.reply_markup,
@@ -686,13 +794,15 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 approved_directory=settings.approved_directory,
                 for_callback=False,
             )
-            await status_msg.edit_text(
+            await _edit_message_resilient(
+                status_msg,
                 not_found_message.text,
                 parse_mode="Markdown",
                 reply_markup=build_reply_markup_from_spec(not_found_message.keyboard),
             )
         else:
-            await status_msg.edit_text(
+            await _edit_message_resilient(
+                status_msg,
                 session_interaction.get_integration_unavailable_text(),
             )
 
@@ -708,7 +818,9 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             pass
 
         # Send error response
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             session_interaction.build_continue_command_error_text(error_msg),
             parse_mode="Markdown",
         )
@@ -802,8 +914,8 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
-        await update.message.reply_text(
-            message, parse_mode="Markdown", reply_markup=reply_markup
+        await _reply_update_message_resilient(
+            update, context, message, parse_mode="Markdown", reply_markup=reply_markup
         )
 
         # Log successful command
@@ -812,7 +924,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     except Exception as e:
         error_msg = f"❌ Error listing directory: {str(e)}"
-        await update.message.reply_text(error_msg)
+        await _reply_update_message_resilient(update, context, error_msg)
 
         # Log failed command
         if audit_logger:
@@ -847,7 +959,9 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     approved_directory=settings.approved_directory,
                     active_engine=active_engine,
                 )
-                await update.message.reply_text(
+                await _reply_update_message_resilient(
+                    update,
+                    context,
                     text,
                     parse_mode="Markdown",
                     reply_markup=markup,
@@ -857,7 +971,9 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.warning("Failed to scan recent projects", error=str(e))
 
         # Fallback: show usage help
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             "**Usage:** `/cd <directory>`\n\n"
             "**Examples:**\n"
             "• `/cd myproject` - Enter subdirectory\n"
@@ -881,7 +997,9 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
 
             if not valid:
-                await update.message.reply_text(f"❌ **Access Denied**\n\n{error}")
+                await _reply_update_message_resilient(
+                    update, context, f"❌ **Access Denied**\n\n{error}"
+                )
 
                 # Log security violation
                 if audit_logger:
@@ -906,14 +1024,18 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         # Check if directory exists and is actually a directory
         if not resolved_path.exists():
-            await update.message.reply_text(
-                f"❌ **Directory Not Found**\n\n`{target_path}` does not exist."
+            await _reply_update_message_resilient(
+                update,
+                context,
+                f"❌ **Directory Not Found**\n\n`{target_path}` does not exist.",
             )
             return
 
         if not resolved_path.is_dir():
-            await update.message.reply_text(
-                f"❌ **Not a Directory**\n\n`{target_path}` is not a directory."
+            await _reply_update_message_resilient(
+                update,
+                context,
+                f"❌ **Not a Directory**\n\n`{target_path}` is not a directory.",
             )
             return
 
@@ -934,7 +1056,9 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         # Send confirmation
         relative_path = resolved_path.relative_to(settings.approved_directory)
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             f"✅ **Directory Changed**\n\n"
             f"📂 Current directory: `{relative_path}/`"
             f"{session_info}",
@@ -947,7 +1071,9 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     except Exception as e:
         error_msg = f"❌ **Error changing directory**\n\n{str(e)}"
-        await update.message.reply_text(error_msg, parse_mode="Markdown")
+        await _reply_update_message_resilient(
+            update, context, error_msg, parse_mode="Markdown"
+        )
 
         # Log failed command
         if audit_logger:
@@ -980,7 +1106,9 @@ async def print_working_directory(
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
+    await _reply_update_message_resilient(
+        update,
+        context,
         f"📍 **Current Directory**\n\n"
         f"Relative: `{relative_path}/`\n"
         f"Absolute: `{absolute_path}`",
@@ -1001,10 +1129,12 @@ async def show_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 projects.append(item.name)
 
         if not projects:
-            await update.message.reply_text(
+            await _reply_update_message_resilient(
+                update,
+                context,
                 "📁 **No Projects Found**\n\n"
                 "No subdirectories found in your approved directory.\n"
-                "Create some directories to organize your projects!"
+                "Create some directories to organize your projects!",
             )
             return
 
@@ -1036,7 +1166,9 @@ async def show_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         project_list = "\n".join([f"• `{project}/`" for project in projects])
 
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             f"📁 **Available Projects**\n\n"
             f"{project_list}\n\n"
             f"Click a project below to navigate to it:",
@@ -1045,7 +1177,9 @@ async def show_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Error loading projects: {str(e)}")
+        await _reply_update_message_resilient(
+            update, context, f"❌ Error loading projects: {str(e)}"
+        )
         logger.error("Error in show_projects command", error=str(e))
 
 
@@ -1070,7 +1204,9 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     loading_kwargs = {}
     if view_spec.loading_parse_mode:
         loading_kwargs["parse_mode"] = view_spec.loading_parse_mode
-    status_msg = await update.message.reply_text(
+    status_msg = await _reply_update_message_resilient(
+        update,
+        context,
         view_spec.loading_text,
         **loading_kwargs,
     )
@@ -1098,21 +1234,24 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             approved_directory=settings.approved_directory,
             full_mode=full_mode,
         )
-        await status_msg.edit_text(
+        await _edit_message_resilient(
+            status_msg,
             render_result.primary_text,
             parse_mode=render_result.parse_mode,
         )
         for extra_text in render_result.extra_texts:
-            await update.message.reply_text(
+            await _reply_update_message_resilient(
+                update,
+                context,
                 extra_text,
                 parse_mode=render_result.parse_mode,
             )
     except Exception as e:
         logger.error("Error in context command", error=str(e), user_id=user_id)
         try:
-            await status_msg.edit_text(view_spec.error_text)
+            await _edit_message_resilient(status_msg, view_spec.error_text)
         except Exception:
-            await update.message.reply_text(view_spec.error_text)
+            await _reply_update_message_resilient(update, context, view_spec.error_text)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1139,8 +1278,10 @@ async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     session_exporter = features.get_session_export() if features else None
 
     if not session_exporter:
-        await update.message.reply_text(
-            session_interaction.build_export_unavailable_text(for_callback=False)
+        await _reply_update_message_resilient(
+            update,
+            context,
+            session_interaction.build_export_unavailable_text(for_callback=False),
         )
         return
 
@@ -1154,8 +1295,8 @@ async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     claude_session_id = session_lifecycle.get_active_session_id(scope_state)
 
     if not claude_session_id:
-        await update.message.reply_text(
-            session_interaction.build_export_no_active_session_text()
+        await _reply_update_message_resilient(
+            update, context, session_interaction.build_export_no_active_session_text()
         )
         return
 
@@ -1163,7 +1304,9 @@ async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         claude_session_id
     )
 
-    await update.message.reply_text(
+    await _reply_update_message_resilient(
+        update,
+        context,
         export_selector.text,
         parse_mode="Markdown",
         reply_markup=build_reply_markup_from_spec(export_selector.keyboard),
@@ -1195,7 +1338,9 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         no_active_message = session_interaction.build_end_no_active_message(
             for_callback=False
         )
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             no_active_message.text,
             reply_markup=build_reply_markup_from_spec(no_active_message.keyboard),
         )
@@ -1210,7 +1355,9 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         title="Session Ended",
     )
 
-    await update.message.reply_text(
+    await _reply_update_message_resilient(
+        update,
+        context,
         end_message.text,
         parse_mode="Markdown",
         reply_markup=build_reply_markup_from_spec(end_message.keyboard),
@@ -1235,10 +1382,12 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     features = context.bot_data.get("features")
 
     if not features or not features.is_enabled("quick_actions"):
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             "❌ **Quick Actions Disabled**\n\n"
             "Quick actions feature is not enabled.\n"
-            "Contact your administrator to enable this feature."
+            "Contact your administrator to enable this feature.",
         )
         return
 
@@ -1248,9 +1397,11 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         quick_action_manager = features.get_quick_actions()
         if not quick_action_manager:
-            await update.message.reply_text(
+            await _reply_update_message_resilient(
+                update,
+                context,
                 "❌ **Quick Actions Unavailable**\n\n"
-                "Quick actions service is not available."
+                "Quick actions service is not available.",
             )
             return
 
@@ -1260,13 +1411,15 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
         if not actions:
-            await update.message.reply_text(
+            await _reply_update_message_resilient(
+                update,
+                context,
                 "🤖 **No Actions Available**\n\n"
                 "No quick actions are available for the current context.\n\n"
                 "**Try:**\n"
                 "• Navigating to a project directory with `/cd`\n"
                 "• Creating some code files\n"
-                "• Starting a Claude session with `/new`"
+                "• Starting a Claude session with `/new`",
             )
             return
 
@@ -1274,7 +1427,9 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         keyboard = quick_action_manager.create_inline_keyboard(actions, max_columns=2)
 
         relative_path = current_dir.relative_to(settings.approved_directory)
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             f"⚡ **Quick Actions**\n\n"
             f"📂 Context: `{relative_path}/`\n\n"
             f"Select an action to execute:",
@@ -1283,7 +1438,9 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
     except Exception as e:
-        await update.message.reply_text(f"❌ **Error Loading Actions**\n\n{str(e)}")
+        await _reply_update_message_resilient(
+            update, context, f"❌ **Error Loading Actions**\n\n{str(e)}"
+        )
         logger.error("Error in quick_actions command", error=str(e), user_id=user_id)
 
 
@@ -1299,10 +1456,12 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     features = context.bot_data.get("features")
 
     if not features or not features.is_enabled("git"):
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             "❌ **Git Integration Disabled**\n\n"
             "Git integration feature is not enabled.\n"
-            "Contact your administrator to enable this feature."
+            "Contact your administrator to enable this feature.",
         )
         return
 
@@ -1312,21 +1471,25 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         git_integration = features.get_git_integration()
         if not git_integration:
-            await update.message.reply_text(
+            await _reply_update_message_resilient(
+                update,
+                context,
                 "❌ **Git Integration Unavailable**\n\n"
-                "Git integration service is not available."
+                "Git integration service is not available.",
             )
             return
 
         # Check if current directory is a git repository
         if not (current_dir / ".git").exists():
-            await update.message.reply_text(
+            await _reply_update_message_resilient(
+                update,
+                context,
                 f"📂 **Not a Git Repository**\n\n"
                 f"Current directory `{current_dir.relative_to(settings.approved_directory)}/` is not a git repository.\n\n"
                 f"**Options:**\n"
                 f"• Navigate to a git repository with `/cd`\n"
                 f"• Initialize a new repository (ask Claude to help)\n"
-                f"• Clone an existing repository (ask Claude to help)"
+                f"• Clone an existing repository (ask Claude to help)",
             )
             return
 
@@ -1372,12 +1535,18 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(
-            status_message, parse_mode="Markdown", reply_markup=reply_markup
+        await _reply_update_message_resilient(
+            update,
+            context,
+            status_message,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
         )
 
     except Exception as e:
-        await update.message.reply_text(f"❌ **Git Error**\n\n{str(e)}")
+        await _reply_update_message_resilient(
+            update, context, f"❌ **Git Error**\n\n{str(e)}"
+        )
         logger.error("Error in git_command", error=str(e), user_id=user_id)
 
 
@@ -1392,7 +1561,9 @@ async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     task_registry: TaskRegistry = context.bot_data.get("task_registry")
     if not task_registry:
-        await update.message.reply_text("Task registry not available.")
+        await _reply_update_message_resilient(
+            update, context, "Task registry not available."
+        )
         return
 
     cancelled = await task_registry.cancel(user_id, scope_key=scope_key)
@@ -1401,9 +1572,13 @@ async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # between message update and callback context (e.g. topic/thread edge cases).
         cancelled = await task_registry.cancel(user_id, scope_key=None)
     if cancelled:
-        await update.message.reply_text("Task cancellation requested.")
+        await _reply_update_message_resilient(
+            update, context, "Task cancellation requested."
+        )
     else:
-        await update.message.reply_text("No active task to cancel.")
+        await _reply_update_message_resilient(
+            update, context, "No active task to cancel."
+        )
 
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
     if audit_logger:
@@ -1462,7 +1637,9 @@ async def codex_diag_command(
     active_engine = get_active_cli_engine(scope_state)
     capabilities = get_engine_capabilities(active_engine)
     if not capabilities.supports_codex_diag:
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             "ℹ️ 当前引擎不支持 `/codexdiag`。\n"
             f"当前引擎：`{active_engine}`\n"
             "请先切换：`/engine codex`",
@@ -1487,9 +1664,11 @@ async def codex_diag_command(
         Path(__file__).resolve().parents[3] / "scripts" / "cc_codex_diagnose.py"
     )
     if not script_path.exists():
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             f"❌ 诊断脚本不存在：{script_path}\n"
-            "请检查项目是否包含 `scripts/cc_codex_diagnose.py`。"
+            "请检查项目是否包含 `scripts/cc_codex_diagnose.py`。",
         )
         if audit_logger:
             await audit_logger.log_command(
@@ -1500,8 +1679,8 @@ async def codex_diag_command(
             )
         return
 
-    status_msg = await update.message.reply_text(
-        "🔎 正在诊断 codex MCP 调用状态，请稍候..."
+    status_msg = await _reply_update_message_resilient(
+        update, context, "🔎 正在诊断 codex MCP 调用状态，请稍候..."
     )
 
     cmd = [
@@ -1524,9 +1703,10 @@ async def codex_diag_command(
         if "proc" in locals():
             proc.kill()
             await proc.communicate()
-        await status_msg.edit_text(
+        await _edit_message_resilient(
+            status_msg,
             "⏰ 诊断超时（45 秒）。\n"
-            "建议稍后重试，或先检查 `~/.claude/debug/*.txt` 是否持续写入。"
+            "建议稍后重试，或先检查 `~/.claude/debug/*.txt` 是否持续写入。",
         )
         if audit_logger:
             await audit_logger.log_command(
@@ -1537,7 +1717,7 @@ async def codex_diag_command(
             )
         return
     except Exception as e:
-        await status_msg.edit_text(f"❌ 执行诊断失败：{e}")
+        await _edit_message_resilient(status_msg, f"❌ 执行诊断失败：{e}")
         if audit_logger:
             await audit_logger.log_command(
                 user_id=user_id,
@@ -1553,14 +1733,15 @@ async def codex_diag_command(
     if proc.returncode != 0:
         err_body = stderr_text or stdout_text or "无可用输出"
         err_chunks = _split_text_chunks(err_body, max_chars=3200)
-        await status_msg.edit_text(
+        await _edit_message_resilient(
+            status_msg,
             "❌ codex 诊断执行失败。\n"
             f"项目目录: {project_dir}\n"
             f"返回码: {proc.returncode}\n\n"
-            f"{err_chunks[0]}"
+            f"{err_chunks[0]}",
         )
         for chunk in err_chunks[1:]:
-            await update.message.reply_text(chunk)
+            await _reply_update_message_resilient(update, context, chunk)
         if audit_logger:
             await audit_logger.log_command(
                 user_id=user_id,
@@ -1577,9 +1758,11 @@ async def codex_diag_command(
         f"项目目录: {project_dir}\n"
         f"会话范围: {'指定会话' if explicit_session_id else '自动选择最近会话'}\n\n"
     )
-    await status_msg.edit_text(f"{header}{output_chunks[0]}")
+    await _edit_message_resilient(status_msg, f"{header}{output_chunks[0]}")
     for idx, chunk in enumerate(output_chunks[1:], start=2):
-        await update.message.reply_text(f"[{idx}/{total}]\n{chunk}")
+        await _reply_update_message_resilient(
+            update, context, f"[{idx}/{total}]\n{chunk}"
+        )
 
     if audit_logger:
         await audit_logger.log_command(
@@ -1669,7 +1852,9 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 selected_model = requested_model.replace("`", "")
                 scope_state["claude_model"] = selected_model
 
-            await update.message.reply_text(
+            await _reply_update_message_resilient(
+                update,
+                context,
                 "✅ 已更新 Codex 模型设置。\n"
                 f"当前设置：`{selected_model}`\n\n"
                 "该设置会用于后续 Codex 请求（通过 `--model` 传递）。\n"
@@ -1682,7 +1867,9 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             "ℹ️ 当前引擎：`codex`\n"
             f"当前模型：`{model_display}`\n\n"
             "可直接切换：`/model <model_name>`，或点下方按钮选择。\n"
@@ -1697,7 +1884,9 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not capabilities.supports_model_selection:
 
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             "ℹ️ 当前引擎不支持 `/model`。\n"
             f"当前引擎：`{active_engine}`\n"
             "请先切换：`/engine claude`",
@@ -1733,7 +1922,9 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ],
     ]
 
-    await update.message.reply_text(
+    await _reply_update_message_resilient(
+        update,
+        context,
         f"Current model: `{current or 'default'}`\nSelect a model:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1766,7 +1957,9 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         current_dir = scope_state.get("current_directory")
 
         if not projects:
-            await update.message.reply_text(
+            await _reply_update_message_resilient(
+                update,
+                context,
                 f"No desktop {engine_label} sessions found.\n\n"
                 f"Make sure you have used {engine_label} CLI "
                 "in a project under your approved directory.",
@@ -1785,7 +1978,9 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             engine=active_engine,
         )
 
-        await update.message.reply_text(
+        await _reply_update_message_resilient(
+            update,
+            context,
             message_text,
             parse_mode="Markdown",
             reply_markup=keyboard,
@@ -1793,4 +1988,6 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     except Exception as e:
         logger.error("Error in resume command", error=str(e))
-        await update.message.reply_text(f"Failed to scan desktop sessions: {e}")
+        await _reply_update_message_resilient(
+            update, context, f"Failed to scan desktop sessions: {e}"
+        )

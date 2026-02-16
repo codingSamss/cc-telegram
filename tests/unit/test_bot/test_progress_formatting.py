@@ -320,6 +320,57 @@ async def test_reply_text_resilient_splits_when_message_too_long():
     assert all(len(call.args[0]) <= 3900 for call in split_calls)
 
 
+@pytest.mark.asyncio
+async def test_reply_text_resilient_uses_bot_send_path_when_available():
+    """When bot/chat context is available, helper should use resilient send wrapper."""
+    bot = type("FakeBot", (), {})()
+    bot.send_message = AsyncMock(return_value=object())
+    message = type("FakeMessage", (), {})()
+    message.chat_id = -100123
+    message.message_thread_id = 42
+
+    await _reply_text_resilient(
+        message,
+        "hello",
+        parse_mode="Markdown",
+        reply_to_message_id=77,
+        bot=bot,
+        chat_type="supergroup",
+    )
+
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == -100123
+    assert kwargs["message_thread_id"] == 42
+    assert kwargs["reply_to_message_id"] == 77
+    assert kwargs["parse_mode"] == "Markdown"
+
+
+@pytest.mark.asyncio
+async def test_reply_text_resilient_bot_path_retries_without_thread():
+    """Bot send path should retry without thread when topic id is invalid."""
+    bot = type("FakeBot", (), {})()
+    bot.send_message = AsyncMock(
+        side_effect=[Exception("Bad Request: message thread not found"), object()]
+    )
+    message = type("FakeMessage", (), {})()
+    message.chat_id = -100123
+    message.message_thread_id = 42
+
+    await _reply_text_resilient(
+        message,
+        "hello",
+        parse_mode="Markdown",
+        bot=bot,
+        chat_type="supergroup",
+    )
+
+    assert bot.send_message.await_count == 2
+    first_call_kwargs = bot.send_message.await_args_list[0].kwargs
+    second_call_kwargs = bot.send_message.await_args_list[1].kwargs
+    assert first_call_kwargs["message_thread_id"] == 42
+    assert "message_thread_id" not in second_call_kwargs
+
+
 def test_format_error_message_uses_codex_label_for_generic_errors():
     """Codex generic error should not render Claude-branded header."""
     text = _format_error_message("mcp backend crashed", engine=ENGINE_CODEX)

@@ -3,6 +3,9 @@
 import asyncio
 import base64
 import binascii
+import time
+from collections import Counter
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from uuid import uuid4
@@ -26,13 +29,48 @@ from ..utils.cli_engine import (
     get_engine_primary_status_command,
     normalize_cli_engine,
 )
-from ..utils.scope_state import get_scope_state_from_update
+from ..utils.scope_state import (
+    build_scope_key,
+    get_scope_state,
+    get_scope_state_from_update,
+)
+from ..utils.telegram_send import send_message_resilient
 
 logger = structlog.get_logger()
 
 _IMAGE_STATUS_TOTAL_STEPS = 6
 _TELEGRAM_MESSAGE_LIMIT = 4096
 _TELEGRAM_SAFE_SPLIT_LIMIT = 3900
+_REACTION_FEEDBACK_STATE_KEY = "pending_reaction_feedback"
+_REACTION_COUNT_CACHE_KEY = "reaction_count_cache"
+_REACTION_UPDATE_DEDUP_KEY = "reaction_update_dedup"
+_REACTION_UPDATE_DEDUP_TTL_SECONDS = 60
+_REACTION_FEEDBACK_TTL_SECONDS = 60 * 60
+_INBOUND_AGGREGATION_LOCK_KEY = "inbound_aggregation_lock"
+_TEXT_FRAGMENT_BUFFER_KEY = "text_fragment_buffer"
+_MEDIA_GROUP_BUFFER_KEY = "media_group_buffer"
+_TEXT_FRAGMENT_START_LENGTH = 3000
+_TEXT_FRAGMENT_WINDOW_SECONDS = 1.2
+_MEDIA_GROUP_WINDOW_SECONDS = 1.0
+_AGGREGATION_STATE_TTL_SECONDS = 30
+_POSITIVE_REACTION_TOKENS = {
+    "emoji:👍",
+    "emoji:✅",
+    "emoji:👏",
+    "emoji:❤️",
+    "emoji:🔥",
+}
+_NEGATIVE_REACTION_TOKENS = {
+    "emoji:👎",
+    "emoji:❌",
+    "emoji:😡",
+    "emoji:🤬",
+    "emoji:🚫",
+    "emoji:💩",
+}
+_BOT_REACTION_PROCESSING = "👀"
+_BOT_REACTION_SUCCESS = "👍"
+_BOT_REACTION_FAILED = "👎"
 
 
 def _escape_md(text: str) -> str:
@@ -234,8 +272,43 @@ async def _reply_text_resilient(
     parse_mode: Optional[str] = None,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
     reply_to_message_id: Optional[int] = None,
-) -> None:
+    bot: Any | None = None,
+    chat_type: Optional[str] = None,
+) -> Any:
     """Send reply text with fallback for Markdown parse and long text errors."""
+    resolved_bot = bot
+    if resolved_bot is None:
+        get_bot = getattr(telegram_message, "get_bot", None)
+        if callable(get_bot):
+            try:
+                resolved_bot = get_bot()
+            except Exception:
+                resolved_bot = None
+
+    message_chat_id = getattr(telegram_message, "chat_id", None)
+    if message_chat_id is None:
+        message_chat = getattr(telegram_message, "chat", None)
+        message_chat_id = getattr(message_chat, "id", None)
+    else:
+        message_chat = getattr(telegram_message, "chat", None)
+
+    message_thread_id = getattr(telegram_message, "message_thread_id", None)
+    resolved_chat_type = chat_type
+    if resolved_chat_type is None:
+        resolved_chat_type = getattr(message_chat, "type", None)
+
+    if resolved_bot is not None and isinstance(message_chat_id, int):
+        return await send_message_resilient(
+            bot=resolved_bot,
+            chat_id=message_chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=message_thread_id,
+            chat_type=resolved_chat_type,
+        )
+
     send_kwargs: dict[str, Any] = {}
     if parse_mode:
         send_kwargs["parse_mode"] = parse_mode
@@ -245,8 +318,7 @@ async def _reply_text_resilient(
         send_kwargs["reply_to_message_id"] = reply_to_message_id
 
     try:
-        await telegram_message.reply_text(text, **send_kwargs)
-        return
+        return await telegram_message.reply_text(text, **send_kwargs)
     except Exception as send_error:
         final_error: Exception = send_error
 
@@ -255,23 +327,62 @@ async def _reply_text_resilient(
         no_md_kwargs = dict(send_kwargs)
         no_md_kwargs.pop("parse_mode", None)
         try:
-            await telegram_message.reply_text(text, **no_md_kwargs)
-            return
+            return await telegram_message.reply_text(text, **no_md_kwargs)
         except Exception as no_md_error:
             final_error = no_md_error
 
     if _is_message_too_long_error(final_error) or len(text) > _TELEGRAM_MESSAGE_LIMIT:
         chunks = _split_text_for_telegram(text)
+        last_message = None
         for idx, chunk in enumerate(chunks):
             chunk_kwargs: dict[str, Any] = {}
             if idx == 0 and reply_markup is not None:
                 chunk_kwargs["reply_markup"] = reply_markup
             if idx == 0 and reply_to_message_id is not None:
                 chunk_kwargs["reply_to_message_id"] = reply_to_message_id
-            await telegram_message.reply_text(chunk, **chunk_kwargs)
-        return
+            last_message = await telegram_message.reply_text(chunk, **chunk_kwargs)
+        return last_message
 
     raise final_error
+
+
+async def _set_message_reaction_safe(
+    bot: Any,
+    *,
+    chat_id: Optional[int],
+    message_id: Optional[int],
+    emoji: Optional[str],
+    is_big: bool = False,
+) -> bool:
+    """Best-effort wrapper for Telegram set_message_reaction API."""
+    if (
+        bot is None
+        or chat_id is None
+        or message_id is None
+        or not hasattr(bot, "set_message_reaction")
+    ):
+        return False
+
+    normalized_emoji = str(emoji or "").strip()
+    reaction_payload: list[str] = [normalized_emoji] if normalized_emoji else []
+
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            reaction=reaction_payload,
+            is_big=is_big,
+        )
+        return True
+    except Exception as e:
+        logger.debug(
+            "Failed to set Telegram message reaction",
+            chat_id=chat_id,
+            message_id=message_id,
+            emoji=normalized_emoji or None,
+            error=str(e),
+        )
+        return False
 
 
 def _integration_supports_image_analysis(cli_integration: Any) -> bool:
@@ -344,6 +455,315 @@ def _cleanup_cli_image_file(image_path: Optional[Path]) -> None:
             image_path=str(image_path),
             error=str(e),
         )
+
+
+def _get_inbound_aggregation_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
+    """Get shared lock used for inbound aggregation state updates."""
+    lock = context.bot_data.get(_INBOUND_AGGREGATION_LOCK_KEY)
+    if isinstance(lock, asyncio.Lock):
+        return lock
+
+    created = asyncio.Lock()
+    context.bot_data[_INBOUND_AGGREGATION_LOCK_KEY] = created
+    return created
+
+
+def _evict_stale_aggregation_states(
+    state_map: MutableMapping[str, Any], *, now: float
+) -> None:
+    """Drop stale inbound aggregation buffers."""
+    cutoff = now - _AGGREGATION_STATE_TTL_SECONDS
+    stale_keys = []
+    for key, raw_state in state_map.items():
+        if not isinstance(raw_state, dict):
+            stale_keys.append(key)
+            continue
+        updated_at = raw_state.get("updated_at")
+        if not isinstance(updated_at, (int, float)) or float(updated_at) < cutoff:
+            stale_keys.append(key)
+
+    for key in stale_keys:
+        state_map.pop(key, None)
+
+
+def _resolve_thread_id_for_aggregation(update: Update) -> int:
+    """Resolve thread id for inbound aggregation keys."""
+    raw_thread_id = getattr(update.effective_message, "message_thread_id", None)
+    try:
+        return int(raw_thread_id) if raw_thread_id is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _collect_text_fragments(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[bool, str, Optional[int], int]:
+    """Collect split long-text fragments and return merged payload when ready.
+
+    Returns:
+    - ready: whether caller should continue processing now
+    - merged_text: merged text when ready=True
+    - source_message_id: first fragment message id when merged
+    - fragment_count: number of merged fragments
+    """
+    telegram_message = getattr(update, "message", None)
+    raw_text = getattr(telegram_message, "text", None)
+    message_text = str(raw_text or "")
+
+    raw_message_id = getattr(telegram_message, "message_id", None)
+    message_id = raw_message_id if isinstance(raw_message_id, int) else None
+    if message_id is None:
+        return True, message_text, None, 1
+
+    should_start_buffer = len(message_text) >= _TEXT_FRAGMENT_START_LENGTH
+    chat_id = getattr(update.effective_chat, "id", None)
+    user_id = getattr(update.effective_user, "id", None)
+    if (
+        not isinstance(chat_id, int)
+        or not isinstance(user_id, int)
+        or update.effective_message is None
+    ):
+        return True, message_text, message_id, 1
+
+    thread_id = _resolve_thread_id_for_aggregation(update)
+    aggregation_key = f"{chat_id}:{thread_id}:{user_id}"
+    now = time.monotonic()
+    lock = _get_inbound_aggregation_lock(context)
+    candidate_message_id: Optional[int] = None
+
+    async with lock:
+        raw_map = context.bot_data.get(_TEXT_FRAGMENT_BUFFER_KEY)
+        if not isinstance(raw_map, dict):
+            raw_map = {}
+            context.bot_data[_TEXT_FRAGMENT_BUFFER_KEY] = raw_map
+        _evict_stale_aggregation_states(raw_map, now=now)
+        buffer_map: MutableMapping[str, Any] = raw_map
+
+        current_state = buffer_map.get(aggregation_key)
+        if not isinstance(current_state, dict):
+            if not should_start_buffer:
+                return True, message_text, message_id, 1
+            current_state = {
+                "updated_at": now,
+                "latest_message_id": message_id,
+                "parts": [{"message_id": message_id, "text": message_text}],
+            }
+            buffer_map[aggregation_key] = current_state
+            candidate_message_id = message_id
+        else:
+            last_updated = current_state.get("updated_at")
+            state_is_recent = isinstance(last_updated, (int, float)) and (
+                now - float(last_updated) <= max(_TEXT_FRAGMENT_WINDOW_SECONDS * 2, 0.6)
+            )
+            if not state_is_recent:
+                if not should_start_buffer:
+                    buffer_map.pop(aggregation_key, None)
+                    return True, message_text, message_id, 1
+                current_state = {
+                    "updated_at": now,
+                    "latest_message_id": message_id,
+                    "parts": [{"message_id": message_id, "text": message_text}],
+                }
+                buffer_map[aggregation_key] = current_state
+                candidate_message_id = message_id
+            else:
+                parts = current_state.get("parts")
+                if not isinstance(parts, list):
+                    parts = []
+                    current_state["parts"] = parts
+                already_seen = any(
+                    isinstance(item, dict) and item.get("message_id") == message_id
+                    for item in parts
+                )
+                if not already_seen:
+                    parts.append({"message_id": message_id, "text": message_text})
+                current_state["updated_at"] = now
+                current_state["latest_message_id"] = message_id
+                candidate_message_id = message_id
+
+    if candidate_message_id is None:
+        return True, message_text, message_id, 1
+
+    if _TEXT_FRAGMENT_WINDOW_SECONDS > 0:
+        await asyncio.sleep(_TEXT_FRAGMENT_WINDOW_SECONDS)
+
+    async with lock:
+        raw_map = context.bot_data.get(_TEXT_FRAGMENT_BUFFER_KEY)
+        if not isinstance(raw_map, dict):
+            return False, "", None, 0
+        buffer_map: MutableMapping[str, Any] = raw_map
+        current_state = buffer_map.get(aggregation_key)
+        if not isinstance(current_state, dict):
+            return False, "", None, 0
+        if current_state.get("latest_message_id") != candidate_message_id:
+            return False, "", None, 0
+
+        parts = current_state.get("parts")
+        if not isinstance(parts, list):
+            parts = []
+        buffer_map.pop(aggregation_key, None)
+
+    normalized_parts: list[dict[str, Any]] = []
+    for item in parts:
+        if not isinstance(item, dict):
+            continue
+        part_message_id = item.get("message_id")
+        if not isinstance(part_message_id, int):
+            continue
+        normalized_parts.append(
+            {
+                "message_id": part_message_id,
+                "text": str(item.get("text") or ""),
+            }
+        )
+
+    if not normalized_parts:
+        return True, message_text, message_id, 1
+
+    normalized_parts.sort(key=lambda item: item["message_id"])
+    combined_text = "\n".join(item["text"] for item in normalized_parts if item["text"])
+    if not combined_text:
+        combined_text = message_text
+    return (
+        True,
+        combined_text,
+        normalized_parts[0]["message_id"],
+        len(normalized_parts),
+    )
+
+
+async def _collect_media_group_photos(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[bool, list[Any], Optional[str], Optional[int]]:
+    """Collect photo media_group messages and return one aggregated batch."""
+    telegram_message = getattr(update, "message", None)
+    photos = getattr(telegram_message, "photo", None) or []
+    if not photos:
+        return True, [], getattr(telegram_message, "caption", None), None
+
+    largest_photo = photos[-1]
+    raw_message_id = getattr(telegram_message, "message_id", None)
+    message_id = raw_message_id if isinstance(raw_message_id, int) else None
+    if message_id is None:
+        return True, [largest_photo], getattr(telegram_message, "caption", None), None
+
+    media_group_id = str(getattr(telegram_message, "media_group_id", "") or "").strip()
+    if not media_group_id:
+        return (
+            True,
+            [largest_photo],
+            getattr(telegram_message, "caption", None),
+            message_id,
+        )
+
+    chat_id = getattr(update.effective_chat, "id", None)
+    if not isinstance(chat_id, int):
+        return (
+            True,
+            [largest_photo],
+            getattr(telegram_message, "caption", None),
+            message_id,
+        )
+
+    aggregation_key = f"{chat_id}:{media_group_id}"
+    now = time.monotonic()
+    lock = _get_inbound_aggregation_lock(context)
+
+    async with lock:
+        raw_map = context.bot_data.get(_MEDIA_GROUP_BUFFER_KEY)
+        if not isinstance(raw_map, dict):
+            raw_map = {}
+            context.bot_data[_MEDIA_GROUP_BUFFER_KEY] = raw_map
+        _evict_stale_aggregation_states(raw_map, now=now)
+        buffer_map: MutableMapping[str, Any] = raw_map
+
+        current_state = buffer_map.get(aggregation_key)
+        if not isinstance(current_state, dict):
+            current_state = {
+                "updated_at": now,
+                "latest_message_id": message_id,
+                "items": [],
+            }
+            buffer_map[aggregation_key] = current_state
+
+        items = current_state.get("items")
+        if not isinstance(items, list):
+            items = []
+            current_state["items"] = items
+
+        already_seen = any(
+            isinstance(item, dict) and item.get("message_id") == message_id
+            for item in items
+        )
+        if not already_seen:
+            items.append(
+                {
+                    "message_id": message_id,
+                    "photo": largest_photo,
+                    "caption": getattr(telegram_message, "caption", None),
+                }
+            )
+        current_state["updated_at"] = now
+        current_state["latest_message_id"] = message_id
+
+    if _MEDIA_GROUP_WINDOW_SECONDS > 0:
+        await asyncio.sleep(_MEDIA_GROUP_WINDOW_SECONDS)
+
+    async with lock:
+        raw_map = context.bot_data.get(_MEDIA_GROUP_BUFFER_KEY)
+        if not isinstance(raw_map, dict):
+            return False, [], None, None
+        buffer_map: MutableMapping[str, Any] = raw_map
+
+        current_state = buffer_map.get(aggregation_key)
+        if not isinstance(current_state, dict):
+            return False, [], None, None
+        if current_state.get("latest_message_id") != message_id:
+            return False, [], None, None
+
+        items = current_state.get("items")
+        if not isinstance(items, list):
+            items = []
+        buffer_map.pop(aggregation_key, None)
+
+    normalized_items: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        part_message_id = item.get("message_id")
+        if not isinstance(part_message_id, int):
+            continue
+        photo_obj = item.get("photo")
+        if photo_obj is None:
+            continue
+        normalized_items.append(
+            {
+                "message_id": part_message_id,
+                "photo": photo_obj,
+                "caption": item.get("caption"),
+            }
+        )
+
+    if not normalized_items:
+        return (
+            True,
+            [largest_photo],
+            getattr(telegram_message, "caption", None),
+            message_id,
+        )
+
+    normalized_items.sort(key=lambda item: item["message_id"])
+    merged_photos = [item["photo"] for item in normalized_items]
+    merged_caption = next(
+        (
+            str(item.get("caption")).strip()
+            for item in normalized_items
+            if str(item.get("caption") or "").strip()
+        ),
+        None,
+    )
+    source_message_id = normalized_items[0]["message_id"]
+    return True, merged_photos, merged_caption, source_message_id
 
 
 async def _format_progress_update(update_obj) -> Optional[str]:
@@ -885,12 +1305,167 @@ async def _run_with_image_analysis_heartbeat(
             last_heartbeat_at = elapsed
 
 
+def _emoji_from_reaction_token(token: str) -> str:
+    """Extract user-facing emoji from normalized reaction token."""
+    token_text = str(token or "").strip()
+    if token_text.startswith("emoji:"):
+        emoji = token_text.split(":", 1)[1].strip()
+        return emoji or token_text
+    return token_text or "unknown"
+
+
+def _resolve_reaction_feedback_signal(
+    added_tokens: list[str],
+) -> Optional[dict[str, str]]:
+    """Map reaction token delta to positive/negative feedback signal."""
+    for token in added_tokens:
+        normalized = str(token or "").strip()
+        if normalized in _NEGATIVE_REACTION_TOKENS:
+            return {
+                "signal": "negative",
+                "token": normalized,
+                "emoji": _emoji_from_reaction_token(normalized),
+            }
+    for token in added_tokens:
+        normalized = str(token or "").strip()
+        if normalized in _POSITIVE_REACTION_TOKENS:
+            return {
+                "signal": "positive",
+                "token": normalized,
+                "emoji": _emoji_from_reaction_token(normalized),
+            }
+    return None
+
+
+def _store_pending_reaction_feedback(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    actor_id: int,
+    chat_id: int,
+    thread_id: int,
+    feedback: dict[str, Any],
+) -> bool:
+    """Store reaction feedback into actor scoped state for next text turn."""
+    settings: Optional[Settings] = context.bot_data.get("settings")
+    if settings is None:
+        return False
+
+    application = getattr(context, "application", None)
+    user_data_map = getattr(application, "user_data", None) if application else None
+    if not isinstance(user_data_map, MutableMapping):
+        return False
+
+    actor_user_data = user_data_map.setdefault(actor_id, {})
+    if not isinstance(actor_user_data, dict):
+        return False
+
+    scope_key = build_scope_key(user_id=actor_id, chat_id=chat_id, thread_id=thread_id)
+    scope_state = get_scope_state(
+        user_data=actor_user_data,
+        scope_key=scope_key,
+        default_directory=settings.approved_directory,
+    )
+    scope_state[_REACTION_FEEDBACK_STATE_KEY] = feedback
+    return True
+
+
+def _get_pending_reaction_feedback(
+    scope_state: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Get valid pending reaction feedback from scope state."""
+    payload = scope_state.get(_REACTION_FEEDBACK_STATE_KEY)
+    if not isinstance(payload, dict):
+        return None
+
+    signal = str(payload.get("signal") or "").strip().lower()
+    if signal not in {"positive", "negative"}:
+        scope_state.pop(_REACTION_FEEDBACK_STATE_KEY, None)
+        return None
+
+    timestamp_raw = payload.get("timestamp")
+    try:
+        timestamp = float(timestamp_raw)
+    except (TypeError, ValueError):
+        scope_state.pop(_REACTION_FEEDBACK_STATE_KEY, None)
+        return None
+
+    if timestamp <= 0 or (time.time() - timestamp) > _REACTION_FEEDBACK_TTL_SECONDS:
+        scope_state.pop(_REACTION_FEEDBACK_STATE_KEY, None)
+        return None
+
+    return payload
+
+
+def _clear_pending_reaction_feedback(scope_state: dict[str, Any]) -> None:
+    """Clear consumed reaction feedback from scope state."""
+    scope_state.pop(_REACTION_FEEDBACK_STATE_KEY, None)
+
+
+def _resolve_pending_reaction_feedback(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    thread_id: int,
+    scope_state: dict[str, Any],
+) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    """Resolve pending reaction feedback with fallback to chat-level scope."""
+    feedback = _get_pending_reaction_feedback(scope_state)
+    if feedback is not None:
+        return feedback, scope_state
+
+    if thread_id == 0:
+        return None, scope_state
+
+    settings: Optional[Settings] = context.bot_data.get("settings")
+    if settings is None:
+        return None, scope_state
+
+    fallback_scope_key = build_scope_key(user_id=user_id, chat_id=chat_id, thread_id=0)
+    fallback_scope_state = get_scope_state(
+        user_data=context.user_data,
+        scope_key=fallback_scope_key,
+        default_directory=settings.approved_directory,
+    )
+    fallback_feedback = _get_pending_reaction_feedback(fallback_scope_state)
+    if fallback_feedback is None:
+        return None, scope_state
+
+    return fallback_feedback, fallback_scope_state
+
+
+def _compose_prompt_with_reaction_feedback(
+    message_text: str, feedback: Optional[dict[str, Any]]
+) -> str:
+    """Build model prompt with optional reaction feedback hint."""
+    if not feedback:
+        return message_text
+
+    signal = str(feedback.get("signal") or "").strip().lower()
+    emoji = str(feedback.get("emoji") or "").strip() or "unknown"
+    if signal == "negative":
+        prefix = (
+            "系统提示：用户刚通过 Telegram reaction 对上一条回复表达了不满意"
+            f"（{emoji}）。请先简短修正上次可能的问题，再高质量回答本次请求，避免冗余重复。\n\n"
+        )
+        return prefix + message_text
+    if signal == "positive":
+        prefix = (
+            "系统提示：用户刚通过 Telegram reaction 对上一条回复表达了认可"
+            f"（{emoji}）。请保持当前方向与风格，继续回答本次请求。\n\n"
+        )
+        return prefix + message_text
+    return message_text
+
+
 async def handle_text_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Handle regular text messages as Claude prompts."""
     user_id = update.effective_user.id
-    message_text = update.message.text
+    message_text = str(update.message.text or "")
+    input_chat_id = getattr(update.effective_chat, "id", None)
+    input_message_id = getattr(update.message, "message_id", None)
     settings: Settings = context.bot_data["settings"]
     scope_key, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -901,6 +1476,24 @@ async def handle_text_message(
     # Get services
     rate_limiter: Optional[RateLimiter] = context.bot_data.get("rate_limiter")
     audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
+
+    aggregated_ready, aggregated_text, aggregated_source_message_id, fragment_count = (
+        await _collect_text_fragments(update, context)
+    )
+    if not aggregated_ready:
+        return
+    message_text = aggregated_text
+    if aggregated_source_message_id is not None:
+        input_message_id = aggregated_source_message_id
+    if fragment_count > 1:
+        logger.info(
+            "Merged inbound text fragments",
+            user_id=user_id,
+            scope_key=scope_key,
+            fragment_count=fragment_count,
+            merged_length=len(message_text),
+            source_message_id=input_message_id,
+        )
 
     logger.info(
         "Processing text message", user_id=user_id, message_length=len(message_text)
@@ -915,14 +1508,14 @@ async def handle_text_message(
                 user_id, estimated_cost
             )
             if not allowed:
-                await update.message.reply_text(f"⏱️ {limit_message}")
+                await _reply_text_resilient(update.message, f"⏱️ {limit_message}")
                 return
 
         # Check if user already has an active task
         task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
         if task_registry and await task_registry.is_busy(user_id, scope_key=scope_key):
-            await update.message.reply_text(
-                "A task is already running. Use /cancel to cancel it."
+            await _reply_text_resilient(
+                update.message, "A task is already running. Use /cancel to cancel it."
             )
             return
 
@@ -937,7 +1530,8 @@ async def handle_text_message(
         storage = context.bot_data.get("storage")
 
         if not cli_integration:
-            await update.message.reply_text(
+            await _reply_text_resilient(
+                update.message,
                 _with_engine_badge(
                     "❌ **CLI 引擎不可用**\n\n"
                     "当前 CLI 引擎未正确配置。"
@@ -953,11 +1547,18 @@ async def handle_text_message(
         cancel_keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("Cancel", callback_data="cancel:task")]]
         )
-        progress_msg = await update.message.reply_text(
+        progress_msg = await _reply_text_resilient(
+            update.message,
             _with_engine_badge("🤔 正在处理你的请求...", active_engine),
             parse_mode="Markdown",
-            reply_to_message_id=update.message.message_id,
+            reply_to_message_id=input_message_id,
             reply_markup=cancel_keyboard,
+        )
+        await _set_message_reaction_safe(
+            context.bot,
+            chat_id=input_chat_id,
+            message_id=input_message_id,
+            emoji=_BOT_REACTION_PROCESSING,
         )
 
         # Get current directory
@@ -1016,7 +1617,8 @@ async def handle_text_message(
                         await progress_msg.edit_reply_markup(reply_markup=None)
                     except Exception:
                         pass
-                    progress_msg = await progress_msg.reply_text(
+                    progress_msg = await _reply_text_resilient(
+                        progress_msg,
                         text_to_send,
                         parse_mode="Markdown",
                         reply_markup=cancel_keyboard,
@@ -1134,7 +1736,8 @@ async def handle_text_message(
                         await progress_msg.edit_reply_markup(reply_markup=None)
                     except Exception:
                         pass
-                    progress_msg = await progress_msg.reply_text(
+                    progress_msg = await _reply_text_resilient(
+                        progress_msg,
                         full_text,
                         parse_mode="Markdown",
                         reply_markup=cancel_keyboard,
@@ -1162,16 +1765,47 @@ async def handle_text_message(
             bot=context.bot,
             chat_id=update.effective_chat.id,
             settings=settings_obj,
+            chat_type=getattr(update.effective_chat, "type", None),
             message_thread_id=getattr(
                 update.effective_message, "message_thread_id", None
             ),
         )
+        current_thread_id_raw = getattr(
+            update.effective_message, "message_thread_id", 0
+        )
+        try:
+            current_thread_id = (
+                int(current_thread_id_raw) if current_thread_id_raw is not None else 0
+            )
+        except (TypeError, ValueError):
+            current_thread_id = 0
+        reaction_feedback, reaction_feedback_scope_state = (
+            _resolve_pending_reaction_feedback(
+                context=context,
+                user_id=user_id,
+                chat_id=update.effective_chat.id,
+                thread_id=current_thread_id,
+                scope_state=scope_state,
+            )
+        )
+        model_prompt = _compose_prompt_with_reaction_feedback(
+            message_text, reaction_feedback
+        )
+        if reaction_feedback:
+            logger.info(
+                "Applying pending reaction feedback to model prompt",
+                user_id=user_id,
+                scope_key=scope_key,
+                signal=reaction_feedback.get("signal"),
+                emoji=reaction_feedback.get("emoji"),
+                source_message_id=reaction_feedback.get("message_id"),
+            )
 
         # Run Claude command as cancellable task
 
         async def _run_claude():
             return await cli_integration.run_command(
-                prompt=message_text,
+                prompt=model_prompt,
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,
@@ -1197,8 +1831,10 @@ async def handle_text_message(
             )
 
         claude_response = None
+        command_succeeded = False
         try:
             claude_response = await task
+            command_succeeded = True
 
             # Mark task as completed
             if task_registry:
@@ -1208,6 +1844,8 @@ async def handle_text_message(
             scope_state["claude_session_id"] = claude_response.session_id
             # Consume force_new_session only after success
             scope_state.pop("force_new_session", None)
+            if reaction_feedback:
+                _clear_pending_reaction_feedback(reaction_feedback_scope_state)
 
             # Check if Claude changed the working directory and update our tracking
             _update_working_directory_from_claude_response(
@@ -1280,6 +1918,12 @@ async def handle_text_message(
                     await frozen_msg.delete()
                 except Exception:
                     pass
+            await _set_message_reaction_safe(
+                context.bot,
+                chat_id=input_chat_id,
+                message_id=input_message_id,
+                emoji=None,
+            )
             return
         except ClaudeToolValidationError as e:
             # Tool validation error with detailed instructions
@@ -1395,11 +2039,18 @@ async def handle_text_message(
             except Exception:
                 pass
 
+        await _set_message_reaction_safe(
+            context.bot,
+            chat_id=input_chat_id,
+            message_id=input_message_id,
+            emoji=_BOT_REACTION_SUCCESS if command_succeeded else _BOT_REACTION_FAILED,
+        )
+
         # Send formatted responses (may be multiple messages)
         for i, message in enumerate(formatted_messages):
             try:
                 msg_text = message.text
-                reply_to_id = update.message.message_id if i == 0 else None
+                reply_to_id = input_message_id if i == 0 else None
                 # Prepend context tag to the first message when no thinking summary
                 if i == 0 and not has_thinking_summary and context_tag:
                     context_prefix = context_tag + "\n\n"
@@ -1411,6 +2062,8 @@ async def handle_text_message(
                             context_tag,
                             parse_mode="Markdown",
                             reply_to_message_id=reply_to_id,
+                            bot=context.bot,
+                            chat_type=getattr(update.effective_chat, "type", None),
                         )
                         reply_to_id = None
 
@@ -1420,6 +2073,8 @@ async def handle_text_message(
                     parse_mode=message.parse_mode,
                     reply_markup=message.reply_markup,
                     reply_to_message_id=reply_to_id,
+                    bot=context.bot,
+                    chat_type=getattr(update.effective_chat, "type", None),
                 )
 
                 # Small delay between messages to avoid rate limits
@@ -1431,16 +2086,19 @@ async def handle_text_message(
                     "Failed to send response message", error=str(e), message_index=i
                 )
                 # Try to send error message
-                await update.message.reply_text(
+                await _reply_text_resilient(
+                    update.message,
                     _with_engine_badge(
                         f"❌ {_engine_label(active_engine)} 响应发送失败，请重试。",
                         active_engine,
                     ),
-                    reply_to_message_id=update.message.message_id if i == 0 else None,
+                    reply_to_message_id=input_message_id if i == 0 else None,
+                    bot=context.bot,
+                    chat_type=getattr(update.effective_chat, "type", None),
                 )
 
         # Update session info
-        scope_state["last_message"] = update.message.text
+        scope_state["last_message"] = message_text
 
         # Add conversation enhancements if available
         features = context.bot_data.get("features")
@@ -1468,7 +2126,7 @@ async def handle_text_message(
             await audit_logger.log_command(
                 user_id=user_id,
                 command="text_message",
-                args=[update.message.text[:100]],  # First 100 chars
+                args=[message_text[:100]],  # First 100 chars
                 success=True,
             )
 
@@ -1515,9 +2173,16 @@ async def handle_text_message(
             str(e),
             engine=locals().get("active_engine", ENGINE_CLAUDE),
         )
-        await update.message.reply_text(
+        await _reply_text_resilient(
+            update.message,
             _with_engine_badge(error_msg, locals().get("active_engine", ENGINE_CLAUDE)),
             parse_mode="Markdown",
+        )
+        await _set_message_reaction_safe(
+            context.bot,
+            chat_id=input_chat_id,
+            message_id=input_message_id,
+            emoji=_BOT_REACTION_FAILED,
         )
 
         # Log failed processing
@@ -1525,7 +2190,7 @@ async def handle_text_message(
             await audit_logger.log_command(
                 user_id=user_id,
                 command="text_message",
-                args=[update.message.text[:100]],
+                args=[message_text[:100]],
                 success=False,
             )
 
@@ -1566,8 +2231,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if security_validator:
             valid, error = security_validator.validate_filename(document.file_name)
             if not valid:
-                await update.message.reply_text(
-                    f"❌ **File Upload Rejected**\n\n{error}"
+                await _reply_text_resilient(
+                    update.message, f"❌ **File Upload Rejected**\n\n{error}"
                 )
 
                 # Log security violation
@@ -1583,10 +2248,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Check file size limits
         max_size = 10 * 1024 * 1024  # 10MB
         if document.file_size > max_size:
-            await update.message.reply_text(
+            await _reply_text_resilient(
+                update.message,
                 f"❌ **File Too Large**\n\n"
                 f"Maximum file size: {max_size // 1024 // 1024}MB\n"
-                f"Your file: {document.file_size / 1024 / 1024:.1f}MB"
+                f"Your file: {document.file_size / 1024 / 1024:.1f}MB",
             )
             return
 
@@ -1597,13 +2263,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 user_id, file_cost
             )
             if not allowed:
-                await update.message.reply_text(f"⏱️ {limit_message}")
+                await _reply_text_resilient(update.message, f"⏱️ {limit_message}")
                 return
 
         # Send processing indicator
         await update.message.chat.send_action("upload_document")
 
-        progress_msg = await update.message.reply_text(
+        progress_msg = await _reply_text_resilient(
+            update.message,
             _with_engine_badge(
                 f"📄 Processing file: `{document.file_name}`...",
                 active_engine,
@@ -1681,7 +2348,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_msg.delete()
 
         # Create a new progress message for CLI processing
-        claude_progress_msg = await update.message.reply_text(
+        claude_progress_msg = await _reply_text_resilient(
+            update.message,
             _with_engine_badge("🤖 正在处理文件...", active_engine),
             parse_mode="Markdown",
         )
@@ -1704,6 +2372,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             bot=context.bot,
             chat_id=update.effective_chat.id,
             settings=settings,
+            chat_type=getattr(update.effective_chat, "type", None),
             message_thread_id=getattr(
                 update.effective_message, "message_thread_id", None
             ),
@@ -1765,6 +2434,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                             cli_context_tag,
                             parse_mode="Markdown",
                             reply_to_message_id=reply_to_id,
+                            bot=context.bot,
+                            chat_type=getattr(update.effective_chat, "type", None),
                         )
                         reply_to_id = None
 
@@ -1774,6 +2445,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     parse_mode=message.parse_mode,
                     reply_markup=message.reply_markup,
                     reply_to_message_id=reply_to_id,
+                    bot=context.bot,
+                    chat_type=getattr(update.effective_chat, "type", None),
                 )
 
                 if i < len(formatted_messages) - 1:
@@ -1814,7 +2487,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _format_error_message(str(e), engine=active_engine),
             active_engine,
         )
-        await update.message.reply_text(error_msg, parse_mode="Markdown")
+        await _reply_text_resilient(update.message, error_msg, parse_mode="Markdown")
 
         # Log failed file processing
         if audit_logger:
@@ -1832,6 +2505,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle photo uploads."""
     user_id = update.effective_user.id
+    (
+        media_group_ready,
+        grouped_photos,
+        grouped_caption,
+        source_message_id,
+    ) = await _collect_media_group_photos(update, context)
+    if not media_group_ready:
+        return
+
+    reply_target_message_id = (
+        source_message_id
+        if isinstance(source_message_id, int) and source_message_id > 0
+        else getattr(update.message, "message_id", None)
+    )
+    photo_count = len(grouped_photos)
+    if photo_count > 1:
+        logger.info(
+            "Merged inbound photo media_group",
+            user_id=user_id,
+            media_group_id=getattr(update.message, "media_group_id", None),
+            photo_count=photo_count,
+            source_message_id=reply_target_message_id,
+        )
+
     settings: Settings = context.bot_data["settings"]
     scope_key, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -1846,8 +2543,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if image_handler:
         task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
         if task_registry and await task_registry.is_busy(user_id, scope_key=scope_key):
-            await update.message.reply_text(
-                "A task is already running. Use /cancel to cancel it."
+            await _reply_text_resilient(
+                update.message, "A task is already running. Use /cancel to cancel it."
             )
             return
 
@@ -1883,10 +2580,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         user_id=user_id,
                     )
                     try:
-                        progress_msg = await update.message.reply_text(
+                        progress_msg = await _reply_text_resilient(
+                            update.message,
                             bubble_text,
                             parse_mode="Markdown",
-                            reply_to_message_id=update.message.message_id,
+                            reply_to_message_id=reply_target_message_id,
                             reply_markup=cancel_keyboard,
                         )
                     except Exception as send_error:
@@ -1918,14 +2616,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     )
 
             # Send processing indicator (single message that will be updated)
+            received_hint = (
+                f"已接收 {photo_count} 张图片（同组）"
+                if photo_count > 1
+                else "已接收图片"
+            )
             initial_status = _with_engine_badge(
-                _build_image_stage_status(1, "已接收图片"),
+                _build_image_stage_status(1, received_hint),
                 active_engine,
             )
-            progress_msg = await update.message.reply_text(
+            progress_msg = await _reply_text_resilient(
+                update.message,
                 initial_status,
                 parse_mode="Markdown",
-                reply_to_message_id=update.message.message_id,
+                reply_to_message_id=reply_target_message_id,
                 reply_markup=cancel_keyboard,
             )
             last_status_text = initial_status
@@ -1959,8 +2663,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
                 return
 
-            # Get the largest photo size
-            photo = update.message.photo[-1]
+            if not grouped_photos:
+                await _set_image_status(
+                    "❌ **图片内容为空**\n\n未检测到可处理的图片，请重试。"
+                )
+                return
 
             async def _image_progress(stage: str) -> None:
                 if stage == "downloading":
@@ -1976,12 +2683,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         _build_image_stage_status(3, "正在编码图片数据...")
                     )
 
-            # Process image with enhanced handler
-            processed_image = await image_handler.process_image(
-                photo,
-                update.message.caption,
-                on_progress=_image_progress,
-            )
+            # Process image(s) with enhanced handler
+            processed_images = []
+            for idx, photo in enumerate(grouped_photos):
+                processed = await image_handler.process_image(
+                    photo,
+                    grouped_caption if idx == 0 else None,
+                    on_progress=_image_progress,
+                )
+                processed_images.append(processed)
+
+            model_prompt = str(grouped_caption or "").strip()
+            if not model_prompt and processed_images:
+                if len(processed_images) == 1:
+                    model_prompt = processed_images[0].prompt
+                else:
+                    model_prompt = (
+                        f"Please analyze these {len(processed_images)} images in order "
+                        "and provide one consolidated response."
+                    )
 
             # Get current directory and session
             current_dir = Path(
@@ -1993,36 +2713,49 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 bot=context.bot,
                 chat_id=update.effective_chat.id,
                 settings=settings,
+                chat_type=getattr(update.effective_chat, "type", None),
                 message_thread_id=getattr(
                     update.effective_message, "message_thread_id", None
                 ),
             )
 
             # Process with Claude
-            cli_image_file: Optional[Path] = None
+            cli_image_files: list[Path] = []
             try:
                 # Build image data for multimodal input
-                img_format = processed_image.metadata.get("format", "jpeg")
-                if img_format == "unknown":
-                    img_format = "jpeg"  # Default to JPEG for unknown formats
-                images = [
-                    {
-                        "base64_data": processed_image.base64_data,
-                        "media_type": f"image/{img_format}",
-                    }
-                ]
-                if _integration_uses_cli_image_files(cli_integration):
-                    cli_image_file = _persist_cli_image_file(
-                        base64_data=processed_image.base64_data,
-                        image_format=img_format,
-                        working_directory=current_dir,
+                images = []
+                for processed_image in processed_images:
+                    img_format = processed_image.metadata.get("format", "jpeg")
+                    if img_format == "unknown":
+                        img_format = "jpeg"  # Default to JPEG for unknown formats
+                    images.append(
+                        {
+                            "base64_data": processed_image.base64_data,
+                            "media_type": f"image/{img_format}",
+                        }
                     )
-                    images[0]["file_path"] = str(cli_image_file)
+
+                if _integration_uses_cli_image_files(cli_integration):
+                    for idx, processed_image in enumerate(processed_images):
+                        img_format = processed_image.metadata.get("format", "jpeg")
+                        if img_format == "unknown":
+                            img_format = "jpeg"
+                        cli_image_file = _persist_cli_image_file(
+                            base64_data=processed_image.base64_data,
+                            image_format=img_format,
+                            working_directory=current_dir,
+                        )
+                        cli_image_files.append(cli_image_file)
+                        images[idx]["file_path"] = str(cli_image_file)
                 engine_label = "Codex" if active_engine == "codex" else "Claude"
                 await _set_image_status(
                     _build_image_stage_status(
                         4,
-                        f"正在提交图片给 {engine_label}...",
+                        (
+                            f"正在提交 {len(images)} 张图片给 {engine_label}..."
+                            if len(images) > 1
+                            else f"正在提交图片给 {engine_label}..."
+                        ),
                     )
                 )
                 await _set_image_status(
@@ -2032,7 +2765,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 async def _run_image_claude():
                     return await _run_with_image_analysis_heartbeat(
                         run_coro=cli_integration.run_command(
-                            prompt=processed_image.prompt,
+                            prompt=model_prompt,
                             working_directory=current_dir,
                             user_id=user_id,
                             session_id=session_id,
@@ -2053,7 +2786,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await task_registry.register(
                         user_id,
                         image_task,
-                        prompt_summary=processed_image.prompt,
+                        prompt_summary=model_prompt,
                         progress_message_id=progress_msg.message_id,
                         chat_id=update.effective_chat.id,
                         scope_key=scope_key,
@@ -2199,7 +2932,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 # Send responses
                 for i, message in enumerate(formatted_messages):
                     msg_text = message.text
-                    reply_to_id = update.message.message_id if i == 0 else None
+                    reply_to_id = reply_target_message_id if i == 0 else None
                     if i == 0 and not img_has_thinking and img_context_tag:
                         context_prefix = img_context_tag + "\n\n"
                         if (
@@ -2213,6 +2946,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                                 img_context_tag,
                                 parse_mode="Markdown",
                                 reply_to_message_id=reply_to_id,
+                                bot=context.bot,
+                                chat_type=getattr(update.effective_chat, "type", None),
                             )
                             reply_to_id = None
 
@@ -2222,6 +2957,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         parse_mode=message.parse_mode,
                         reply_markup=message.reply_markup,
                         reply_to_message_id=reply_to_id,
+                        bot=context.bot,
+                        chat_type=getattr(update.effective_chat, "type", None),
                     )
 
                     if i < len(formatted_messages) - 1:
@@ -2256,10 +2993,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             thinking_lines,
                             summary_text,
                         )
-                        await update.message.reply_text(
+                        await _reply_text_resilient(
+                            update.message,
                             error_bubble,
                             parse_mode="Markdown",
-                            reply_to_message_id=update.message.message_id,
+                            reply_to_message_id=reply_target_message_id,
                         )
                     else:
                         await progress_msg.edit_text(
@@ -2274,10 +3012,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         original_error=str(e),
                         user_id=user_id,
                     )
-                    await update.message.reply_text(
+                    await _reply_text_resilient(
+                        update.message,
                         error_bubble,
                         parse_mode="Markdown",
-                        reply_to_message_id=update.message.message_id,
+                        reply_to_message_id=reply_target_message_id,
                     )
                 logger.error(
                     "CLI image processing failed",
@@ -2286,11 +3025,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     engine=active_engine,
                 )
             finally:
-                _cleanup_cli_image_file(cli_image_file)
+                for cli_image_file in cli_image_files:
+                    _cleanup_cli_image_file(cli_image_file)
 
         except Exception as e:
             logger.error("Image processing failed", error=str(e), user_id=user_id)
-            await update.message.reply_text(
+            await _reply_text_resilient(
+                update.message,
                 _with_engine_badge(
                     _format_error_message(
                         str(e),
@@ -2302,7 +3043,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
     else:
         # Fall back to unsupported message
-        await update.message.reply_text(
+        await _reply_text_resilient(
+            update.message,
             "📸 **Photo Upload**\n\n"
             "Photo processing is not yet supported.\n\n"
             "**Currently supported:**\n"
@@ -2312,8 +3054,421 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "**Coming soon:**\n"
             "• Image analysis\n"
             "• Screenshot processing\n"
-            "• Diagram interpretation"
+            "• Diagram interpretation",
         )
+
+
+def _normalize_reaction_token(reaction: Any) -> str:
+    """Normalize Telegram reaction object into stable token string."""
+    if reaction is None:
+        return "unknown"
+    if isinstance(reaction, str):
+        normalized = reaction.strip()
+        return normalized or "unknown"
+
+    reaction_type = getattr(reaction, "type", None)
+    if reaction_type == "emoji":
+        emoji = str(getattr(reaction, "emoji", "")).strip()
+        return f"emoji:{emoji}" if emoji else "emoji:unknown"
+    if reaction_type == "custom_emoji":
+        custom_id = str(getattr(reaction, "custom_emoji_id", "")).strip()
+        return f"custom_emoji:{custom_id}" if custom_id else "custom_emoji:unknown"
+    if isinstance(reaction_type, str) and reaction_type.strip():
+        return reaction_type.strip()
+
+    return type(reaction).__name__.lower()
+
+
+def _extract_reaction_tokens(reactions: Any) -> list[str]:
+    """Extract normalized reaction tokens from Telegram reaction payload."""
+    if reactions is None:
+        return []
+    if isinstance(reactions, (str, bytes)):
+        return [_normalize_reaction_token(reactions)]
+
+    try:
+        iterator = iter(reactions)
+    except TypeError:
+        return [_normalize_reaction_token(reactions)]
+
+    tokens: list[str] = []
+    for item in iterator:
+        tokens.append(_normalize_reaction_token(item))
+    return tokens
+
+
+def _diff_reaction_tokens(
+    old_tokens: list[str], new_tokens: list[str]
+) -> tuple[list[str], list[str]]:
+    """Compute added/removed reaction tokens with multiset semantics."""
+    old_counter = Counter(old_tokens)
+    new_counter = Counter(new_tokens)
+    added: list[str] = []
+    removed: list[str] = []
+
+    for token, count in new_counter.items():
+        delta = count - old_counter.get(token, 0)
+        if delta > 0:
+            added.extend([token] * delta)
+    for token, count in old_counter.items():
+        delta = count - new_counter.get(token, 0)
+        if delta > 0:
+            removed.extend([token] * delta)
+
+    return added, removed
+
+
+def _extract_reaction_count_counter(reactions: Any) -> Counter[str]:
+    """Extract normalized reaction counters from message_reaction_count payload."""
+    if reactions is None:
+        return Counter()
+    if isinstance(reactions, (str, bytes)):
+        return Counter({_normalize_reaction_token(reactions): 1})
+
+    try:
+        iterator = iter(reactions)
+    except TypeError:
+        iterator = [reactions]
+
+    counter: Counter[str] = Counter()
+    for item in iterator:
+        token = _normalize_reaction_token(getattr(item, "type", item))
+        raw_total = getattr(item, "total_count", 1)
+        try:
+            total = int(raw_total)
+        except (TypeError, ValueError):
+            total = 0
+        if total <= 0:
+            continue
+        counter[token] += total
+    return counter
+
+
+def _diff_reaction_counters(
+    old_counter: Counter[str], new_counter: Counter[str]
+) -> tuple[list[str], list[str]]:
+    """Compute added/removed reaction tokens from counters."""
+    added: list[str] = []
+    removed: list[str] = []
+
+    for token, count in new_counter.items():
+        delta = count - old_counter.get(token, 0)
+        if delta > 0:
+            added.extend([token] * delta)
+    for token, count in old_counter.items():
+        delta = count - new_counter.get(token, 0)
+        if delta > 0:
+            removed.extend([token] * delta)
+
+    return added, removed
+
+
+def _counter_to_reaction_tokens(counter: Counter[str]) -> list[str]:
+    """Expand reaction counter to token list (for logging/debug)."""
+    tokens: list[str] = []
+    for token, count in counter.items():
+        if count <= 0:
+            continue
+        tokens.extend([token] * count)
+    return tokens
+
+
+def _resolve_actor_id_for_reaction_count(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    chat_type: Optional[str],
+) -> Optional[int]:
+    """Resolve actor id for anonymous reaction-count updates."""
+    if chat_type == "private" and chat_id != 0:
+        return chat_id
+
+    settings: Optional[Settings] = context.bot_data.get("settings")
+    allowed_users = getattr(settings, "allowed_users", None)
+    if isinstance(allowed_users, list) and len(allowed_users) == 1:
+        try:
+            return int(allowed_users[0])
+        except (TypeError, ValueError):
+            return None
+
+    return None
+
+
+def _mark_reaction_update_seen(
+    context: ContextTypes.DEFAULT_TYPE, update_id: Optional[int]
+) -> bool:
+    """Track reaction update IDs and return True when the update was seen."""
+    if update_id is None:
+        return False
+
+    dedup_cache = context.bot_data.get(_REACTION_UPDATE_DEDUP_KEY)
+    if not isinstance(dedup_cache, dict):
+        dedup_cache = {}
+        context.bot_data[_REACTION_UPDATE_DEDUP_KEY] = dedup_cache
+
+    now = time.time()
+    cutoff = now - _REACTION_UPDATE_DEDUP_TTL_SECONDS
+    expired_keys = [
+        key
+        for key, raw_timestamp in dedup_cache.items()
+        if not isinstance(raw_timestamp, (int, float)) or float(raw_timestamp) < cutoff
+    ]
+    for key in expired_keys:
+        dedup_cache.pop(key, None)
+
+    cache_key = str(update_id)
+    if cache_key in dedup_cache:
+        return True
+
+    dedup_cache[cache_key] = now
+    return False
+
+
+async def handle_reaction_update_fallback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Fallback router for reaction updates via a generic TypeHandler."""
+    has_reaction = getattr(update, "message_reaction", None) is not None
+    has_reaction_count = getattr(update, "message_reaction_count", None) is not None
+    if not has_reaction and not has_reaction_count:
+        return
+
+    logger.info(
+        "Routing reaction update via generic fallback handler",
+        update_id=getattr(update, "update_id", None),
+        has_message_reaction=has_reaction,
+        has_message_reaction_count=has_reaction_count,
+    )
+    await handle_message_reaction(update, context)
+
+
+async def handle_message_reaction(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle Telegram message reaction updates."""
+    reaction_update = getattr(update, "message_reaction", None)
+    reaction_count_update = getattr(update, "message_reaction_count", None)
+    if reaction_update is None and reaction_count_update is None:
+        return
+
+    update_id = getattr(update, "update_id", None)
+    if _mark_reaction_update_seen(context, update_id):
+        logger.debug("Skipping duplicate reaction update", update_id=update_id)
+        return
+
+    try:
+        update_kind = (
+            "message_reaction"
+            if reaction_update is not None
+            else "message_reaction_count"
+        )
+
+        actor_id: Optional[int] = None
+        actor_display = "unknown"
+        scoped_thread_id = 0
+
+        if reaction_update is not None:
+            actor_user = getattr(reaction_update, "user", None)
+            actor_chat = getattr(reaction_update, "actor_chat", None)
+
+            actor_id_raw = getattr(actor_user, "id", None)
+            if actor_id_raw is None:
+                actor_id_raw = getattr(actor_chat, "id", None)
+            if actor_id_raw is not None:
+                try:
+                    actor_id = int(actor_id_raw)
+                except (TypeError, ValueError):
+                    actor_id = None
+
+            old_tokens = _extract_reaction_tokens(
+                getattr(reaction_update, "old_reaction", None)
+            )
+            new_tokens = _extract_reaction_tokens(
+                getattr(reaction_update, "new_reaction", None)
+            )
+            added_tokens, removed_tokens = _diff_reaction_tokens(old_tokens, new_tokens)
+
+            chat = getattr(reaction_update, "chat", None)
+            chat_id = getattr(chat, "id", None)
+            chat_type = getattr(chat, "type", None)
+            message_id = getattr(reaction_update, "message_id", None)
+
+            raw_thread_id = getattr(reaction_update, "message_thread_id", None)
+            try:
+                scoped_thread_id = (
+                    int(raw_thread_id) if raw_thread_id is not None else 0
+                )
+            except (TypeError, ValueError):
+                scoped_thread_id = 0
+
+            actor_username = getattr(actor_user, "username", None) or getattr(
+                actor_chat, "username", None
+            )
+            actor_title = getattr(actor_chat, "title", None)
+            actor_name = " ".join(
+                str(part).strip()
+                for part in (
+                    getattr(actor_user, "first_name", None),
+                    getattr(actor_user, "last_name", None),
+                )
+                if str(part).strip()
+            ).strip()
+            actor_display = (
+                actor_name
+                or actor_title
+                or (
+                    f"@{actor_username}"
+                    if isinstance(actor_username, str) and actor_username.strip()
+                    else None
+                )
+                or (f"id:{actor_id}" if actor_id is not None else "unknown")
+            )
+        else:
+            old_tokens = []
+            message_reaction_count = reaction_count_update
+            chat = getattr(message_reaction_count, "chat", None)
+            chat_id = getattr(chat, "id", None)
+            chat_type = getattr(chat, "type", None)
+            message_id = getattr(message_reaction_count, "message_id", None)
+
+            try:
+                scoped_chat_for_cache = int(chat_id) if chat_id is not None else 0
+            except (TypeError, ValueError):
+                scoped_chat_for_cache = 0
+            cache_key = f"{scoped_chat_for_cache}:{message_id}"
+
+            reaction_count_cache = context.bot_data.get(_REACTION_COUNT_CACHE_KEY)
+            if not isinstance(reaction_count_cache, dict):
+                reaction_count_cache = {}
+                context.bot_data[_REACTION_COUNT_CACHE_KEY] = reaction_count_cache
+
+            old_counter: Counter[str] = Counter()
+            raw_old_counter = reaction_count_cache.get(cache_key)
+            if isinstance(raw_old_counter, dict):
+                for token, raw_count in raw_old_counter.items():
+                    token_text = str(token or "").strip()
+                    if not token_text:
+                        continue
+                    try:
+                        count = int(raw_count)
+                    except (TypeError, ValueError):
+                        continue
+                    if count > 0:
+                        old_counter[token_text] = count
+
+            new_counter = _extract_reaction_count_counter(
+                getattr(message_reaction_count, "reactions", None)
+            )
+            reaction_count_cache[cache_key] = dict(new_counter)
+
+            added_tokens, removed_tokens = _diff_reaction_counters(
+                old_counter, new_counter
+            )
+            new_tokens = _counter_to_reaction_tokens(new_counter)
+
+            actor_id = _resolve_actor_id_for_reaction_count(
+                context=context,
+                chat_id=scoped_chat_for_cache,
+                chat_type=chat_type,
+            )
+            actor_display = (
+                f"id:{actor_id}" if actor_id is not None else "anonymous_reaction_count"
+            )
+
+        feedback_signal = _resolve_reaction_feedback_signal(added_tokens)
+        feedback_stored = False
+        try:
+            scoped_chat_id = int(chat_id) if chat_id is not None else 0
+        except (TypeError, ValueError):
+            scoped_chat_id = 0
+
+        auth_manager = context.bot_data.get("auth_manager")
+        if (
+            actor_id is not None
+            and auth_manager
+            and hasattr(auth_manager, "is_authenticated")
+        ):
+            try:
+                if not bool(auth_manager.is_authenticated(actor_id)):
+                    logger.debug(
+                        "Ignoring reaction from unauthenticated actor",
+                        actor_id=actor_id,
+                        update_kind=update_kind,
+                    )
+                    return
+            except Exception as auth_error:
+                logger.warning(
+                    "Reaction auth check failed",
+                    actor_id=actor_id,
+                    update_kind=update_kind,
+                    error=str(auth_error),
+                )
+                return
+
+        if not added_tokens and not removed_tokens:
+            return
+
+        if feedback_signal and actor_id is not None and scoped_chat_id != 0:
+            feedback_stored = _store_pending_reaction_feedback(
+                context,
+                actor_id=actor_id,
+                chat_id=scoped_chat_id,
+                thread_id=scoped_thread_id,
+                feedback={
+                    "signal": feedback_signal["signal"],
+                    "token": feedback_signal["token"],
+                    "emoji": feedback_signal["emoji"],
+                    "chat_id": scoped_chat_id,
+                    "thread_id": scoped_thread_id,
+                    "message_id": message_id,
+                    "timestamp": time.time(),
+                },
+            )
+
+        logger.info(
+            "Telegram message reaction received",
+            update_kind=update_kind,
+            update_id=update_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            message_id=message_id,
+            actor_id=actor_id,
+            actor=actor_display,
+            added_reactions=added_tokens,
+            removed_reactions=removed_tokens,
+            current_reactions=new_tokens,
+            feedback_signal=feedback_signal["signal"] if feedback_signal else None,
+            feedback_stored=feedback_stored,
+        )
+
+        audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
+        if audit_logger and actor_id is not None:
+            try:
+                await audit_logger.log_session_event(
+                    user_id=actor_id,
+                    action="telegram_reaction",
+                    details={
+                        "chat_id": chat_id,
+                        "chat_type": chat_type,
+                        "message_id": message_id,
+                        "actor": actor_display,
+                        "added_reactions": added_tokens,
+                        "removed_reactions": removed_tokens,
+                        "current_reactions": new_tokens,
+                        "feedback_signal": (
+                            feedback_signal["signal"] if feedback_signal else None
+                        ),
+                        "feedback_stored": feedback_stored,
+                    },
+                )
+            except Exception as audit_error:
+                logger.warning(
+                    "Failed to persist reaction audit event",
+                    actor_id=actor_id,
+                    error=str(audit_error),
+                )
+    except Exception as e:
+        logger.warning("Failed to process reaction update", error=str(e))
 
 
 def _estimate_text_processing_cost(text: str) -> float:
@@ -2527,6 +3682,7 @@ def build_permission_handler(
     bot: Any,
     chat_id: int,
     settings: Any,
+    chat_type: Optional[str] = None,
     message_thread_id: Optional[int] = None,
 ) -> Optional[Callable]:
     """Build a permission button sender callback for SDK tool permission requests.
@@ -2568,9 +3724,10 @@ def build_permission_handler(
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        send_kwargs: dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": (
+        await send_message_resilient(
+            bot=bot,
+            chat_id=chat_id,
+            text=(
                 f"**Tool Permission Request**\n\n"
                 f"CLI wants to use: `{tool_label}`\n"
                 f"Request: `{request_id}`\n"
@@ -2578,14 +3735,10 @@ def build_permission_handler(
                 f"{input_summary}\n\n"
                 f"Allow this action?"
             ),
-            "parse_mode": "Markdown",
-            "reply_markup": reply_markup,
-        }
-        if isinstance(message_thread_id, int) and message_thread_id > 0:
-            send_kwargs["message_thread_id"] = message_thread_id
-
-        await bot.send_message(
-            **send_kwargs,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+            message_thread_id=message_thread_id,
+            chat_type=chat_type,
         )
 
     return send_permission_buttons
