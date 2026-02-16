@@ -116,7 +116,7 @@ def _engine_label(engine: str | None) -> str:
 def _engine_badge(engine: str | None) -> str:
     """Render a compact engine badge for Telegram message bubbles."""
     normalized = normalize_cli_engine(engine)
-    marker = "🟦" if normalized == ENGINE_CODEX else "🟩"
+    marker = "⬜" if normalized == ENGINE_CODEX else "🟧"
     return f"{marker} `{_engine_label(normalized)} CLI`"
 
 
@@ -370,6 +370,11 @@ async def _format_progress_update(update_obj) -> Optional[str]:
     elif update_obj.type == "progress":
         # Handle progress updates
         metadata = update_obj.metadata or {}
+        if (
+            metadata.get("engine") == "codex"
+            and metadata.get("subtype") == "turn.started"
+        ):
+            return "🤖 *Codex is working...*"
         if metadata.get("item_type") == "command_execution":
             status = str(metadata.get("status") or "").strip().lower()
             command = str(metadata.get("command") or update_obj.content or "").strip()
@@ -603,7 +608,15 @@ def _build_context_tag(
     if session_context_summary:
         lines.append(session_context_summary)
     if rate_limit_summary:
-        lines.append(f"🔋 {rate_limit_summary}")
+        rate_lines = [
+            line.strip()
+            for line in str(rate_limit_summary).splitlines()
+            if str(line).strip()
+        ]
+        if rate_lines:
+            lines.append(f"🔋 {rate_lines[0]}")
+            for line in rate_lines[1:]:
+                lines.append(f"   {line}")
     return "\n".join(lines)
 
 
@@ -1035,7 +1048,12 @@ async def handle_text_message(
         # Build permission handler only when SDK is active
         settings_obj: Settings = context.bot_data["settings"]
         permission_handler = build_permission_handler(
-            bot=context.bot, chat_id=update.effective_chat.id, settings=settings_obj
+            bot=context.bot,
+            chat_id=update.effective_chat.id,
+            settings=settings_obj,
+            message_thread_id=getattr(
+                update.effective_message, "message_thread_id", None
+            ),
         )
 
         # Run Claude command as cancellable task
@@ -1564,7 +1582,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         session_id = scope_state.get("claude_session_id")
         force_new_session = scope_state.get("force_new_session", False)
         permission_handler = build_permission_handler(
-            bot=context.bot, chat_id=update.effective_chat.id, settings=settings
+            bot=context.bot,
+            chat_id=update.effective_chat.id,
+            settings=settings,
+            message_thread_id=getattr(
+                update.effective_message, "message_thread_id", None
+            ),
         )
 
         # Process with Claude
@@ -1848,7 +1871,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             session_id = scope_state.get("claude_session_id")
             force_new_session = scope_state.get("force_new_session", False)
             permission_handler = build_permission_handler(
-                bot=context.bot, chat_id=update.effective_chat.id, settings=settings
+                bot=context.bot,
+                chat_id=update.effective_chat.id,
+                settings=settings,
+                message_thread_id=getattr(
+                    update.effective_message, "message_thread_id", None
+                ),
             )
 
             # Process with Claude
@@ -2332,8 +2360,14 @@ def _format_tool_input_summary(tool_name: str, tool_input: dict) -> str:
     if not tool_input:
         return ""
 
+    def _escape_md_text(value: Any) -> str:
+        text = str(value)
+        for ch in ("\\", "`", "*", "_", "["):
+            text = text.replace(ch, f"\\{ch}")
+        return text
+
     def _safe_code(value: Any, max_len: int) -> str:
-        text = str(value).replace("`", "'")
+        text = " ".join(str(value).split()).replace("`", "'")
         if len(text) > max_len:
             return text[:max_len] + "..."
         return text
@@ -2348,7 +2382,7 @@ def _format_tool_input_summary(tool_name: str, tool_input: dict) -> str:
     else:
         # Generic: show first key-value pair
         for key, value in list(tool_input.items())[:2]:
-            parts.append(f"{key}: `{_safe_code(value, 100)}`")
+            parts.append(f"{_escape_md_text(key)}: `{_safe_code(value, 100)}`")
 
     return "\n".join(parts)
 
@@ -2357,6 +2391,7 @@ def build_permission_handler(
     bot: Any,
     chat_id: int,
     settings: Any,
+    message_thread_id: Optional[int] = None,
 ) -> Optional[Callable]:
     """Build a permission button sender callback for SDK tool permission requests.
 
@@ -2397,9 +2432,9 @@ def build_permission_handler(
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await bot.send_message(
-            chat_id=chat_id,
-            text=(
+        send_kwargs: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": (
                 f"**Tool Permission Request**\n\n"
                 f"CLI wants to use: `{tool_label}`\n"
                 f"Request: `{request_id}`\n"
@@ -2407,8 +2442,14 @@ def build_permission_handler(
                 f"{input_summary}\n\n"
                 f"Allow this action?"
             ),
-            parse_mode="Markdown",
-            reply_markup=reply_markup,
+            "parse_mode": "Markdown",
+            "reply_markup": reply_markup,
+        }
+        if isinstance(message_thread_id, int) and message_thread_id > 0:
+            send_kwargs["message_thread_id"] = message_thread_id
+
+        await bot.send_message(
+            **send_kwargs,
         )
 
     return send_permission_buttons

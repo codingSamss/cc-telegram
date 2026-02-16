@@ -90,6 +90,20 @@ async def test_assistant_progress_text_uses_codex_label_when_metadata_present():
 
 
 @pytest.mark.asyncio
+async def test_progress_turn_started_renders_codex_working_line():
+    """Codex turn.started should render a concise working status line."""
+    update = _FakeUpdate(
+        type="progress",
+        content="Codex turn started",
+        metadata={"subtype": "turn.started", "engine": "codex"},
+    )
+
+    text = await _format_progress_update(update)
+
+    assert text == "🤖 *Codex is working...*"
+
+
+@pytest.mark.asyncio
 async def test_progress_command_execution_renders_compact_running_line():
     """Codex command execution updates should render compact command status."""
     update = _FakeUpdate(
@@ -326,7 +340,7 @@ def test_build_context_tag_renders_codex_badge():
         session_id="session-codex-123456",
     )
 
-    assert "🟦 `Codex CLI`" in tag
+    assert "⬜ `Codex CLI`" in tag
     assert "`demo-project`" in tag
 
 
@@ -339,15 +353,16 @@ def test_build_context_tag_renders_claude_badge():
         session_id="session-claude-123456",
     )
 
-    assert "🟩 `Claude CLI`" in tag
+    assert "🟧 `Claude CLI`" in tag
     assert "`claude-project`" in tag
 
 
 def test_build_context_tag_shows_rate_limit_summary():
     """Context tag should append rate limit info when provided."""
     summary = (
-        "5h window: 87.5% remaining · "
-        "7d window: 63.0% remaining (updated 2026-02-09T13:54:15Z)"
+        "5h window: 87.5% remaining\n"
+        "7d window: 63.0% remaining\n"
+        "(updated 2026-02-09T13:54:15Z)"
     )
     tag = _build_context_tag(
         scope_state={"current_directory": Path("/tmp/demo-project")},
@@ -357,8 +372,10 @@ def test_build_context_tag_shows_rate_limit_summary():
         rate_limit_summary=summary,
     )
 
-    assert "🔋" in tag
-    assert summary in tag
+    lines = tag.splitlines()
+    assert "🔋 5h window: 87.5% remaining" in lines
+    assert "   7d window: 63.0% remaining" in lines
+    assert "   (updated 2026-02-09T13:54:15Z)" in lines
 
 
 def test_build_context_tag_shows_session_context_summary():
@@ -396,11 +413,17 @@ def test_build_session_context_summary_prefers_explicit_remaining_tokens():
 def test_with_engine_badge_prefixes_codex_bubble():
     """Engine badge helper should prepend codex marker to bubble text."""
     text = _with_engine_badge("正在处理你的请求...", ENGINE_CODEX)
-    assert text.startswith("🟦 `Codex CLI`")
+    assert text.startswith("⬜ `Codex CLI`")
     assert "正在处理你的请求..." in text
 
 
 def test_with_engine_badge_handles_empty_body():
     """Engine badge helper should still return badge when body is empty."""
     text = _with_engine_badge("", ENGINE_CLAUDE)
-    assert text == "🟩 `Claude CLI`"
+    assert text == "🟧 `Claude CLI`"
+
+
+def test_with_engine_badge_falls_back_to_claude_for_unknown_engine():
+    """Unknown engine values should fallback to Claude with orange badge."""
+    text = _with_engine_badge("running...", "groq")
+    assert text.startswith("🟧 `Claude CLI`")

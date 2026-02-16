@@ -621,6 +621,9 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             bot=context.bot,
             chat_id=update.effective_chat.id,
             settings=settings,
+            message_thread_id=getattr(
+                update.effective_message, "message_thread_id", None
+            ),
         )
 
         status_msg_text = session_interaction.build_continue_progress_text(

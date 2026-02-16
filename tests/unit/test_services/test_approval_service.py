@@ -135,3 +135,45 @@ def test_resolve_callback_includes_tool_context_when_pending_available():
     assert result.ok is True
     assert "Tool: `Bash`" in result.message
     assert "Command:" in result.message
+
+
+def test_resolve_callback_escapes_generic_key_for_markdown():
+    """Generic tool-input keys should be markdown-escaped in callback message."""
+    service = ApprovalService()
+    manager = _FakePermissionManager(
+        resolved=True,
+        pending=SimpleNamespace(
+            tool_name="mcp__plugin_Notion_notion__notion-move-pages",
+            tool_input={
+                "page_or_database_ids": ["309489ae-5028-81dc-be35-e082ed6ebf7b"]
+            },
+        ),
+    )
+    result = service.resolve_callback(
+        param="allow:req-notion",
+        user_id=1001,
+        permission_manager=manager,
+    )
+
+    assert result.ok is True
+    assert "page\\_or\\_database\\_ids:" in result.message
+
+
+def test_resolve_callback_sanitizes_newlines_in_inline_code_summary():
+    """Inline code summary should collapse newlines to keep Markdown valid."""
+    service = ApprovalService()
+    manager = _FakePermissionManager(
+        resolved=True,
+        pending=SimpleNamespace(
+            tool_name="AnyTool",
+            tool_input={"payload": "line1\nline2\nline3"},
+        ),
+    )
+    result = service.resolve_callback(
+        param="allow:req-newline",
+        user_id=1001,
+        permission_manager=manager,
+    )
+
+    assert result.ok is True
+    assert "line1 line2 line3" in result.message

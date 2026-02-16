@@ -156,6 +156,12 @@ class Settings(BaseSettings):
         ge=0,
         le=3600,
     )
+    resume_history_preview_count: int = Field(
+        6,
+        description="Number of recent messages to show after resuming a session",
+        ge=0,
+        le=20,
+    )
     stream_render_debounce_ms: int = Field(
         1000,
         description="Debounce interval for streaming progress message updates",

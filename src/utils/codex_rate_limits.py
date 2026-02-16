@@ -135,8 +135,8 @@ def format_rate_limit_summary(rate_limits: Any) -> Optional[str]:
             line += f" (resets {entry['reset_text']})"
         parts.append(line)
 
-    summary = " · ".join(parts)
+    summary = "\n".join(parts)
     updated = str(rate_limits.get("updated_at") or "").strip()
     if updated:
-        summary += f" (updated {updated})"
+        summary += f"\n(updated {updated})"
     return summary

@@ -204,7 +204,9 @@ def test_build_command_for_codex_resume_with_images_places_flags_after_resume(
     ]
 
 
-def test_build_command_for_codex_resume_without_prompt_uses_default(tmp_path, monkeypatch):
+def test_build_command_for_codex_resume_without_prompt_uses_default(
+    tmp_path, monkeypatch
+):
     """Codex resume should always carry a non-empty prompt to satisfy CLI contract."""
     manager = _build_manager(tmp_path)
     monkeypatch.setattr(
@@ -388,6 +390,70 @@ async def test_start_process_unsets_claudecode_env(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_command_emits_codex_init_update(tmp_path, monkeypatch):
+    """Codex subprocess should emit init update for progress UI."""
+    manager = _build_manager(tmp_path)
+    monkeypatch.setattr(
+        "src.claude.sdk_integration.find_claude_cli",
+        lambda _: "/usr/local/bin/codex",
+    )
+
+    async def _fake_start_process(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    async def _fake_handle_process_output(*_args, **_kwargs):
+        return SimpleNamespace(
+            content="ok",
+            session_id="sid-1",
+            cost=0.0,
+            duration_ms=1,
+            num_turns=1,
+            is_error=False,
+            error_type=None,
+            tools_used=[],
+            model_usage=None,
+        )
+
+    monkeypatch.setattr(manager, "_start_process", _fake_start_process)
+    monkeypatch.setattr(manager, "_handle_process_output", _fake_handle_process_output)
+
+    updates = []
+
+    async def _stream_callback(update):
+        updates.append(update)
+
+    await manager.execute_command(
+        prompt="hello",
+        working_directory=tmp_path,
+        stream_callback=_stream_callback,
+        model="gpt-5",
+    )
+
+    assert len(updates) == 1
+    assert updates[0].type == "system"
+    assert updates[0].metadata["subtype"] == "init"
+    assert updates[0].metadata["engine"] == "codex"
+    assert updates[0].metadata["model"] == "gpt-5"
+
+
+def test_parse_stream_message_supports_codex_turn_context_model(tmp_path):
+    """Codex turn_context should stream resolved runtime model."""
+    manager = _build_manager(tmp_path)
+    update = manager._parse_stream_message(
+        {
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.2-codex"},
+        }
+    )
+
+    assert update is not None
+    assert update.type == "system"
+    assert update.metadata and update.metadata.get("subtype") == "model_resolved"
+    assert update.metadata and update.metadata.get("engine") == "codex"
+    assert update.metadata and update.metadata.get("model") == "gpt-5.2-codex"
+
+
+@pytest.mark.asyncio
 async def test_handle_process_output_raises_codex_turn_failed_error(
     tmp_path, monkeypatch
 ):
@@ -417,3 +483,52 @@ async def test_handle_process_output_raises_codex_turn_failed_error(
         )
 
     assert "unexpected model" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_handle_process_output_emits_codex_model_from_snapshot_fallback(
+    tmp_path, monkeypatch
+):
+    """Codex stream without turn_context should still emit resolved model from snapshot."""
+    manager = _build_manager(tmp_path)
+    lines = [
+        '{"type":"thread.started","thread_id":"019c-thread"}',
+        '{"type":"turn.started"}',
+        '{"type":"turn.completed","duration_ms":2,"usage":{"input_tokens":3}}',
+    ]
+
+    async def _fake_stream(_):
+        for line in lines:
+            yield line
+
+    process = SimpleNamespace(
+        stdout=object(),
+        stderr=SimpleNamespace(read=AsyncMock(return_value=b"")),
+        wait=AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(manager, "_read_stream_bounded", _fake_stream)
+    monkeypatch.setattr(
+        manager,
+        "_probe_codex_model_from_local_session",
+        staticmethod(lambda _sid: "gpt-5.2-codex"),
+    )
+
+    updates = []
+
+    async def _stream_callback(update):
+        updates.append(update)
+
+    response = await manager._handle_process_output(
+        process,
+        stream_callback=_stream_callback,
+        cli_kind="codex",
+    )
+
+    model_updates = [
+        u
+        for u in updates
+        if u.type == "system" and (u.metadata or {}).get("subtype") == "model_resolved"
+    ]
+    assert model_updates
+    assert model_updates[0].metadata.get("model") == "gpt-5.2-codex"
+    assert response.session_id == "019c-thread"

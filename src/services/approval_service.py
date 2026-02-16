@@ -28,13 +28,22 @@ class ApprovalService:
     }
 
     @staticmethod
+    def _escape_markdown_text(value: Any) -> str:
+        """Escape Telegram legacy Markdown control characters."""
+        text = str(value)
+        for ch in ("\\", "`", "*", "_", "["):
+            text = text.replace(ch, f"\\{ch}")
+        return text
+
+    @staticmethod
     def _format_tool_input_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
         """Build a concise tool input summary for callback responses."""
         if not tool_input:
             return ""
 
         def _clip(value: Any, limit: int) -> str:
-            text = str(value).replace("`", "'")
+            # Inline code in Telegram Markdown cannot safely contain raw newlines.
+            text = " ".join(str(value).split()).replace("`", "'")
             if len(text) > limit:
                 return text[:limit] + "..."
             return text
@@ -47,7 +56,8 @@ class ApprovalService:
             return f"URL: `{_clip(tool_input['url'], 180)}`"
 
         for key, value in list(tool_input.items())[:2]:
-            return f"{key}: `{_clip(value, 120)}`"
+            safe_key = ApprovalService._escape_markdown_text(key)
+            return f"{safe_key}: `{_clip(value, 120)}`"
         return ""
 
     def resolve_callback(

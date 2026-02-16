@@ -29,6 +29,7 @@ from ..utils.cli_engine import (
 )
 from ..utils.command_menu import sync_chat_command_menu
 from ..utils.recent_projects import build_recent_projects_message, scan_recent_projects
+from ..utils.resume_history import ResumeHistoryMessage, load_resume_history_preview
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.scope_state import get_scope_state_from_query
 from ..utils.ui_adapter import build_reply_markup_from_spec
@@ -153,6 +154,25 @@ def _build_resume_session_preview_line(candidate) -> str:
     )
     preview = _escape_markdown(_candidate_preview(candidate, max_len=56))
     return f"• `{sid_short}` · {status} · {preview}"
+
+
+def _build_resume_history_preview_text(
+    messages: list[ResumeHistoryMessage],
+    *,
+    max_len: int = 72,
+) -> str:
+    """Build markdown-friendly resume history preview block."""
+    if not messages:
+        return ""
+
+    lines = ["*最近历史预览*"]
+    for message in messages:
+        role = "你" if message.role == "user" else "助手"
+        preview = _escape_markdown(
+            _normalize_preview_text(message.content, max_len=max_len)
+        )
+        lines.append(f"• *{role}*: {preview}")
+    return "\n".join(lines)
 
 
 def _build_engine_selector_keyboard(
@@ -771,6 +791,7 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
             bot=context.bot,
             chat_id=query.message.chat_id,
             settings=settings,
+            message_thread_id=getattr(query.message, "message_thread_id", None),
         )
 
         progress_text = session_interaction.build_continue_progress_text(
@@ -1365,7 +1386,10 @@ async def handle_quick_action_callback(
             session_id=session_id,
             force_new_session=force_new,
             permission_handler=build_permission_handler(
-                bot=context.bot, chat_id=query.message.chat_id, settings=settings
+                bot=context.bot,
+                chat_id=query.message.chat_id,
+                settings=settings,
+                message_thread_id=getattr(query.message, "message_thread_id", None),
             ),
             model=_resolve_model_override(scope_state, active_engine, cli_integration),
         )
@@ -1732,10 +1756,23 @@ async def handle_permission_callback(
         permission_manager=permission_manager,
     )
 
-    await query.edit_message_text(
-        result.message,
-        parse_mode=result.parse_mode,
-    )
+    try:
+        await query.edit_message_text(
+            result.message,
+            parse_mode=result.parse_mode,
+        )
+    except Exception as markdown_error:
+        if result.parse_mode:
+            logger.warning(
+                "Permission callback markdown render failed; fallback to plain text",
+                error=str(markdown_error),
+                user_id=user_id,
+                request_id=result.request_id,
+                decision=result.decision,
+            )
+            await query.edit_message_text(result.message)
+        else:
+            raise
 
     if not result.ok:
         return
@@ -2021,6 +2058,7 @@ async def handle_resume_callback(query, param, context):
             user_id,
             token,
             token_mgr,
+            scanner,
             settings,
             context,
             engine=target_engine,
@@ -2282,6 +2320,7 @@ async def _resume_select_session(
         settings,
         context,
         engine=payload_engine,
+        scanner=scanner,
     )
 
 
@@ -2290,6 +2329,7 @@ async def _resume_force_confirm(
     user_id,
     token,
     token_mgr,
+    scanner,
     settings,
     context,
     engine: str,
@@ -2323,6 +2363,7 @@ async def _resume_force_confirm(
         settings,
         context,
         engine=payload_engine,
+        scanner=scanner,
     )
 
 
@@ -2431,6 +2472,7 @@ async def _do_adopt_session(
     settings,
     context,
     engine: str,
+    scanner=None,
 ):
     """S4: Actually adopt the session and switch cwd."""
     # Defensive: verify project_cwd is under approved_directory
@@ -2479,6 +2521,41 @@ async def _do_adopt_session(
         set_active_cli_engine(scope_state, engine)
         scope_state["current_directory"] = project_cwd
         scope_state["claude_session_id"] = adopted.session_id
+        history_preview: list[ResumeHistoryMessage] = []
+        preview_limit_raw = getattr(settings, "resume_history_preview_count", 6)
+        try:
+            preview_limit = int(preview_limit_raw)
+        except (TypeError, ValueError):
+            preview_limit = 6
+        preview_limit = max(0, min(preview_limit, 20))
+
+        if preview_limit > 0:
+            storage = context.bot_data.get("storage")
+            candidate_session_ids: list[str] = [adopted.session_id]
+            if session_id and session_id != adopted.session_id:
+                candidate_session_ids.append(session_id)
+
+            for candidate_session_id in candidate_session_ids:
+                try:
+                    history_preview = await load_resume_history_preview(
+                        session_id=candidate_session_id,
+                        user_id=user_id,
+                        project_cwd=project_cwd,
+                        engine=engine,
+                        limit=preview_limit,
+                        storage=storage,
+                        scanner=scanner,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to load resume history preview",
+                        session_id=candidate_session_id,
+                        engine=engine,
+                        error=str(exc),
+                    )
+                    history_preview = []
+                if history_preview:
+                    break
         message_obj = getattr(query, "message", None)
         chat_id = getattr(message_obj, "chat_id", None)
         if not isinstance(chat_id, int):
@@ -2506,12 +2583,16 @@ async def _do_adopt_session(
                 ),
             ],
         ]
+        history_block = ""
+        if history_preview:
+            history_block = "\n\n" + _build_resume_history_preview_text(history_preview)
 
         await query.edit_message_text(
             f"**Session Resumed**\n\n"
             f"Engine: `{engine}`\n"
             f"Session: `{adopted.session_id[:8]}...`\n"
-            f"Directory: `{rel}/`\n\n"
+            f"Directory: `{rel}/`"
+            f"{history_block}\n\n"
             f"Send a message to continue where you left off.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),

@@ -6,7 +6,7 @@ import pytest
 
 from src.claude.exceptions import ClaudeProcessError, ClaudeTimeoutError
 from src.claude.facade import ClaudeIntegration
-from src.claude.integration import ClaudeResponse
+from src.claude.integration import ClaudeResponse, StreamUpdate
 from src.config.settings import Settings
 
 
@@ -277,6 +277,129 @@ class TestClaudeIntegrationFacade:
         assert second["cached"] is True
         process_manager.execute_command.assert_awaited_once()
         sdk_manager.execute_command.assert_not_awaited()
+
+    async def test_tool_validation_notice_appends_without_overriding_result(
+        self, tmp_path
+    ):
+        """Validation failures should append notice when a main result exists."""
+        config = _build_config(tmp_path, use_sdk=False)
+        session = MagicMock(
+            session_id="session-local",
+            is_new_session=False,
+            source="bot",
+        )
+        session_manager = MagicMock()
+        session_manager.get_or_create_session = AsyncMock(return_value=session)
+        session_manager.update_session = AsyncMock()
+        session_manager.remove_session = AsyncMock()
+
+        tool_monitor = MagicMock()
+        tool_monitor.validate_tool_call = AsyncMock(
+            return_value=(False, "Tool not allowed: mcp__plugin_Notion_notion__move")
+        )
+
+        facade = ClaudeIntegration(
+            config=config,
+            process_manager=MagicMock(),
+            sdk_manager=None,
+            session_manager=session_manager,
+            tool_monitor=tool_monitor,
+            permission_manager=MagicMock(),
+        )
+
+        async def _fake_execute(**kwargs):
+            await kwargs["stream_callback"](
+                StreamUpdate(
+                    type="assistant",
+                    tool_calls=[
+                        {
+                            "name": "mcp__plugin_Notion_notion__move",
+                            "input": {},
+                        }
+                    ],
+                )
+            )
+            return ClaudeResponse(
+                content="步骤已完成，以下是最终结果。",
+                session_id="session-local",
+                cost=0.0,
+                duration_ms=1,
+                num_turns=1,
+            )
+
+        facade._execute_with_fallback = AsyncMock(side_effect=_fake_execute)
+
+        result = await facade.run_command(
+            prompt="run",
+            working_directory=tmp_path,
+            user_id=1001,
+            session_id="session-local",
+        )
+
+        assert "步骤已完成，以下是最终结果。" in result.content
+        assert "Tool Validation Notice" in result.content
+        assert result.is_error is False
+        assert result.error_type is None
+
+    async def test_tool_validation_without_result_returns_error_primary(self, tmp_path):
+        """Validation failures should become primary message when no result exists."""
+        config = _build_config(tmp_path, use_sdk=False)
+        session = MagicMock(
+            session_id="session-local",
+            is_new_session=False,
+            source="bot",
+        )
+        session_manager = MagicMock()
+        session_manager.get_or_create_session = AsyncMock(return_value=session)
+        session_manager.update_session = AsyncMock()
+        session_manager.remove_session = AsyncMock()
+
+        tool_monitor = MagicMock()
+        tool_monitor.validate_tool_call = AsyncMock(
+            return_value=(False, "Tool not allowed: mcp__plugin_Notion_notion__move")
+        )
+
+        facade = ClaudeIntegration(
+            config=config,
+            process_manager=MagicMock(),
+            sdk_manager=None,
+            session_manager=session_manager,
+            tool_monitor=tool_monitor,
+            permission_manager=MagicMock(),
+        )
+
+        async def _fake_execute(**kwargs):
+            await kwargs["stream_callback"](
+                StreamUpdate(
+                    type="assistant",
+                    tool_calls=[
+                        {
+                            "name": "mcp__plugin_Notion_notion__move",
+                            "input": {},
+                        }
+                    ],
+                )
+            )
+            return ClaudeResponse(
+                content="",
+                session_id="session-local",
+                cost=0.0,
+                duration_ms=1,
+                num_turns=1,
+            )
+
+        facade._execute_with_fallback = AsyncMock(side_effect=_fake_execute)
+
+        result = await facade.run_command(
+            prompt="run",
+            working_directory=tmp_path,
+            user_id=1002,
+            session_id="session-local",
+        )
+
+        assert "Tool Validation Failed" in result.content
+        assert result.is_error is True
+        assert result.error_type == "tool_validation_failed"
 
     async def test_get_precise_context_usage_probes_codex_status(self, tmp_path):
         """Codex subprocess should probe `/status` and parse context usage."""

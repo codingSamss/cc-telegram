@@ -141,6 +141,11 @@ class ClaudeProcessManager:
         )
 
         try:
+            if cli_kind == "codex":
+                await self._emit_codex_init_updates(
+                    stream_callback, working_directory, model
+                )
+
             # Start process
             process = await self._start_process(cmd, working_directory)
             self.active_processes[process_id] = process
@@ -193,6 +198,36 @@ class ClaudeProcessManager:
             # Clean up
             if process_id in self.active_processes:
                 del self.active_processes[process_id]
+
+    async def _emit_codex_init_updates(
+        self,
+        stream_callback: Optional[Callable[[StreamUpdate], None]],
+        working_directory: Path,
+        model: Optional[str],
+    ) -> None:
+        """Emit synthetic Codex init/model updates for UI parity."""
+        if not stream_callback:
+            return
+
+        requested_model = str(model or "").strip()
+        try:
+            await stream_callback(
+                StreamUpdate(
+                    type="system",
+                    metadata={
+                        "subtype": "init",
+                        "tools": self.config.claude_allowed_tools or [],
+                        "model": requested_model or None,
+                        "cwd": str(working_directory),
+                        "engine": "codex",
+                    },
+                )
+            )
+        except Exception as e:
+            logger.warning("Failed to emit Codex init update", error=str(e))
+
+        # Do not emit synthetic "model_resolved" for Codex without runtime evidence.
+        # Exact resolved model should come from Codex events (e.g. turn_context).
 
     def _resolve_cli_path(self) -> str:
         """Resolve configured CLI executable path."""
@@ -390,6 +425,8 @@ class ClaudeProcessManager:
         message_buffer = deque(maxlen=self.max_message_buffer)
         result = None
         parsing_errors = []
+        codex_thread_id = ""
+        codex_emitted_model = ""
 
         async for line in self._read_stream_bounded(process.stdout):
             if not line:
@@ -423,6 +460,27 @@ class ClaudeProcessManager:
                             error=str(e),
                             update_type=update.type,
                         )
+                if (
+                    cli_kind == "codex"
+                    and update
+                    and update.type == "system"
+                    and (update.metadata or {}).get("subtype") == "model_resolved"
+                ):
+                    codex_emitted_model = str(
+                        (update.metadata or {}).get("model") or ""
+                    ).strip()
+
+                if cli_kind == "codex":
+                    msg_type = str(msg.get("type") or "").strip()
+                    if msg_type == "thread.started":
+                        codex_thread_id = str(msg.get("thread_id") or "").strip()
+                    codex_emitted_model = (
+                        await self._maybe_emit_codex_model_from_snapshot(
+                            stream_callback=stream_callback,
+                            thread_id=codex_thread_id,
+                            emitted_model=codex_emitted_model,
+                        )
+                    )
 
                 # Check for final result
                 msg_type = msg.get("type")
@@ -514,7 +572,113 @@ class ClaudeProcessManager:
                 raise ClaudeParsingError("No result message received from Codex CLI")
             raise ClaudeParsingError("No result message received from Claude Code")
 
+        if cli_kind == "codex":
+            codex_emitted_model = await self._maybe_emit_codex_model_from_snapshot(
+                stream_callback=stream_callback,
+                thread_id=codex_thread_id,
+                emitted_model=codex_emitted_model,
+            )
+
         return self._parse_result(result, list(message_buffer))
+
+    async def _maybe_emit_codex_model_from_snapshot(
+        self,
+        *,
+        stream_callback: Optional[Callable[[StreamUpdate], None]],
+        thread_id: str,
+        emitted_model: str,
+    ) -> str:
+        """Emit best-effort Codex runtime model from local session snapshot."""
+        if not stream_callback or not thread_id:
+            return emitted_model
+
+        resolved_model = self._probe_codex_model_from_local_session(thread_id)
+        if not resolved_model or resolved_model == emitted_model:
+            return emitted_model
+
+        try:
+            await stream_callback(
+                StreamUpdate(
+                    type="system",
+                    metadata={
+                        "subtype": "model_resolved",
+                        "model": resolved_model,
+                        "engine": "codex",
+                    },
+                )
+            )
+            return resolved_model
+        except Exception as e:
+            logger.warning(
+                "Failed to emit Codex model from snapshot",
+                error=str(e),
+                thread_id=thread_id,
+            )
+            return emitted_model
+
+    @staticmethod
+    def _probe_codex_model_from_local_session(thread_id: str) -> Optional[str]:
+        """Read latest Codex local session file and extract turn_context model."""
+        sid = str(thread_id or "").strip()
+        if not sid:
+            return None
+
+        sessions_root = Path.home() / ".codex" / "sessions"
+        if not sessions_root.is_dir():
+            return None
+
+        try:
+            candidates = list(sessions_root.rglob(f"*{sid}*.jsonl"))
+        except OSError:
+            return None
+        if not candidates:
+            return None
+
+        latest_file: Optional[Path] = None
+        latest_mtime = -1.0
+        for candidate in candidates:
+            try:
+                mtime = candidate.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > latest_mtime:
+                latest_file = candidate
+                latest_mtime = mtime
+        if latest_file is None:
+            return None
+
+        try:
+            size = latest_file.stat().st_size
+        except OSError:
+            return None
+        if size <= 0:
+            return None
+
+        try:
+            chunk_size = min(size, 262_144)
+            with open(latest_file, "rb") as fh:
+                fh.seek(max(0, size - chunk_size))
+                data = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+
+        lines = [line.strip() for line in data.splitlines() if line.strip()]
+        for line in reversed(lines):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("type") or "").strip() != "turn_context":
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            model = str(payload.get("model") or "").strip()
+            if model:
+                return model
+        return None
 
     async def _read_stream(self, stream) -> AsyncIterator[str]:
         """Read lines from stream."""
@@ -568,6 +732,7 @@ class ClaudeProcessManager:
             "turn.failed",
             "item.started",
             "item.completed",
+            "turn_context",
         }:
             return self._parse_codex_stream_message(msg)
 
@@ -578,6 +743,22 @@ class ClaudeProcessManager:
     def _parse_codex_stream_message(self, msg: Dict) -> Optional[StreamUpdate]:
         """Parse Codex JSONL events into unified stream updates."""
         msg_type = msg.get("type")
+
+        if msg_type == "turn_context":
+            payload = msg.get("payload")
+            if not isinstance(payload, dict):
+                return None
+            model = str(payload.get("model") or "").strip()
+            if not model:
+                return None
+            return StreamUpdate(
+                type="system",
+                metadata={
+                    "subtype": "model_resolved",
+                    "model": model,
+                    "engine": "codex",
+                },
+            )
 
         if msg_type == "thread.started":
             return StreamUpdate(

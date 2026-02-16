@@ -240,37 +240,28 @@ class ClaudeIntegration:
                     "Command completed but tool validation failed",
                     validation_errors=validation_errors,
                 )
-                # Mark response as having errors and include validation details
-                response.is_error = True
-                response.error_type = "tool_validation_failed"
+                blocked_tools = self._extract_blocked_tools(validation_errors)
+                has_primary_result = bool((response.content or "").strip())
+                validation_notice = self._build_tool_validation_notice(
+                    blocked_tools=blocked_tools,
+                    validation_errors=validation_errors,
+                    has_primary_result=has_primary_result,
+                )
 
-                # Extract blocked tool names for user feedback
-                blocked_tools = []
-                for error in validation_errors:
-                    if "Tool not allowed:" in error:
-                        tool_name = error.split("Tool not allowed: ")[1]
-                        blocked_tools.append(tool_name)
-
-                # Create user-friendly error message
-                if blocked_tools:
-                    tool_list = ", ".join(f"`{tool}`" for tool in blocked_tools)
+                if has_primary_result:
                     response.content = (
-                        f"🚫 **Tool Access Blocked**\n\n"
-                        f"Claude tried to use tools not allowed:\n"
-                        f"{tool_list}\n\n"
-                        f"**What you can do:**\n"
-                        f"• Contact the administrator to request access to these tools\n"
-                        f"• Try rephrasing your request to use different approaches\n"
-                        f"• Check what tools are currently available with `/context`\n\n"
-                        f"**Currently allowed tools:**\n"
-                        f"{', '.join(f'`{t}`' for t in self.config.claude_allowed_tools or [])}"
+                        f"{response.content.rstrip()}\n\n{validation_notice}"
                     )
+                    # Keep the main conclusion as primary content; render policy
+                    # failure as supplementary warning.
+                    response.is_error = False
+                    response.error_type = None
                 else:
-                    response.content = (
-                        f"🚫 **Tool Validation Failed**\n\n"
-                        f"Tools failed security validation. Try different approach.\n\n"
-                        f"Details: {'; '.join(validation_errors)}"
-                    )
+                    # No usable result was produced; surface validation failure
+                    # as the primary response.
+                    response.content = validation_notice
+                    response.is_error = True
+                    response.error_type = "tool_validation_failed"
 
             # Update session (this may change the session_id for new sessions)
             old_session_id = session.session_id
@@ -1110,3 +1101,87 @@ class ClaudeIntegration:
         ]
 
         return "\n".join(message)
+
+    @staticmethod
+    def _escape_markdown_text(value: str) -> str:
+        """Escape Telegram legacy Markdown control characters."""
+        text = str(value)
+        for ch in ("\\", "`", "*", "_", "["):
+            text = text.replace(ch, f"\\{ch}")
+        return text
+
+    @classmethod
+    def _extract_blocked_tools(cls, validation_errors: List[str]) -> List[str]:
+        """Extract blocked tool names from validation error messages."""
+        blocked: list[str] = []
+        for error in validation_errors:
+            marker = "Tool not allowed:"
+            if marker not in error:
+                continue
+            tool_name = error.split(marker, 1)[1].strip()
+            if not tool_name:
+                continue
+            if tool_name not in blocked:
+                blocked.append(tool_name)
+        return blocked
+
+    def _build_tool_validation_notice(
+        self,
+        blocked_tools: List[str],
+        validation_errors: List[str],
+        *,
+        has_primary_result: bool,
+    ) -> str:
+        """Build user-facing message for non-fatal/fatal tool validation failures."""
+        allowed_tools = self.config.claude_allowed_tools or []
+        allowed_tools_preview = ", ".join(
+            f"`{self._escape_markdown_text(tool)}`" for tool in allowed_tools[:12]
+        )
+        if len(allowed_tools) > 12:
+            allowed_tools_preview += ", ..."
+
+        blocked_preview = ", ".join(
+            f"`{self._escape_markdown_text(tool)}`" for tool in blocked_tools[:8]
+        )
+        if len(blocked_tools) > 8:
+            blocked_preview += ", ..."
+
+        if has_primary_result:
+            lines = [
+                "⚠️ **Tool Validation Notice**",
+                "",
+                "Some tool calls were blocked by security policy.",
+                "The main result above is preserved.",
+            ]
+        else:
+            lines = [
+                "🚫 **Tool Validation Failed**",
+                "",
+                "The request could not be completed because required tools were blocked by security policy.",
+            ]
+
+        if blocked_preview:
+            lines.append(f"Blocked tools: {blocked_preview}")
+        elif validation_errors:
+            lines.append("Blocked tools: unavailable")
+
+        lines.extend(
+            [
+                "",
+                "**What you can do:**",
+                "• Contact the administrator to request access",
+                "• Rephrase your request to avoid restricted tools",
+                "• Check available tools with `/context`",
+            ]
+        )
+
+        if allowed_tools_preview:
+            lines.extend(
+                [
+                    "",
+                    "**Currently allowed tools:**",
+                    allowed_tools_preview,
+                ]
+            )
+
+        return "\n".join(lines)

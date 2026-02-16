@@ -947,7 +947,7 @@ async def test_quick_action_callback_sanitizes_model_when_fallbacks_to_claude(
                 content="执行完成",
                 session_id="session-claude-fallback-1",
             )
-        )
+        ),
     )
     action = SimpleNamespace(icon="🧪", name="Run Tests", prompt="pytest")
     query = SimpleNamespace(
@@ -1071,3 +1071,84 @@ async def test_do_adopt_session_uses_engine_specific_integration(tmp_path):
     scope_state = context.user_data["scope_state"][scope_key]
     assert scope_state[ENGINE_STATE_KEY] == "codex"
     assert scope_state["claude_session_id"] == "codex-session-1"
+
+
+@pytest.mark.asyncio
+async def test_do_adopt_session_renders_history_preview_after_resume(tmp_path):
+    """Resume success message should include recent history preview when available."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    project = approved / "proj2"
+    project.mkdir()
+    user_id = 4101
+    chat_id = 5101
+    scope_key = _scope_key(user_id, chat_id)
+    session_id = "resume-preview-session"
+
+    session_file = tmp_path / "session-preview.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"type":"session_meta","payload":{"id":"resume-preview-session","cwd":"%s"}}'
+                % str(project).replace("\\", "\\\\"),
+                '{"type":"event_msg","payload":{"type":"user_message","message":"first user"}}',
+                '{"type":"event_msg","payload":{"type":"assistant_message","message":"first assistant"}}',
+                '{"type":"event_msg","payload":{"type":"user_message","message":"second user"}}',
+                '{"type":"event_msg","payload":{"type":"assistant_message","message":"second assistant"}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    adopted = SimpleNamespace(session_id=session_id)
+    codex_integration = SimpleNamespace(
+        session_manager=SimpleNamespace(
+            adopt_external_session=AsyncMock(return_value=adopted)
+        )
+    )
+    scanner = SimpleNamespace(
+        list_sessions=AsyncMock(
+            return_value=[
+                SimpleNamespace(session_id=session_id, source_file=session_file),
+            ]
+        )
+    )
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        message=SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id), message_thread_id=None
+        ),
+        edit_message_text=AsyncMock(),
+    )
+    settings = _build_settings(approved)
+    settings.resume_history_preview_count = 4
+    context = SimpleNamespace(
+        bot_data={
+            "settings": settings,
+            "cli_integrations": {
+                "claude": SimpleNamespace(
+                    session_manager=SimpleNamespace(adopt_external_session=AsyncMock())
+                ),
+                "codex": codex_integration,
+            },
+        },
+        user_data={"scope_state": {scope_key: {ENGINE_STATE_KEY: "claude"}}},
+    )
+
+    await _do_adopt_session(
+        query=query,
+        user_id=user_id,
+        project_cwd=project,
+        session_id=session_id,
+        settings=settings,
+        context=context,
+        engine="codex",
+        scanner=scanner,
+    )
+
+    rendered = query.edit_message_text.await_args.args[0]
+    assert "Session Resumed" in rendered
+    assert "最近历史预览" in rendered
+    assert "*你*:" in rendered
+    assert "*助手*:" in rendered
+    assert "second user" in rendered
