@@ -388,13 +388,13 @@ def test_build_context_tag_shows_session_context_summary():
         approved_directory=Path("/tmp"),
         active_engine=ENGINE_CODEX,
         session_id="session-codex-123456",
-        session_context_summary="🧠 Session context: `71.8%` remaining",
+        session_context_summary="🔋 Session context: `71.8%` remaining",
         rate_limit_summary="5h window: 87.5% remaining",
     )
 
     lines = tag.splitlines()
     assert len(lines) == 3
-    assert lines[1].startswith("🧠 Session context")
+    assert lines[1].startswith("🔋 Session context")
     assert lines[2].startswith("🔋")
 
 
@@ -423,7 +423,7 @@ def test_build_collapsed_thinking_summary_keeps_model_and_context():
         ],
         context_tag=(
             "⬜ `Codex CLI` | `cli-tg` | `019c6252`\n"
-            "🧠 Session context: `86.2%` remaining\n"
+            "🔋 Session context: `86.2%` remaining\n"
             "🔋 5h window: 97.0% remaining\n"
             "   7d window: 99.0% remaining"
         ),
@@ -432,7 +432,7 @@ def test_build_collapsed_thinking_summary_keeps_model_and_context():
     lines = collapsed.splitlines()
     assert lines[0] == "🧠 *Using model:* o4-mini"
     assert "⬜ `Codex CLI` | `cli-tg` | `019c6252`" in lines
-    assert "🧠 Session context: `86.2%` remaining" in lines
+    assert "🔋 Session context: `86.2%` remaining" in lines
     assert "🔋 5h window: 97.0% remaining" not in collapsed
     assert "💭 Thinking done" not in collapsed
 

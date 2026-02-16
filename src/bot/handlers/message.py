@@ -650,7 +650,7 @@ def _build_session_context_summary(snapshot: Optional[dict[str, Any]]) -> Option
     if remaining_percent is None:
         return None
 
-    return "🧠 Session context: " f"`{remaining_percent:.1f}%` remaining"
+    return "🔋 Session context: " f"`{remaining_percent:.1f}%` remaining"
 
 
 def _extract_model_from_model_usage(model_usage: Any) -> Optional[str]:
@@ -765,7 +765,7 @@ def _build_collapsed_thinking_summary(
 
         compact_lines: list[str] = [context_lines[0]]
         for line in context_lines[1:]:
-            if line.startswith("🧠 Session context:"):
+            if "Session context:" in line:
                 compact_lines.append(line)
                 break
         return "\n".join(compact_lines)
