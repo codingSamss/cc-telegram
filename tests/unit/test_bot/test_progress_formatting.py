@@ -12,6 +12,7 @@ from src.bot.handlers.message import (
     _build_collapsed_thinking_summary,
     _build_context_tag,
     _build_session_context_summary,
+    _extract_model_from_model_usage,
     _format_error_message,
     _format_progress_update,
     _get_stream_merge_key,
@@ -19,6 +20,7 @@ from src.bot.handlers.message import (
     _is_markdown_parse_error,
     _is_noop_edit_error,
     _reply_text_resilient,
+    _resolve_collapsed_fallback_model,
     _split_text_for_telegram,
     _with_engine_badge,
 )
@@ -419,25 +421,76 @@ def test_build_collapsed_thinking_summary_keeps_model_and_context():
             "🧠 *Using model:* o4-mini",
             "🔧 Read: `src/main.py`",
         ],
-        context_tag="⬜ `Codex CLI` | `cli-tg` | `019c6252`",
+        context_tag=(
+            "⬜ `Codex CLI` | `cli-tg` | `019c6252`\n"
+            "🧠 Session context: `86.2%` remaining\n"
+            "🔋 5h window: 97.0% remaining\n"
+            "   7d window: 99.0% remaining"
+        ),
     )
 
     lines = collapsed.splitlines()
     assert lines[0] == "🧠 *Using model:* o4-mini"
     assert "⬜ `Codex CLI` | `cli-tg` | `019c6252`" in lines
-    assert lines[-1].startswith("💭 Thinking done")
+    assert "🧠 Session context: `86.2%` remaining" in lines
+    assert "🔋 5h window: 97.0% remaining" not in collapsed
+    assert "💭 Thinking done" not in collapsed
 
 
 def test_build_collapsed_thinking_summary_falls_back_when_no_model_line():
-    """Collapsed thinking summary should still render context + summary without model."""
+    """Collapsed thinking summary should still render compact context without model."""
     collapsed = _build_collapsed_thinking_summary(
         all_progress_lines=["🔧 Read: `src/main.py`"],
-        context_tag="🟧 `Claude CLI` | `cli-tg` | `019c6252`",
+        context_tag=(
+            "🟧 `Claude CLI` | `cli-tg` | `019c6252`\n" "🔋 5h window: 87.5% remaining"
+        ),
     )
 
     assert "🧠 *Using model:*" not in collapsed
     assert "🟧 `Claude CLI` | `cli-tg` | `019c6252`" in collapsed
-    assert "💭 Thinking done" in collapsed
+    assert "🔋 5h window: 87.5% remaining" not in collapsed
+    assert "💭 Thinking done" not in collapsed
+
+
+def test_build_collapsed_thinking_summary_uses_fallback_model_when_missing():
+    """Collapsed summary should use provided fallback model when stream has no model line."""
+    collapsed = _build_collapsed_thinking_summary(
+        all_progress_lines=["🔧 Read: `src/main.py`"],
+        context_tag="⬜ `Codex CLI` | `cli-tg` | `019c6252`",
+        fallback_model="gpt-5.3-codex",
+    )
+
+    lines = collapsed.splitlines()
+    assert lines[0] == "🧠 *Using model:* gpt-5.3-codex"
+    assert "⬜ `Codex CLI` | `cli-tg` | `019c6252`" in lines
+
+
+def test_extract_model_from_model_usage_supports_nested_and_flat_payloads():
+    """Model extraction should work for both flat and nested usage payload shapes."""
+    flat = {"resolvedModel": "claude-opus-4-1", "inputTokens": 100}
+    nested = {"gpt-5.3-codex": {"inputTokens": 100}}
+
+    assert _extract_model_from_model_usage(flat) == "claude-opus-4-1"
+    assert _extract_model_from_model_usage(nested) == "gpt-5.3-codex"
+
+
+def test_resolve_collapsed_fallback_model_supports_codex_and_claude_modes():
+    """Fallback model resolver should keep specific models for both engines."""
+    codex_model = _resolve_collapsed_fallback_model(
+        active_engine=ENGINE_CODEX,
+        scope_state={},
+        claude_response=None,
+        codex_snapshot={"resolved_model": "gpt-5.3-codex"},
+    )
+    claude_model = _resolve_collapsed_fallback_model(
+        active_engine=ENGINE_CLAUDE,
+        scope_state={"claude_model": "claude-opus-4-1"},
+        claude_response=None,
+        codex_snapshot=None,
+    )
+
+    assert codex_model == "gpt-5.3-codex"
+    assert claude_model == "claude-opus-4-1"
 
 
 def test_with_engine_badge_prefixes_codex_bubble():

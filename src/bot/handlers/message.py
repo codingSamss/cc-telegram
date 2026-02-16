@@ -653,6 +653,66 @@ def _build_session_context_summary(snapshot: Optional[dict[str, Any]]) -> Option
     return "🧠 Session context: " f"`{remaining_percent:.1f}%` remaining"
 
 
+def _extract_model_from_model_usage(model_usage: Any) -> Optional[str]:
+    """Best-effort extract resolved model name from response model_usage payload."""
+    if not isinstance(model_usage, dict) or not model_usage:
+        return None
+
+    def _pick_model(payload: dict[str, Any]) -> str:
+        for key in ("resolvedModel", "resolved_model", "model"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    direct = _pick_model(model_usage)
+    if direct:
+        return direct
+
+    for model_name, usage in model_usage.items():
+        if not isinstance(usage, dict):
+            continue
+        nested = _pick_model(usage)
+        if nested:
+            return nested
+        candidate = str(model_name or "").strip()
+        if candidate and candidate.lower() not in {"sdk", "current", "default"}:
+            return candidate
+
+    return None
+
+
+def _resolve_collapsed_fallback_model(
+    *,
+    active_engine: str | None,
+    scope_state: dict[str, Any],
+    claude_response: Any | None = None,
+    codex_snapshot: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
+    """Resolve model line fallback for collapsed summary when stream lacks model event."""
+    usage_model = _extract_model_from_model_usage(
+        getattr(claude_response, "model_usage", None)
+    )
+    if usage_model:
+        return usage_model
+
+    if normalize_cli_engine(active_engine) == ENGINE_CODEX and isinstance(
+        codex_snapshot, dict
+    ):
+        resolved_model = str(codex_snapshot.get("resolved_model") or "").strip()
+        if resolved_model:
+            return resolved_model
+
+    selected_model = str(scope_state.get("claude_model") or "").strip()
+    if not selected_model:
+        return None
+    if normalize_cli_engine(active_engine) == ENGINE_CODEX:
+        return selected_model
+    if _is_claude_model_name(selected_model):
+        return selected_model
+    return None
+
+
 def _generate_thinking_summary(all_progress_lines: list[str]) -> str:
     """Generate a one-line summary from progress lines."""
     # Match both old format "Using tools:" and new format "🔧 ToolName:"
@@ -691,21 +751,43 @@ def _extract_resolved_model_line(all_progress_lines: list[str]) -> Optional[str]
 def _build_collapsed_thinking_summary(
     all_progress_lines: list[str],
     context_tag: str,
+    fallback_model: Optional[str] = None,
 ) -> str:
-    """Build final collapsed thinking summary text with model and context."""
+    """Build final collapsed thinking summary text with model and compact context."""
+
+    def _compact_context_tag(raw: str) -> str:
+        """Keep only session identity line + session context usage for collapsed UI."""
+        context_lines = [
+            line.strip() for line in str(raw or "").splitlines() if line.strip()
+        ]
+        if not context_lines:
+            return ""
+
+        compact_lines: list[str] = [context_lines[0]]
+        for line in context_lines[1:]:
+            if line.startswith("🧠 Session context:"):
+                compact_lines.append(line)
+                break
+        return "\n".join(compact_lines)
+
     lines: list[str] = []
     model_line = _extract_resolved_model_line(all_progress_lines)
+    if not model_line:
+        candidate = str(fallback_model or "").strip()
+        if candidate:
+            model_line = f"🧠 *Using model:* {_escape_md(candidate)}"
     if model_line:
         lines.append(model_line)
 
-    if context_tag:
+    compact_context = _compact_context_tag(context_tag)
+    if compact_context:
         if lines:
             lines.append("")
-        lines.append(context_tag)
+        lines.append(compact_context)
 
-    if lines:
-        lines.append("")
-    lines.append(f"💭 {_generate_thinking_summary(all_progress_lines)}")
+    if not lines:
+        # Defensive fallback to avoid empty collapsed message.
+        lines.append(f"💭 {_generate_thinking_summary(all_progress_lines)}")
     return "\n".join(lines)
 
 
@@ -1259,6 +1341,12 @@ async def handle_text_message(
             session_context_summary=session_context_summary,
             rate_limit_summary=rate_limit_summary,
         )
+        collapsed_fallback_model = _resolve_collapsed_fallback_model(
+            active_engine=active_engine,
+            scope_state=scope_state,
+            claude_response=claude_response,
+            codex_snapshot=codex_snapshot,
+        )
         has_thinking_summary = False
 
         # Collapse progress message into summary with expand button
@@ -1266,6 +1354,7 @@ async def handle_text_message(
             summary_text = _build_collapsed_thinking_summary(
                 all_progress_lines,
                 context_tag,
+                fallback_model=collapsed_fallback_model,
             )
             has_thinking_summary = True
             thinking_keyboard = InlineKeyboardMarkup(
@@ -2036,11 +2125,28 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
 
                 # Build context tag for image response
+                img_codex_snapshot = None
+                if active_engine == ENGINE_CODEX:
+                    img_sid = str(scope_state.get("claude_session_id") or "").strip()
+                    if img_sid:
+                        img_codex_snapshot = SessionService.get_cached_codex_snapshot(
+                            img_sid
+                        )
+                        if img_codex_snapshot is None:
+                            img_codex_snapshot = (
+                                SessionService._probe_codex_session_snapshot(img_sid)
+                            )
                 img_context_tag = _build_context_tag(
                     scope_state=scope_state,
                     approved_directory=settings.approved_directory,
                     active_engine=active_engine,
                     session_id=scope_state.get("claude_session_id"),
+                )
+                img_fallback_model = _resolve_collapsed_fallback_model(
+                    active_engine=active_engine,
+                    scope_state=scope_state,
+                    claude_response=claude_response,
+                    codex_snapshot=img_codex_snapshot,
                 )
                 img_has_thinking = False
 
@@ -2049,6 +2155,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     summary_text = _build_collapsed_thinking_summary(
                         thinking_lines,
                         img_context_tag,
+                        fallback_model=img_fallback_model,
                     )
                     img_has_thinking = True
                     thinking_keyboard = InlineKeyboardMarkup(
