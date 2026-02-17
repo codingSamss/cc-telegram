@@ -37,6 +37,10 @@ from .utils.update_offset_store import UpdateOffsetStore
 
 logger = structlog.get_logger()
 
+_POLLING_WATCHDOG_INTERVAL_SECONDS = 2.0
+_POLLING_RECOVERY_ERROR_THRESHOLD = 3
+_POLLING_RESTART_COOLDOWN_SECONDS = 8.0
+
 
 class ClaudeCodeBot:
     """Main bot orchestrator."""
@@ -52,6 +56,8 @@ class ClaudeCodeBot:
         self._polling_error_count: int = 0
         self._polling_error_window_start: float = 0.0
         self._last_polling_error_log: float = 0.0
+        self._polling_restart_requested: bool = False
+        self._last_polling_restart_monotonic: float = 0.0
         # Update dedupe and persisted offset tracking
         self._update_dedupe_cache = UpdateDedupeCache(ttl_seconds=300, max_size=5000)
         self._update_offset_store: Optional[UpdateOffsetStore] = None
@@ -447,6 +453,88 @@ class ClaudeCodeBot:
         except OSError:
             pass
 
+    def _reset_polling_recovery_state(self) -> None:
+        """Reset polling network error counters after successful recovery."""
+        self._polling_error_count = 0
+        self._polling_error_window_start = 0.0
+        self._last_polling_error_log = 0.0
+        self._polling_restart_requested = False
+
+    async def _start_polling(self) -> None:
+        """Start Telegram polling with shared options."""
+        if not self.app:
+            raise ClaudeCodeTelegramError("Telegram application is not initialized")
+
+        updater = getattr(self.app, "updater", None)
+        if updater is None:
+            raise ClaudeCodeTelegramError("Telegram updater is not available")
+
+        await updater.start_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            bootstrap_retries=10,
+            error_callback=self._polling_error_callback,
+        )
+
+    async def _restart_polling(self, *, reason: str) -> bool:
+        """Restart polling loop after network/proxy disruptions."""
+        if not self.app:
+            return False
+
+        updater = getattr(self.app, "updater", None)
+        if updater is None:
+            logger.error("Cannot restart polling: updater is unavailable", reason=reason)
+            return False
+
+        now = asyncio.get_running_loop().time()
+        if (
+            now - self._last_polling_restart_monotonic
+            < _POLLING_RESTART_COOLDOWN_SECONDS
+        ):
+            logger.debug(
+                "Skip polling restart due to cooldown",
+                reason=reason,
+                cooldown_seconds=_POLLING_RESTART_COOLDOWN_SECONDS,
+            )
+            return False
+
+        self._last_polling_restart_monotonic = now
+        logger.warning("Attempting polling self-recovery", reason=reason)
+
+        try:
+            if updater.running:
+                await updater.stop()
+            await self._start_polling()
+        except Exception as exc:
+            self._polling_restart_requested = True
+            logger.error(
+                "Polling self-recovery failed",
+                reason=reason,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return False
+
+        self._reset_polling_recovery_state()
+        logger.info("Polling self-recovery succeeded", reason=reason)
+        return True
+
+    async def _polling_watchdog_tick(self) -> None:
+        """Watch polling status and trigger self-recovery when needed."""
+        if getattr(self.settings, "webhook_url", None) or not self.app:
+            return
+
+        updater = getattr(self.app, "updater", None)
+        if updater is None:
+            return
+
+        if not updater.running:
+            await self._restart_polling(reason="updater_not_running")
+            return
+
+        if self._polling_restart_requested:
+            await self._restart_polling(reason="network_error_threshold")
+
     async def start(self) -> None:
         """Start the bot."""
         if self.is_running:
@@ -476,16 +564,13 @@ class ClaudeCodeBot:
                 # Polling mode - initialize and start polling manually
                 await self.app.initialize()
                 await self.app.start()
-                await self.app.updater.start_polling(
-                    allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
-                    bootstrap_retries=10,
-                    error_callback=self._polling_error_callback,
-                )
+                await self._start_polling()
+                self._reset_polling_recovery_state()
 
                 # Keep running until manually stopped
                 while self.is_running:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(_POLLING_WATCHDOG_INTERVAL_SECONDS)
+                    await self._polling_watchdog_tick()
         except Exception as e:
             logger.error("Error running bot", error=str(e))
             raise ClaudeCodeTelegramError(f"Failed to start bot: {str(e)}") from e
@@ -546,6 +631,17 @@ class ClaudeCodeBot:
             self._polling_error_window_start = now
 
         self._polling_error_count += 1
+
+        if (
+            self._polling_error_count >= _POLLING_RECOVERY_ERROR_THRESHOLD
+            and not self._polling_restart_requested
+        ):
+            self._polling_restart_requested = True
+            logger.warning(
+                "Polling self-recovery flagged due to repeated network errors",
+                error_count_in_window=self._polling_error_count,
+                threshold=_POLLING_RECOVERY_ERROR_THRESHOLD,
+            )
 
         # Rate limit: at most one log entry per 30 seconds
         if now - self._last_polling_error_log < 30:
