@@ -54,6 +54,12 @@ class ClaudeIntegration:
         self._sdk_failed_count = 0  # Track SDK failures for adaptive fallback
         self._context_usage_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
 
+    @staticmethod
+    def _is_invalid_claude_request_response(response: ClaudeResponse) -> bool:
+        """Whether response text indicates upstream request-shape rejection."""
+        content = str(getattr(response, "content", "") or "").lower()
+        return "invalid claude code request" in content
+
     async def run_command(
         self,
         prompt: str,
@@ -233,6 +239,24 @@ class ClaudeIntegration:
                         )
                 else:
                     raise
+
+            if model and self._is_invalid_claude_request_response(response):
+                logger.warning(
+                    "Claude request rejected with explicit model; retrying without model override",
+                    model=model,
+                    session_id=claude_session_id,
+                    continue_session=should_continue,
+                )
+                response = await self._execute_with_fallback(
+                    prompt=prompt,
+                    working_directory=working_directory,
+                    session_id=claude_session_id,
+                    continue_session=should_continue,
+                    stream_callback=stream_handler,
+                    permission_callback=permission_callback,
+                    model=None,
+                    images=images,
+                )
 
             # Check if tool validation failed
             if not tools_validated:

@@ -1185,6 +1185,17 @@ async def handle_model_callback(
         scope_state["claude_model"] = param_norm
         selected = param_norm
 
+    # Claude model switch must start a fresh session. Continuing an existing
+    # session may keep the old runtime model and ignore the new selection.
+    old_session_id = scope_state.get("claude_session_id")
+    scope_state["claude_session_id"] = None
+    scope_state["session_started"] = True
+    scope_state["force_new_session"] = True
+    if old_session_id:
+        permission_manager = context.bot_data.get("permission_manager")
+        if permission_manager:
+            permission_manager.clear_session(old_session_id)
+
     # Rebuild keyboard with updated selection indicator
     current = scope_state.get("claude_model")
     keyboard = [
@@ -1212,7 +1223,9 @@ async def handle_model_callback(
 
     await _edit_query_message_resilient(
         query,
-        f"Model switched to `{selected}`.",
+        "✅ 模型设置已更新。\n"
+        f"当前设置：`{selected}`\n\n"
+        "下一条消息将从新会话开始，确保模型切换生效。",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )

@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     claude_cli_path: Optional[str] = Field(
         None, description="Path to Claude CLI executable"
     )
+    claude_setting_sources: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Optional setting sources for Claude SDK "
+            "(example: user,project,local). Leave empty to use CLI defaults."
+        ),
+    )
     anthropic_api_key: Optional[SecretStr] = Field(
         None,
         description="Anthropic API key for Claude SDK (optional if logged into Claude CLI)",
@@ -229,6 +236,20 @@ class Settings(BaseSettings):
             return [tool.strip() for tool in v.split(",") if tool.strip()]
         if isinstance(v, list):
             return [str(tool) for tool in v]
+        return v  # type: ignore[no-any-return]
+
+    @field_validator("claude_setting_sources", mode="before")
+    @classmethod
+    def parse_claude_setting_sources(cls, v: Any) -> Optional[List[str]]:
+        """Parse optional Claude SDK setting_sources."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            sources = [item.strip() for item in v.split(",") if item.strip()]
+            return sources or None
+        if isinstance(v, list):
+            sources = [str(item).strip() for item in v if str(item).strip()]
+            return sources or None
         return v  # type: ignore[no-any-return]
 
     @field_validator("approved_directory")

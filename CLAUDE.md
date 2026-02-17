@@ -28,17 +28,37 @@ poetry run mypy src
 ```
 
 ## 手动重启服务（macOS）
-“重启后有残留进程”的含义：新进程已经拉起，但旧的 bot 进程没有被正确回收，导致可能出现并发轮询、消息无响应或日志判断混乱。
+"重启后有残留进程"的含义：新进程已经拉起，但旧的 bot 进程没有被正确回收，导致可能出现并发轮询、消息无响应或日志判断混乱。
 
-推荐使用 `tmux` 的标准重启流程（避免残留）：
-1. 停掉旧会话：`tmux kill-session -t cli_tg_bot`（若不存在可忽略错误）。
-2. 新建独立会话并启动：`tmux new-session -d -s cli_tg_bot -c /Users/suqi3/PycharmProjects/cli-tg './scripts/restart-bot.sh'`。
-3. 验证进程唯一性：`ps -Ao pid,ppid,command | rg -i 'cli-tg-bot|claude-telegram-bot|src.main' | rg -v 'rg -i'`，确认只有一个 bot 主进程。
-4. 验证运行日志：`tmux capture-pane -t cli_tg_bot -p | tail -n 80`，确认持续出现 Telegram `getUpdates 200 OK` 且无异常栈。
+推荐使用 `tmux` 的标准重启流程（避免残留），**所有步骤必须连续执行，不得中断**：
 
-补充说明：
-- `./scripts/restart-bot.sh` 会执行 `pkill -f cli-tg` 后再 `poetry run claude-telegram-bot`，对 Claude CLI 与 Codex CLI 都生效。
-- 执行约束：默认不自动重启；只有用户明确要求“重启”时，才执行重启流程。
+```bash
+# 步骤 1: 停掉旧会话（忽略不存在的错误）
+tmux kill-session -t cli_tg_bot 2>/dev/null || true
+
+# 步骤 2: 等待进程完全退出，确保无残留
+sleep 2
+
+# 步骤 3: 二次确认 tmux 会话已销毁（防止竞争条件）
+tmux kill-session -t cli_tg_bot 2>/dev/null || true
+
+# 步骤 4: 新建独立会话并启动
+tmux new-session -d -s cli_tg_bot -c /Users/suqi3/PycharmProjects/cli-tg './scripts/restart-bot.sh'
+```
+
+启动后验证：
+```bash
+# 验证进程唯一性：确认只有一个 bot 主进程
+ps -Ao pid,ppid,command | rg -i 'cli-tg-bot|claude-telegram-bot|src.main' | rg -v 'rg -i'
+
+# 验证运行日志：确认持续出现 Telegram getUpdates 200 OK 且无异常栈
+tmux capture-pane -t cli_tg_bot -p | tail -n 80
+```
+
+重要约束：
+- **步骤 1-4 必须在同一次操作中连续执行**，不要在中间停下来等待用户确认。可以用 `&&` 串联或在一个 bash 调用中完成。
+- 执行约束：默认不自动重启；只有用户明确要求"重启"时，才执行重启流程。
+- `./scripts/restart-bot.sh` 会执行 `pkill` 停止旧进程后再 `poetry run claude-telegram-bot`，对 Claude CLI 与 Codex CLI 都生效。
 - 无响应排查顺序：先确认服务在线（`tmux` 会话、唯一进程、`getUpdates 200 OK`），再检查命令格式与路由。
 - 用户名一致性：`/engine@<bot_username>` 里的用户名必须与 Telegram `getMe` 返回一致；当前应为 `CodingSam_bot`，并保持 `.env` 的 `TELEGRAM_BOT_USERNAME` 同步。
 

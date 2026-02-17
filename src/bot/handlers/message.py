@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import binascii
+import re
 import time
 from collections import Counter
 from collections.abc import MutableMapping
@@ -54,6 +55,30 @@ _TEXT_FRAGMENT_WINDOW_SECONDS = 1.2
 _MEDIA_GROUP_WINDOW_SECONDS = 1.0
 _AGGREGATION_STATE_TTL_SECONDS = 30
 _CHAT_ACTION_HEARTBEAT_INTERVAL_SECONDS = 4.0
+_AUTO_IMAGE_ATTACHMENTS_LIMIT = 3
+_AUTO_IMAGE_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # Telegram bot document limit
+_AUTO_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_AUTO_IMAGE_PATH_PATTERN = re.compile(
+    r"(?P<path>(?:~|/|\.{1,2}/)?[^\s`\"'<>|]+?\.(?:png|jpe?g|webp|gif|bmp))",
+    re.IGNORECASE,
+)
+_AUTO_IMAGE_LINE_HINT_PATTERN = re.compile(
+    r"(?:文件路径|路径|path)\s*[:：]\s*(?P<path>[^\s`\"'<>|]+)",
+    re.IGNORECASE,
+)
+_IMAGE_GEN_GENERATE_COMMAND_PATTERN = re.compile(
+    r"image-gen(?:\.py)?[^\n\r]*\bgenerate\b",
+    re.IGNORECASE,
+)
+_PIL_DRAW_COMMAND_PATTERN = re.compile(
+    r"\bfrom\s+pil\s+import\b|\bimport\s+pil\b|\bpillow\b|\bimagedraw\b|image\.new\(",
+    re.IGNORECASE,
+)
+_IMAGE_GEN_FALLBACK_BLOCK_MESSAGE = (
+    "❌ 图片生成失败：上游生图接口未返回可解析的图片数据。\n\n"
+    "为避免误导，本次已中止，不再执行本地 PIL/Pillow 兜底绘制。\n"
+    "请稍后重试，或先检查 `image-gen` provider 配置后再试。"
+)
 _POSITIVE_REACTION_TOKENS = {
     "emoji:👍",
     "emoji:✅",
@@ -79,6 +104,286 @@ def _escape_md(text: str) -> str:
     for ch in ("_", "*", "`", "["):
         text = text.replace(ch, f"\\{ch}")
     return text
+
+
+def _clean_path_candidate(raw_value: str) -> str:
+    """Normalize a raw path-like token extracted from model output."""
+    candidate = str(raw_value or "").strip()
+    if not candidate:
+        return ""
+    candidate = candidate.strip("`'\"<>[](){}")
+    candidate = candidate.rstrip("，。,:;!?)]}>'\"`")
+    if "://" in candidate.lower():
+        return ""
+    return candidate
+
+
+def _iter_tool_path_hints(payload: Any) -> list[str]:
+    """Recursively collect path-like values from tool input payloads."""
+    results: list[str] = []
+    if isinstance(payload, str):
+        cleaned = _clean_path_candidate(payload)
+        if cleaned:
+            results.append(cleaned)
+        return results
+    if isinstance(payload, list):
+        for item in payload:
+            results.extend(_iter_tool_path_hints(item))
+        return results
+    if not isinstance(payload, dict):
+        return results
+
+    path_keys = {
+        "path",
+        "file_path",
+        "output_path",
+        "image_path",
+        "save_path",
+        "filename",
+        "target",
+    }
+    for key, value in payload.items():
+        normalized_key = str(key or "").strip().lower()
+        if normalized_key in path_keys:
+            results.extend(_iter_tool_path_hints(value))
+            continue
+        if isinstance(value, (dict, list)):
+            results.extend(_iter_tool_path_hints(value))
+    return results
+
+
+def _collect_candidate_image_paths_from_text(content: str) -> list[str]:
+    """Extract candidate image paths from assistant free-form text."""
+    candidates: list[str] = []
+    for line in str(content or "").splitlines():
+        line_match = _AUTO_IMAGE_LINE_HINT_PATTERN.search(line)
+        if line_match:
+            candidate = _clean_path_candidate(line_match.group("path"))
+            if candidate:
+                candidates.append(candidate)
+        for match in _AUTO_IMAGE_PATH_PATTERN.finditer(line):
+            candidate = _clean_path_candidate(match.group("path"))
+            if candidate:
+                candidates.append(candidate)
+    return candidates
+
+
+def _collect_candidate_image_paths_from_tools(tools_used: Any) -> list[str]:
+    """Extract candidate image paths from structured tool usage records."""
+    if not isinstance(tools_used, list):
+        return []
+    candidates: list[str] = []
+    for tool in tools_used:
+        if not isinstance(tool, dict):
+            continue
+        tool_input = tool.get("input")
+        if tool_input is None:
+            continue
+        candidates.extend(_iter_tool_path_hints(tool_input))
+    return candidates
+
+
+def _extract_tool_commands(tools_used: Any) -> list[str]:
+    """Extract shell commands from tool usage payloads across engine formats."""
+    if not isinstance(tools_used, list):
+        return []
+
+    commands: list[str] = []
+    for tool in tools_used:
+        if not isinstance(tool, dict):
+            continue
+
+        direct_command = tool.get("command")
+        if isinstance(direct_command, str):
+            normalized = direct_command.strip()
+            if normalized:
+                commands.append(normalized)
+                continue
+
+        tool_input = tool.get("input")
+        if isinstance(tool_input, dict):
+            nested_command = tool_input.get("command")
+            if isinstance(nested_command, str):
+                normalized = nested_command.strip()
+                if normalized:
+                    commands.append(normalized)
+
+    return commands
+
+
+def _is_local_image_fallback_after_image_gen(claude_response: Any | None) -> bool:
+    """Detect local PIL fallback after image-gen command execution."""
+    if claude_response is None:
+        return False
+
+    commands = _extract_tool_commands(getattr(claude_response, "tools_used", None))
+    if not commands:
+        return False
+
+    saw_image_gen_generate = any(
+        _IMAGE_GEN_GENERATE_COMMAND_PATTERN.search(command) for command in commands
+    )
+    if not saw_image_gen_generate:
+        return False
+
+    return any(_PIL_DRAW_COMMAND_PATTERN.search(command) for command in commands)
+
+
+def _enforce_no_local_image_fallback_for_image_gen(claude_response: Any | None) -> bool:
+    """Rewrite response when image-gen failed and agent switched to local PIL fallback."""
+    if not _is_local_image_fallback_after_image_gen(claude_response):
+        return False
+    if claude_response is None:
+        return False
+
+    try:
+        setattr(claude_response, "content", _IMAGE_GEN_FALLBACK_BLOCK_MESSAGE)
+    except Exception:
+        return False
+    return True
+
+
+def _resolve_image_paths_for_delivery(
+    candidates: list[str],
+    *,
+    working_directory: Path,
+    approved_directory: Path,
+    limit: int = _AUTO_IMAGE_ATTACHMENTS_LIMIT,
+) -> list[Path]:
+    """Resolve, validate and deduplicate image paths before Telegram delivery."""
+    approved_root = Path(approved_directory).expanduser().resolve()
+    work_root = Path(working_directory).expanduser().resolve()
+    resolved: list[Path] = []
+    seen: set[str] = set()
+
+    for raw_candidate in candidates:
+        if len(resolved) >= limit:
+            break
+        normalized = _clean_path_candidate(raw_candidate)
+        if not normalized:
+            continue
+
+        candidate_path = Path(normalized).expanduser()
+        if not candidate_path.is_absolute():
+            candidate_path = (work_root / candidate_path).resolve()
+        else:
+            candidate_path = candidate_path.resolve()
+
+        path_str = str(candidate_path)
+        if path_str in seen:
+            continue
+        seen.add(path_str)
+
+        if candidate_path.suffix.lower() not in _AUTO_IMAGE_SUFFIXES:
+            continue
+        if not candidate_path.exists() or not candidate_path.is_file():
+            continue
+        if not candidate_path.is_relative_to(approved_root):
+            logger.warning(
+                "Skip auto image delivery outside approved directory",
+                path=path_str,
+                approved_directory=str(approved_root),
+            )
+            continue
+        try:
+            size_bytes = candidate_path.stat().st_size
+        except OSError:
+            continue
+        if size_bytes > _AUTO_IMAGE_MAX_FILE_SIZE_BYTES:
+            logger.warning(
+                "Skip auto image delivery because file is too large",
+                path=path_str,
+                size_bytes=size_bytes,
+                max_size_bytes=_AUTO_IMAGE_MAX_FILE_SIZE_BYTES,
+            )
+            continue
+        resolved.append(candidate_path)
+
+    return resolved
+
+
+def _extract_generated_image_paths(
+    *,
+    claude_response: Any | None,
+    scope_state: dict[str, Any],
+    approved_directory: Path,
+) -> list[Path]:
+    """Collect generated image files from response content + tool traces."""
+    if claude_response is None:
+        return []
+
+    current_dir_raw = scope_state.get("current_directory", approved_directory)
+    try:
+        current_dir = Path(current_dir_raw)
+    except TypeError:
+        current_dir = Path(approved_directory)
+
+    content_candidates = _collect_candidate_image_paths_from_text(
+        str(getattr(claude_response, "content", "") or "")
+    )
+    tool_candidates = _collect_candidate_image_paths_from_tools(
+        getattr(claude_response, "tools_used", None)
+    )
+
+    return _resolve_image_paths_for_delivery(
+        [*content_candidates, *tool_candidates],
+        working_directory=current_dir,
+        approved_directory=Path(approved_directory),
+    )
+
+
+async def _send_generated_images_from_response(
+    *,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    claude_response: Any | None,
+    scope_state: dict[str, Any],
+    reply_to_message_id: Optional[int] = None,
+) -> int:
+    """Auto-send generated image files back to Telegram when detectable."""
+    telegram_message = getattr(update, "message", None)
+    if telegram_message is None:
+        return 0
+    reply_document = getattr(telegram_message, "reply_document", None)
+    if not callable(reply_document):
+        return 0
+
+    settings: Settings = context.bot_data["settings"]
+    image_paths = _extract_generated_image_paths(
+        claude_response=claude_response,
+        scope_state=scope_state,
+        approved_directory=settings.approved_directory,
+    )
+    if not image_paths:
+        return 0
+
+    sent_count = 0
+    for idx, image_path in enumerate(image_paths):
+        try:
+            with image_path.open("rb") as image_file:
+                await reply_document(
+                    document=image_file,
+                    filename=image_path.name,
+                    caption=(
+                        f"🖼 已回传生成图片：{image_path.name}" if idx == 0 else None
+                    ),
+                    reply_to_message_id=reply_to_message_id if idx == 0 else None,
+                )
+            sent_count += 1
+        except Exception as e:
+            logger.warning(
+                "Failed to send generated image back to Telegram",
+                path=str(image_path),
+                error=str(e),
+            )
+
+    if sent_count:
+        logger.info(
+            "Auto-delivered generated images to Telegram",
+            sent_count=sent_count,
+            user_id=getattr(getattr(update, "effective_user", None), "id", None),
+        )
+    return sent_count
 
 
 def _extract_tool_summary(tool_name: str, tool_input: dict) -> str:
@@ -1224,19 +1529,19 @@ def _build_collapsed_thinking_summary(
         return "\n".join(compact_lines)
 
     lines: list[str] = []
+    compact_context = _compact_context_tag(context_tag)
+    if compact_context:
+        lines.append(compact_context)
+
     model_line = _extract_resolved_model_line(all_progress_lines)
     if not model_line:
         candidate = str(fallback_model or "").strip()
         if candidate:
             model_line = f"🧠 *Using model:* {_escape_md(candidate)}"
     if model_line:
-        lines.append(model_line)
-
-    compact_context = _compact_context_tag(context_tag)
-    if compact_context:
         if lines:
             lines.append("")
-        lines.append(compact_context)
+        lines.append(model_line)
 
     if not lines:
         # Defensive fallback to avoid empty collapsed message.
@@ -1876,6 +2181,7 @@ async def handle_text_message(
 
         claude_response = None
         command_succeeded = False
+        blocked_local_image_fallback = False
         try:
             claude_response = await task
             command_succeeded = True
@@ -1895,6 +2201,16 @@ async def handle_text_message(
             _update_working_directory_from_claude_response(
                 claude_response, scope_state, settings, user_id
             )
+            blocked_local_image_fallback = (
+                _enforce_no_local_image_fallback_for_image_gen(claude_response)
+            )
+            if blocked_local_image_fallback:
+                logger.warning(
+                    "Blocked local PIL fallback after image-gen failure",
+                    user_id=user_id,
+                    scope_key=scope_key,
+                    engine=active_engine,
+                )
 
             # Log interaction to storage
             if storage:
@@ -2140,6 +2456,15 @@ async def handle_text_message(
                     bot=context.bot,
                     chat_type=getattr(update.effective_chat, "type", None),
                 )
+
+        if not blocked_local_image_fallback:
+            await _send_generated_images_from_response(
+                update=update,
+                context=context,
+                claude_response=claude_response,
+                scope_state=scope_state,
+                reply_to_message_id=input_message_id,
+            )
 
         # Update session info
         scope_state["last_message"] = message_text
@@ -2431,6 +2756,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         # Process with Claude
+        blocked_local_image_fallback = False
         try:
             claude_response = await cli_integration.run_command(
                 prompt=prompt,
@@ -2452,6 +2778,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _update_working_directory_from_claude_response(
                 claude_response, scope_state, settings, user_id
             )
+            blocked_local_image_fallback = (
+                _enforce_no_local_image_fallback_for_image_gen(claude_response)
+            )
+            if blocked_local_image_fallback:
+                logger.warning(
+                    "Blocked local PIL fallback after image-gen failure",
+                    user_id=user_id,
+                    engine=active_engine,
+                )
 
             # Format and send response
             from ..utils.formatting import ResponseFormatter
@@ -2503,6 +2838,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
                 if i < len(formatted_messages) - 1:
                     await asyncio.sleep(0.5)
+
+            if not blocked_local_image_fallback:
+                await _send_generated_images_from_response(
+                    update=update,
+                    context=context,
+                    claude_response=claude_response,
+                    scope_state=scope_state,
+                    reply_to_message_id=update.message.message_id,
+                )
 
         except Exception as e:
             await claude_progress_msg.edit_text(
@@ -2912,6 +3256,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
             # Process with Claude
             cli_image_files: list[Path] = []
+            blocked_local_image_fallback = False
             try:
                 # Build image data for multimodal input
                 images = []
@@ -3041,6 +3386,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 # Update session ID
                 scope_state["claude_session_id"] = claude_response.session_id
                 scope_state.pop("force_new_session", None)
+                blocked_local_image_fallback = (
+                    _enforce_no_local_image_fallback_for_image_gen(claude_response)
+                )
+                if blocked_local_image_fallback:
+                    logger.warning(
+                        "Blocked local PIL fallback after image-gen failure",
+                        user_id=user_id,
+                        engine=active_engine,
+                    )
 
                 # Format and send response
                 from ..utils.formatting import ResponseFormatter
@@ -3172,6 +3526,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
                     if i < len(formatted_messages) - 1:
                         await asyncio.sleep(0.5)
+
+                if not blocked_local_image_fallback:
+                    await _send_generated_images_from_response(
+                        update=update,
+                        context=context,
+                        claude_response=claude_response,
+                        scope_state=scope_state,
+                        reply_to_message_id=reply_target_message_id,
+                    )
 
             except Exception as e:
                 error_text = _format_error_message(str(e), engine=active_engine)

@@ -582,6 +582,48 @@ async def test_model_callback_sets_model_for_codex_engine(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_model_callback_for_claude_clears_session_and_forces_new(tmp_path):
+    """Claude model callback should reset active session to apply new model."""
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    user_id = 10063
+    scope_key = _scope_key(user_id, user_id)
+    permission_manager = SimpleNamespace(clear_session=MagicMock())
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        message=SimpleNamespace(
+            chat=SimpleNamespace(id=user_id), message_thread_id=None
+        ),
+        edit_message_text=AsyncMock(),
+    )
+    context = SimpleNamespace(
+        bot_data={
+            "settings": _build_settings(approved),
+            "permission_manager": permission_manager,
+        },
+        user_data={
+            "scope_state": {
+                scope_key: {
+                    ENGINE_STATE_KEY: "claude",
+                    "claude_session_id": "session-claude-old-1",
+                }
+            }
+        },
+    )
+
+    await handle_model_callback(query, "opus", context)
+
+    scope_state = context.user_data["scope_state"][scope_key]
+    assert scope_state["claude_model"] == "opus"
+    assert scope_state["claude_session_id"] is None
+    assert scope_state["force_new_session"] is True
+    permission_manager.clear_session.assert_called_once_with("session-claude-old-1")
+    rendered = query.edit_message_text.await_args.args[0]
+    assert "模型设置已更新" in rendered
+    assert "下一条消息将从新会话开始" in rendered
+
+
+@pytest.mark.asyncio
 async def test_engine_callback_switches_engine_and_clears_session(tmp_path):
     """Engine callback should switch active engine and clear prior session."""
     approved = tmp_path / "approved"

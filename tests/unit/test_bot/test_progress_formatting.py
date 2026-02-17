@@ -495,9 +495,9 @@ def test_build_collapsed_thinking_summary_keeps_model_and_context():
     )
 
     lines = collapsed.splitlines()
-    assert lines[0] == "🧠 *Using model:* o4-mini"
-    assert "⬜ `Codex CLI` | `cli-tg` | `019c6252`" in lines
+    assert lines[0] == "⬜ `Codex CLI` | `cli-tg` | `019c6252`"
     assert "🔋 Session context: `86.2%` remaining" in lines
+    assert "🧠 *Using model:* o4-mini" in lines
     assert "🔋 5h window: 97.0% remaining" not in collapsed
     assert "💭 Thinking done" not in collapsed
 
@@ -526,8 +526,8 @@ def test_build_collapsed_thinking_summary_uses_fallback_model_when_missing():
     )
 
     lines = collapsed.splitlines()
-    assert lines[0] == "🧠 *Using model:* gpt-5.3-codex"
-    assert "⬜ `Codex CLI` | `cli-tg` | `019c6252`" in lines
+    assert lines[0] == "⬜ `Codex CLI` | `cli-tg` | `019c6252`"
+    assert "🧠 *Using model:* gpt-5.3-codex" in lines
 
 
 def test_extract_model_from_model_usage_supports_nested_and_flat_payloads():

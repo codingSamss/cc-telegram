@@ -199,8 +199,32 @@ class TestClaudeSDKManager:
 
         assert "28.8k / 200k" in response.content
 
-    async def test_execute_command_sets_default_setting_sources(self, sdk_manager):
-        """Test SDK options include explicit setting sources for auth visibility."""
+    async def test_execute_command_leaves_setting_sources_unset_by_default(
+        self, config
+    ):
+        """Default behavior should keep setting_sources unset for compatibility."""
+        config.claude_setting_sources = None
+        sdk_manager = ClaudeSDKManager(config)
+        captured_options = []
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield _make_assistant_message("Test response")
+            yield _make_result_message()
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert len(captured_options) == 1
+        assert captured_options[0].setting_sources in (None, [])
+
+    async def test_execute_command_uses_configured_setting_sources(self, config):
+        """Configured setting sources should be passed into ClaudeAgentOptions."""
+        config.claude_setting_sources = ["user", "project", "local"]
+        sdk_manager = ClaudeSDKManager(config)
         captured_options = []
 
         async def mock_query(prompt, options):
@@ -216,6 +240,63 @@ class TestClaudeSDKManager:
 
         assert len(captured_options) == 1
         assert captured_options[0].setting_sources == ["user", "project", "local"]
+
+    async def test_execute_command_uses_user_settings_default_model(
+        self, sdk_manager, tmp_path, monkeypatch
+    ):
+        """When no /model override, use default model from ~/.claude/settings.json."""
+        home_dir = tmp_path / "home"
+        settings_dir = home_dir / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        (settings_dir / "settings.json").write_text(
+            '{"model":"opus"}',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(home_dir))
+        captured_options = []
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield _make_assistant_message("Test response")
+            yield _make_result_message()
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert len(captured_options) == 1
+        assert captured_options[0].model == "opus"
+
+    async def test_execute_command_prefers_explicit_model_over_settings_default(
+        self, sdk_manager, tmp_path, monkeypatch
+    ):
+        """Explicit /model should override settings default model."""
+        home_dir = tmp_path / "home"
+        settings_dir = home_dir / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        (settings_dir / "settings.json").write_text(
+            '{"model":"opus"}',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(home_dir))
+        captured_options = []
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield _make_assistant_message("Test response")
+            yield _make_result_message()
+
+        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+                model="sonnet",
+            )
+
+        assert len(captured_options) == 1
+        assert captured_options[0].model == "sonnet"
 
     async def test_execute_command_with_images_uses_async_iterable_prompt(
         self, sdk_manager
@@ -277,8 +358,11 @@ class TestClaudeSDKManager:
         assert len(stream_updates) > 0
         assert any(update.type == "assistant" for update in stream_updates)
 
-    async def test_execute_command_emits_init_stream_update(self, sdk_manager):
+    async def test_execute_command_emits_init_stream_update(
+        self, sdk_manager, tmp_path, monkeypatch
+    ):
         """SDK mode should emit an init update for thinking UI parity."""
+        monkeypatch.setenv("HOME", str(tmp_path))
         stream_updates = []
 
         async def stream_callback(update: StreamUpdate):

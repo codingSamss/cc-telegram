@@ -8,6 +8,7 @@ Features:
 """
 
 import asyncio
+import json
 import os
 import re
 import uuid
@@ -198,6 +199,86 @@ class ClaudeSDKManager:
         else:
             logger.info("No API key provided, using existing Claude CLI authentication")
 
+    def _resolve_setting_sources(self) -> Optional[List[str]]:
+        """Resolve optional setting_sources for ClaudeAgentOptions.
+
+        Some gateway environments reject explicit setting_sources values.
+        Keep default behavior (unset) unless the user explicitly configures it.
+        """
+        raw = getattr(self.config, "claude_setting_sources", None)
+        if not raw:
+            return None
+        resolved = [str(item).strip() for item in raw if str(item).strip()]
+        return resolved or None
+
+    def _resolve_requested_model(
+        self, model: Optional[str], working_directory: Path
+    ) -> Optional[str]:
+        """Resolve model for this request.
+
+        Priority:
+        1) explicit /model override from Telegram
+        2) default model from Claude settings (user/project/local sources)
+        """
+        explicit = str(model or "").strip()
+        if explicit:
+            return explicit
+        return self._resolve_default_model_from_settings(working_directory)
+
+    def _resolve_default_model_from_settings(
+        self, working_directory: Path
+    ) -> Optional[str]:
+        """Resolve default model from Claude settings files."""
+        source_order = self._resolve_setting_sources() or ["user", "project", "local"]
+        candidate_paths: list[Path] = []
+        cwd = Path(working_directory)
+
+        for source in source_order:
+            normalized = str(source or "").strip().lower()
+            if normalized == "user":
+                candidate_paths.append(Path.home() / ".claude" / "settings.json")
+            elif normalized == "project":
+                candidate_paths.append(cwd / ".claude" / "settings.json")
+            elif normalized == "local":
+                candidate_paths.append(cwd / ".claude" / "settings.local.json")
+
+        seen: set[Path] = set()
+        for path in candidate_paths:
+            resolved = path.expanduser().resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            model_name = self._read_model_from_settings_file(resolved)
+            if model_name:
+                return model_name
+        return None
+
+    def _read_model_from_settings_file(self, path: Path) -> Optional[str]:
+        """Read `model` from a Claude settings JSON file."""
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.debug(
+                "Failed to parse Claude settings JSON while resolving model",
+                path=str(path),
+                error=str(exc),
+            )
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        model_name = str(payload.get("model") or "").strip()
+        if not model_name:
+            return None
+
+        # "default/auto" means defer to CLI runtime selection.
+        if model_name.lower() in {"default", "auto"}:
+            return None
+        return model_name
+
     async def execute_command(
         self,
         prompt: str,
@@ -222,17 +303,20 @@ class ClaudeSDKManager:
         try:
             # Build Claude Agent options
             cli_path = find_claude_cli(self.config.claude_cli_path)
-            options = ClaudeAgentOptions(
-                max_turns=self.config.claude_max_turns,
-                cwd=str(working_directory),
-                allowed_tools=self.config.claude_allowed_tools,
-                cli_path=cli_path,
-                model=model,
-                # SDK 0.1.31 passes an empty --setting-sources when this is None,
-                # which can hide user auth/session settings and trigger
-                # "Not logged in · Please run /login" in bot runtime.
-                setting_sources=["user", "project", "local"],
-            )
+            requested_model = self._resolve_requested_model(model, working_directory)
+            options_kwargs: Dict[str, Any] = {
+                "max_turns": self.config.claude_max_turns,
+                "cwd": str(working_directory),
+                "allowed_tools": self.config.claude_allowed_tools,
+                "cli_path": cli_path,
+            }
+            if requested_model:
+                options_kwargs["model"] = requested_model
+            setting_sources = self._resolve_setting_sources()
+            if setting_sources is not None:
+                options_kwargs["setting_sources"] = setting_sources
+
+            options = ClaudeAgentOptions(**options_kwargs)
 
             # NOTE: permission_callback is NOT set on options here.
             # query() does not support can_use_tool with string prompts.
@@ -599,9 +683,7 @@ class ClaudeSDKManager:
                                 {
                                     "tool_use_id": getattr(block, "tool_use_id", None),
                                     "content": getattr(block, "content", None),
-                                    "is_error": bool(
-                                        getattr(block, "is_error", False)
-                                    ),
+                                    "is_error": bool(getattr(block, "is_error", False)),
                                 }
                             )
 
@@ -675,9 +757,7 @@ class ClaudeSDKManager:
             "inputTokens": sdk_usage.get("input_tokens", 0),
             "outputTokens": sdk_usage.get("output_tokens", 0),
             "cacheReadInputTokens": sdk_usage.get("cache_read_input_tokens", 0),
-            "cacheCreationInputTokens": sdk_usage.get(
-                "cache_creation_input_tokens", 0
-            ),
+            "cacheCreationInputTokens": sdk_usage.get("cache_creation_input_tokens", 0),
             "costUSD": cost,
         }
         if resolved_model:
@@ -686,9 +766,7 @@ class ClaudeSDKManager:
             if inferred_ctx:
                 usage_payload["contextWindow"] = inferred_ctx
                 usage_payload["contextWindowSource"] = "estimated"
-        return {
-            (resolved_model or "sdk"): usage_payload
-        }
+        return {(resolved_model or "sdk"): usage_payload}
 
     @staticmethod
     def _estimate_context_window_tokens(model_name: Optional[str]) -> Optional[int]:
@@ -696,7 +774,12 @@ class ClaudeSDKManager:
         if not model_name:
             return None
         lower = str(model_name).lower()
-        if "claude" in lower or "sonnet" in lower or "opus" in lower or "haiku" in lower:
+        if (
+            "claude" in lower
+            or "sonnet" in lower
+            or "opus" in lower
+            or "haiku" in lower
+        ):
             return 200_000
         return None
 
@@ -755,7 +838,9 @@ class ClaudeSDKManager:
 
         return content
 
-    def _extract_local_command_output_from_messages(self, messages: List[Message]) -> str:
+    def _extract_local_command_output_from_messages(
+        self, messages: List[Message]
+    ) -> str:
         """Extract <local-command-stdout> payload carried by UserMessage replay."""
         for message in reversed(messages):
             if not isinstance(message, UserMessage):
@@ -815,7 +900,9 @@ class ClaudeSDKManager:
                             tools_used.append(
                                 {
                                     "name": getattr(
-                                        block, "name", getattr(block, "tool_name", "unknown")
+                                        block,
+                                        "name",
+                                        getattr(block, "tool_name", "unknown"),
                                     ),
                                     "timestamp": current_time,
                                     "input": getattr(
@@ -893,15 +980,20 @@ class ClaudeSDKManager:
 
         try:
             cli_path = find_claude_cli(self.config.claude_cli_path)
-            options = ClaudeAgentOptions(
-                max_turns=self.config.claude_max_turns,
-                cwd=str(working_directory),
-                allowed_tools=self.config.claude_allowed_tools or [],
-                cli_path=cli_path,
-                model=model,
-                # Keep auth/session settings visible for client mode as well.
-                setting_sources=["user", "project", "local"],
-            )
+            requested_model = self._resolve_requested_model(model, working_directory)
+            options_kwargs: Dict[str, Any] = {
+                "max_turns": self.config.claude_max_turns,
+                "cwd": str(working_directory),
+                "allowed_tools": self.config.claude_allowed_tools or [],
+                "cli_path": cli_path,
+            }
+            if requested_model:
+                options_kwargs["model"] = requested_model
+            setting_sources = self._resolve_setting_sources()
+            if setting_sources is not None:
+                options_kwargs["setting_sources"] = setting_sources
+
+            options = ClaudeAgentOptions(**options_kwargs)
 
             if permission_callback:
                 options.can_use_tool = permission_callback

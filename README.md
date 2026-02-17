@@ -194,6 +194,7 @@ poetry run python -m src.main
 | `Rate limit exceeded` | 请求过于频繁 | 调整 `RATE_LIMIT_*` 配置 |
 | Bot 无响应 | Token 错误或进程未启动 | 检查 `TELEGRAM_BOT_TOKEN` 和进程状态 |
 | `Claude process error: exit code 1` | 常见于引擎/模型不匹配 | 先 `/engine claude`，再 `/model` 选 Claude 模型或执行 `/model default` |
+| `invalid claude code request` | SDK 显式 setting sources 与网关不兼容 | 保持 `CLAUDE_SETTING_SOURCES` 为空；若需要强制来源再设为 `user,project,local` |
 
 ## 开发命令
 
