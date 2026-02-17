@@ -1,4 +1,4 @@
-"""Main entry point for CLI TG."""
+"""Main entry point for CLITG."""
 
 import argparse
 import asyncio
@@ -114,11 +114,11 @@ def setup_logging(debug: bool = False) -> None:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="CLI TG",
+        description="CLITG",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument("--version", action="version", version=f"CLI TG {__version__}")
+    parser.add_argument("--version", action="version", version=f"CLITG {__version__}")
 
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
@@ -281,7 +281,7 @@ async def run_application(app: Dict[str, Any]) -> None:
 
     try:
         # Start the bot
-        logger.info("Starting CLI TG")
+        logger.info("Starting CLITG")
 
         # Run bot in background task
         bot_task = asyncio.create_task(bot.start())
@@ -340,7 +340,7 @@ async def main() -> None:
     setup_logging(debug=args.debug)
 
     logger = structlog.get_logger()
-    logger.info("Starting CLI TG", version=__version__)
+    logger.info("Starting CLITG", version=__version__)
 
     try:
         # Load configuration

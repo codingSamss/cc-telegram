@@ -1,4 +1,4 @@
-"""CLI TG.
+"""CLITG.
 
 A Telegram bot that provides remote access to Claude Code CLI, allowing developers
 to interact with their projects from anywhere through a secure, terminal-like

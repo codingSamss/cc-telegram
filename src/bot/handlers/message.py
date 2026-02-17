@@ -34,7 +34,7 @@ from ..utils.scope_state import (
     get_scope_state,
     get_scope_state_from_update,
 )
-from ..utils.telegram_send import send_message_resilient
+from ..utils.telegram_send import normalize_message_thread_id, send_message_resilient
 
 logger = structlog.get_logger()
 
@@ -53,6 +53,7 @@ _TEXT_FRAGMENT_START_LENGTH = 3000
 _TEXT_FRAGMENT_WINDOW_SECONDS = 1.2
 _MEDIA_GROUP_WINDOW_SECONDS = 1.0
 _AGGREGATION_STATE_TTL_SECONDS = 30
+_CHAT_ACTION_HEARTBEAT_INTERVAL_SECONDS = 4.0
 _POSITIVE_REACTION_TOKENS = {
     "emoji:👍",
     "emoji:✅",
@@ -156,6 +157,40 @@ def _engine_badge(engine: str | None) -> str:
     normalized = normalize_cli_engine(engine)
     marker = "⬜" if normalized == ENGINE_CODEX else "🟧"
     return f"{marker} `{_engine_label(normalized)} CLI`"
+
+
+async def _send_chat_action_heartbeat(
+    *,
+    message: Any,
+    action: str,
+    stop_event: asyncio.Event,
+    interval_seconds: float = _CHAT_ACTION_HEARTBEAT_INTERVAL_SECONDS,
+    message_thread_id: Optional[int] = None,
+    chat_type: Optional[str] = None,
+) -> None:
+    """Keep Telegram chat action visible during long-running processing."""
+    wait_timeout = max(interval_seconds, 0.1)
+    normalized_thread_id = normalize_message_thread_id(
+        message_thread_id, chat_type=chat_type
+    )
+    while not stop_event.is_set():
+        try:
+            if normalized_thread_id is None:
+                await message.chat.send_action(action)
+            else:
+                await message.chat.send_action(
+                    action, message_thread_id=normalized_thread_id
+                )
+        except Exception as e:
+            logger.debug(
+                "Failed to send chat action heartbeat",
+                action=action,
+                error=str(e),
+            )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_timeout)
+        except asyncio.TimeoutError:
+            continue
 
 
 def _is_claude_model_name(value: str | None) -> bool:
@@ -790,11 +825,9 @@ async def _format_progress_update(update_obj) -> Optional[str]:
     elif update_obj.type == "progress":
         # Handle progress updates
         metadata = update_obj.metadata or {}
-        if (
-            metadata.get("engine") == "codex"
-            and metadata.get("subtype") == "turn.started"
-        ):
-            return "🤖 *Codex is working...*"
+        if metadata.get("subtype") == "turn.started":
+            engine_label = _stream_engine_label(update_obj)
+            return f"🤖 *{engine_label} is working...*"
         if metadata.get("item_type") == "command_execution":
             status = str(metadata.get("status") or "").strip().lower()
             command = str(metadata.get("command") or update_obj.content or "").strip()
@@ -1499,6 +1532,9 @@ async def handle_text_message(
         "Processing text message", user_id=user_id, message_length=len(message_text)
     )
 
+    typing_stop_event = asyncio.Event()
+    typing_heartbeat_task: Optional[asyncio.Task] = None
+
     try:
         # Check rate limit with estimated cost for text processing
         estimated_cost = _estimate_text_processing_cost(message_text)
@@ -1519,8 +1555,16 @@ async def handle_text_message(
             )
             return
 
-        # Send typing indicator
-        await update.message.chat.send_action("typing")
+        # Keep typing indicator alive while the thinking/progress flow is running.
+        typing_heartbeat_task = asyncio.create_task(
+            _send_chat_action_heartbeat(
+                message=update.message,
+                action="typing",
+                stop_event=typing_stop_event,
+                message_thread_id=getattr(update.message, "message_thread_id", None),
+                chat_type=getattr(update.effective_chat, "type", None),
+            )
+        )
 
         # Resolve active CLI engine integration and storage from context
         active_engine, cli_integration = get_cli_integration(
@@ -2195,6 +2239,14 @@ async def handle_text_message(
             )
 
         logger.error("Error processing text message", error=str(e), user_id=user_id)
+    finally:
+        typing_stop_event.set()
+        if typing_heartbeat_task and not typing_heartbeat_task.done():
+            typing_heartbeat_task.cancel()
+            try:
+                await typing_heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2558,35 +2610,89 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 bot_data=context.bot_data,
                 scope_state=scope_state,
             )
+            progress_lines: list[str] = []
+            progress_merge_keys: list[Optional[str]] = []
+            stream_mode = False
+            pending_stream_text: Optional[str] = None
+            stream_flush_task: Optional[asyncio.Task] = None
+            stream_flush_lock = asyncio.Lock()
+            stream_loop = asyncio.get_event_loop()
+            debounce_ms = int(getattr(settings, "stream_render_debounce_ms", 1000) or 0)
+            min_edit_interval_ms = int(
+                getattr(settings, "stream_render_min_edit_interval_ms", 1000) or 0
+            )
+            debounce_seconds = max(debounce_ms, 0) / 1000
+            min_edit_interval_seconds = max(min_edit_interval_ms, 0) / 1000
+            last_status_edit_ts = stream_loop.time()
 
-            async def _set_image_status(text: str) -> None:
-                nonlocal progress_msg, last_status_text
-                bubble_text = _with_engine_badge(text, active_engine)
+            async def _edit_progress_message(rendered_text: str) -> None:
+                nonlocal progress_msg, last_status_text, last_status_edit_ts
 
-                if bubble_text == last_status_text:
+                if rendered_text == last_status_text:
                     return
-
-                last_status_text = bubble_text
                 try:
                     await progress_msg.edit_text(
-                        bubble_text,
+                        rendered_text,
                         parse_mode="Markdown",
                         reply_markup=cancel_keyboard,
                     )
+                    last_status_text = rendered_text
+                    last_status_edit_ts = stream_loop.time()
                 except Exception as e:
+                    if _is_noop_edit_error(e):
+                        last_status_text = rendered_text
+                        last_status_edit_ts = stream_loop.time()
+                        return
+
+                    fallback_error: Exception | None = None
+                    timeout_error = _is_timeout_error(e)
+                    try:
+                        await progress_msg.edit_text(
+                            rendered_text,
+                            reply_markup=cancel_keyboard,
+                        )
+                        last_status_text = rendered_text
+                        last_status_edit_ts = stream_loop.time()
+                        return
+                    except Exception as exc:
+                        fallback_error = exc
+                        if _is_noop_edit_error(exc):
+                            last_status_text = rendered_text
+                            last_status_edit_ts = stream_loop.time()
+                            return
+                        timeout_error = timeout_error or _is_timeout_error(exc)
+
+                    if timeout_error:
+                        try:
+                            await progress_msg.edit_reply_markup(reply_markup=None)
+                        except Exception:
+                            pass
+                        progress_msg = await _reply_text_resilient(
+                            progress_msg,
+                            rendered_text,
+                            parse_mode="Markdown",
+                            reply_markup=cancel_keyboard,
+                        )
+                        last_status_text = rendered_text
+                        last_status_edit_ts = stream_loop.time()
+                        return
+
                     logger.warning(
                         "Failed to update image status message",
                         error=str(e),
+                        fallback_error=str(fallback_error) if fallback_error else None,
                         user_id=user_id,
                     )
                     try:
                         progress_msg = await _reply_text_resilient(
                             update.message,
-                            bubble_text,
+                            rendered_text,
                             parse_mode="Markdown",
                             reply_to_message_id=reply_target_message_id,
                             reply_markup=cancel_keyboard,
                         )
+                        last_status_text = rendered_text
+                        last_status_edit_ts = stream_loop.time()
                     except Exception as send_error:
                         logger.warning(
                             "Failed to send fallback image status message",
@@ -2594,11 +2700,90 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             user_id=user_id,
                         )
 
+            async def _set_image_status(
+                text: str, *, force_when_streaming: bool = False
+            ) -> None:
+                bubble_text = _with_engine_badge(text, active_engine)
+                if stream_mode and not force_when_streaming:
+                    return
+                await _edit_progress_message(bubble_text)
+
+            async def _flush_pending_stream(force: bool = False) -> None:
+                nonlocal pending_stream_text
+
+                async with stream_flush_lock:
+                    if not pending_stream_text:
+                        return
+
+                    now = stream_loop.time()
+                    wait_seconds = 0.0
+                    if not force:
+                        wait_seconds = max(
+                            0.0, min_edit_interval_seconds - (now - last_status_edit_ts)
+                        )
+                    if wait_seconds > 0:
+                        await asyncio.sleep(wait_seconds)
+
+                    text_to_send = pending_stream_text
+                    if not text_to_send:
+                        return
+                    pending_stream_text = None
+                    await _edit_progress_message(text_to_send)
+
+            def _schedule_stream_flush() -> None:
+                nonlocal stream_flush_task
+
+                if stream_flush_task and not stream_flush_task.done():
+                    return
+
+                async def _runner() -> None:
+                    try:
+                        if debounce_seconds > 0:
+                            await asyncio.sleep(debounce_seconds)
+                        await _flush_pending_stream(force=False)
+                    except asyncio.CancelledError:
+                        return
+
+                stream_flush_task = asyncio.create_task(_runner())
+
+            async def _cancel_stream_flush_task() -> None:
+                nonlocal stream_flush_task
+                if stream_flush_task and not stream_flush_task.done():
+                    stream_flush_task.cancel()
+                    try:
+                        await stream_flush_task
+                    except asyncio.CancelledError:
+                        pass
+                stream_flush_task = None
+
             async def _image_stream_handler(update_obj) -> None:
+                nonlocal stream_mode, pending_stream_text
                 try:
                     progress_text = await _format_progress_update(update_obj)
                     if not progress_text:
                         return
+
+                    stream_mode = True
+                    merge_key = _get_stream_merge_key(update_obj)
+                    _append_progress_line_with_merge(
+                        progress_lines=progress_lines,
+                        progress_merge_keys=progress_merge_keys,
+                        progress_text=progress_text,
+                        merge_key=merge_key,
+                    )
+                    full_text = _with_engine_badge(
+                        "\n".join(progress_lines), active_engine
+                    )
+                    while len(full_text) > 3800 and progress_lines:
+                        progress_lines.pop(0)
+                        if progress_merge_keys:
+                            progress_merge_keys.pop(0)
+                        full_text = _with_engine_badge(
+                            "\n".join(progress_lines), active_engine
+                        )
+                    if full_text == last_status_text:
+                        return
+                    pending_stream_text = full_text
 
                     # Keep behavior aligned with text flow:
                     # assistant plain content is not part of thinking details.
@@ -2608,6 +2793,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         and not update_obj.tool_calls
                     ):
                         thinking_lines.append(progress_text)
+
+                    if _is_high_priority_stream_update(update_obj):
+                        await _cancel_stream_flush_task()
+                        await _flush_pending_stream(force=True)
+                    else:
+                        _schedule_stream_flush()
                 except Exception as e:
                     logger.warning(
                         "Failed to collect image stream progress",
@@ -2794,10 +2985,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
                 try:
                     claude_response = await image_task
+                    await _cancel_stream_flush_task()
+                    await _flush_pending_stream(force=True)
                     if task_registry:
                         await task_registry.complete(user_id, scope_key=scope_key)
                 except asyncio.CancelledError:
                     logger.info("Image Claude task cancelled by user", user_id=user_id)
+                    await _cancel_stream_flush_task()
                     if thinking_lines:
                         summary_text = "[Cancelled] " + _generate_thinking_summary(
                             thinking_lines
@@ -2835,10 +3029,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             pass
                     return
                 except Exception:
+                    await _cancel_stream_flush_task()
                     if task_registry:
                         await task_registry.fail(user_id, scope_key=scope_key)
                     raise
                 finally:
+                    await _cancel_stream_flush_task()
                     if task_registry:
                         await task_registry.remove(user_id, scope_key=scope_key)
 
@@ -2849,9 +3045,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 # Format and send response
                 from ..utils.formatting import ResponseFormatter
 
-                await _set_image_status(
-                    _build_image_stage_status(6, "正在整理回复内容...")
-                )
+                if not stream_mode:
+                    await _set_image_status(
+                        _build_image_stage_status(6, "正在整理回复内容..."),
+                        force_when_streaming=True,
+                    )
                 formatter = ResponseFormatter(settings)
                 formatted_messages = formatter.format_claude_response(
                     claude_response.content
@@ -2859,6 +3057,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
                 # Build context tag for image response
                 img_codex_snapshot = None
+                img_rate_limit_summary: Optional[str] = None
+                img_session_context_summary: Optional[str] = None
                 if active_engine == ENGINE_CODEX:
                     img_sid = str(scope_state.get("claude_session_id") or "").strip()
                     if img_sid:
@@ -2869,11 +3069,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             img_codex_snapshot = (
                                 SessionService._probe_codex_session_snapshot(img_sid)
                             )
+                if img_codex_snapshot:
+                    img_session_context_summary = _build_session_context_summary(
+                        img_codex_snapshot
+                    )
+                    img_rate_limit_summary = format_rate_limit_summary(
+                        img_codex_snapshot.get("rate_limits")
+                    )
                 img_context_tag = _build_context_tag(
                     scope_state=scope_state,
                     approved_directory=settings.approved_directory,
                     active_engine=active_engine,
                     session_id=scope_state.get("claude_session_id"),
+                    session_context_summary=img_session_context_summary,
+                    rate_limit_summary=img_rate_limit_summary,
                 )
                 img_fallback_model = _resolve_collapsed_fallback_model(
                     active_engine=active_engine,

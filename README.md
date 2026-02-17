@@ -1,4 +1,4 @@
-# CLI TG
+# CLITG
 
 Telegram Bot for Claude Code - 通过 Telegram 远程操控 Claude Code，支持 Claude/Codex 双引擎切换、多会话、图片分析、MCP 集成、流式输出。
 

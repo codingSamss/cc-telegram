@@ -49,7 +49,7 @@ def test_build_new_session_message_for_command_with_previous_session():
         for_callback=False,
     )
 
-    assert "New Claude Code Session" in message.text
+    assert "New AI Session" in message.text
     assert "project/" in message.text
     assert "Previous session `session-...` cleared" in message.text
     assert message.keyboard is not None
@@ -70,6 +70,21 @@ def test_build_new_session_message_for_callback():
     assert "Ready to help you code!" in message.text
     assert message.keyboard is not None
     assert message.keyboard[1][0][1] == "action:quick_actions"
+
+
+def test_build_new_session_message_uses_active_engine_title():
+    """New-session title should follow active engine when provided."""
+    service = SessionInteractionService()
+
+    message = service.build_new_session_message(
+        current_dir=Path("/tmp/project"),
+        approved_directory=Path("/tmp"),
+        previous_session_id=None,
+        for_callback=False,
+        active_engine="codex",
+    )
+
+    assert "New Codex Session" in message.text
 
 
 def test_build_end_no_active_message_for_callback():

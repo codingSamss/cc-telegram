@@ -112,7 +112,7 @@ class SessionExporter:
         lines = []
 
         # Header
-        lines.append(f"# Claude Code Session Export")
+        lines.append(f"# CLITG Session Export")
         lines.append(f"\n**Session ID:** `{session['id']}`")
         lines.append(f"**Created:** {session['created_at']}")
         if session.get("updated_at"):
@@ -187,7 +187,7 @@ class SessionExporter:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Code Session - {session['id'][:8]}</title>
+    <title>CLITG Session - {session['id'][:8]}</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

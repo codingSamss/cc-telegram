@@ -3,6 +3,7 @@
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -30,12 +31,17 @@ from ..utils.command_menu import sync_chat_command_menu
 from ..utils.recent_projects import build_recent_projects_message, scan_recent_projects
 from ..utils.resume_ui import build_resume_project_selector
 from ..utils.scope_state import get_scope_state_from_update
-from ..utils.telegram_send import is_markdown_parse_error, send_message_resilient
+from ..utils.telegram_send import (
+    is_markdown_parse_error,
+    normalize_message_thread_id,
+    send_message_resilient,
+)
 from ..utils.ui_adapter import build_reply_markup_from_spec
 from .message import build_permission_handler
 
 logger = structlog.get_logger()
 _PARSE_MODE_UNSET = object()
+_CHAT_ACTION_HEARTBEAT_INTERVAL_SECONDS = 4.0
 
 
 async def _reply_update_message_resilient(
@@ -119,6 +125,43 @@ async def _edit_message_resilient(
                     return None
                 raise
         raise
+
+
+async def _send_chat_action_heartbeat(
+    *,
+    bot: Any,
+    chat_id: int,
+    action: str,
+    stop_event: asyncio.Event,
+    interval_seconds: float = _CHAT_ACTION_HEARTBEAT_INTERVAL_SECONDS,
+    message_thread_id: int | None = None,
+    chat_type: str | None = None,
+) -> None:
+    """Keep Telegram chat action visible during long-running command handling."""
+    send_chat_action = getattr(bot, "send_chat_action", None)
+    if not callable(send_chat_action):
+        return
+
+    wait_timeout = max(interval_seconds, 0.1)
+    normalized_thread_id = normalize_message_thread_id(
+        message_thread_id, chat_type=chat_type
+    )
+    while not stop_event.is_set():
+        try:
+            send_kwargs: dict[str, Any] = {"chat_id": chat_id, "action": action}
+            if normalized_thread_id is not None:
+                send_kwargs["message_thread_id"] = normalized_thread_id
+            await send_chat_action(**send_kwargs)
+        except Exception as e:
+            logger.debug(
+                "Failed to send command chat action heartbeat",
+                action=action,
+                error=str(e),
+            )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_timeout)
+        except asyncio.TimeoutError:
+            continue
 
 
 def _get_or_create_resume_token_manager(context: ContextTypes.DEFAULT_TYPE):
@@ -351,7 +394,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         status_button_action = "action:context"
 
     welcome_message = (
-        f"👋 Welcome to CLI TG, {user.first_name}!\n\n"
+        f"👋 Welcome to CLITG, {user.first_name}!\n\n"
         f"🤖 I help you access CLI coding agents remotely through Telegram.\n\n"
         f"**Available Commands:**\n"
         f"• `/help` - Show detailed help\n"
@@ -437,7 +480,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         model_line = "• `/model` - View current model\n"
 
     help_text = (
-        "🤖 **CLI TG Help**\n\n"
+        "🤖 **CLITG Help**\n\n"
         "**Navigation Commands:**\n"
         "• `/ls` - List files and directories\n"
         "• `/cd <directory>` - Change to directory\n"
@@ -664,11 +707,13 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     reset_result = session_lifecycle.start_new_session(scope_state)
     old_session_id = reset_result.old_session_id
+    active_engine = get_active_cli_engine(scope_state)
     session_message = session_interaction.build_new_session_message(
         current_dir=current_dir,
         approved_directory=settings.approved_directory,
         previous_session_id=old_session_id,
         for_callback=False,
+        active_engine=active_engine,
     )
 
     await _reply_update_message_resilient(
@@ -710,6 +755,8 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     default_prompt = "Please continue where we left off"
 
     current_dir = scope_state.get("current_directory", settings.approved_directory)
+    typing_stop_event = asyncio.Event()
+    typing_heartbeat_task: asyncio.Task[None] | None = None
 
     try:
         if not cli_integration:
@@ -717,6 +764,21 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 update, context, session_interaction.get_integration_unavailable_text()
             )
             return
+
+        chat_id = getattr(update.effective_chat, "id", None)
+        if isinstance(chat_id, int):
+            typing_heartbeat_task = asyncio.create_task(
+                _send_chat_action_heartbeat(
+                    bot=context.bot,
+                    chat_id=chat_id,
+                    action="typing",
+                    stop_event=typing_stop_event,
+                    message_thread_id=getattr(
+                        update.effective_message, "message_thread_id", None
+                    ),
+                    chat_type=getattr(update.effective_chat, "type", None),
+                )
+            )
 
         # Check if there's an existing session in user context
         claude_session_id = session_lifecycle.get_active_session_id(scope_state)
@@ -833,6 +895,14 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 args=context.args or [],
                 success=False,
             )
+    finally:
+        typing_stop_event.set()
+        if typing_heartbeat_task and not typing_heartbeat_task.done():
+            typing_heartbeat_task.cancel()
+            try:
+                await typing_heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

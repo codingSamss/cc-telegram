@@ -107,6 +107,20 @@ async def test_progress_turn_started_renders_codex_working_line():
 
 
 @pytest.mark.asyncio
+async def test_progress_turn_started_renders_claude_working_line():
+    """Claude turn.started should render the same style working status line."""
+    update = _FakeUpdate(
+        type="progress",
+        content="Claude turn started",
+        metadata={"subtype": "turn.started", "engine": "claude"},
+    )
+
+    text = await _format_progress_update(update)
+
+    assert text == "🤖 *Claude is working...*"
+
+
+@pytest.mark.asyncio
 async def test_progress_command_execution_renders_compact_running_line():
     """Codex command execution updates should render compact command status."""
     update = _FakeUpdate(

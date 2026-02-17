@@ -1,7 +1,7 @@
 """Application-wide constants."""
 
 # Version info
-APP_NAME = "CLI TG"
+APP_NAME = "CLITG"
 APP_DESCRIPTION = "Telegram bot for remote CLI coding agent access"
 
 # Default limits

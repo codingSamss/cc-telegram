@@ -386,6 +386,16 @@ class SessionInteractionService:
         except ValueError:
             return str(current_dir)
 
+    @staticmethod
+    def _new_session_title(active_engine: Optional[str]) -> str:
+        """Render new-session title by active engine with neutral fallback."""
+        normalized = str(active_engine or "").strip().lower()
+        if normalized == "claude":
+            return "New Claude Session"
+        if normalized == "codex":
+            return "New Codex Session"
+        return "New AI Session"
+
     def get_integration_unavailable_text(self) -> str:
         """Return standard unavailable message."""
         return self._INTEGRATION_UNAVAILABLE_TEXT
@@ -591,12 +601,14 @@ class SessionInteractionService:
         approved_directory: Path,
         previous_session_id: Optional[str],
         for_callback: bool,
+        active_engine: Optional[str] = None,
     ) -> SessionInteractionMessage:
         """Build new-session message and actions for command/callback."""
         relative_path = self._relative_path_label(current_dir, approved_directory)
+        title = self._new_session_title(active_engine)
         if for_callback:
             text = (
-                "🆕 **New Claude Code Session**\n\n"
+                f"🆕 **{title}**\n\n"
                 f"📂 Working directory: `{relative_path}`\n\n"
                 "Ready to help you code! Send me a message to get started:"
             )
@@ -607,7 +619,7 @@ class SessionInteractionService:
                     f"\n🗑️ Previous session `{previous_session_id[:8]}...` cleared."
                 )
             text = (
-                "🆕 **New Claude Code Session**\n\n"
+                f"🆕 **{title}**\n\n"
                 f"📂 Working directory: `{relative_path}`{cleared_info}\n\n"
                 "Context has been cleared. Send a message to start fresh, "
                 "or use the buttons below:"
