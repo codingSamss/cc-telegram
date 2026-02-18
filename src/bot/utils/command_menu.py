@@ -32,6 +32,7 @@ COMMAND_MENU_SPECS: tuple[MenuCommandSpec, ...] = (
     MenuCommandSpec("ls", "List files in current directory"),
     MenuCommandSpec("git", "Git repository commands"),
     MenuCommandSpec("export", "Export current session"),
+    MenuCommandSpec("provider", "Switch API provider (cc-switch)"),
     MenuCommandSpec("help", "Show available commands"),
 )
 

@@ -551,6 +551,7 @@ async def handle_callback_query(
             "resume": handle_resume_callback,
             "model": handle_model_callback,
             "engine": handle_engine_callback,
+            "provider": handle_provider_callback,
         }
 
         handler = handlers.get(action)
@@ -1341,6 +1342,96 @@ async def handle_engine_callback(
             command="engine_callback",
             args=[requested_engine],
             success=True,
+        )
+
+
+async def handle_provider_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle provider switch callback from /provider selector."""
+    from ..utils.cc_switch import CCSwitchManager
+
+    settings: Settings = context.bot_data["settings"]
+    user_id = query.from_user.id
+
+    # Permission check
+    if settings.allowed_users and user_id not in settings.allowed_users:
+        await _edit_query_message_resilient(query, "无权限执行供应商切换。")
+        return
+
+    cc_switch: CCSwitchManager | None = context.bot_data.get("cc_switch_manager")
+    if not cc_switch or not cc_switch.is_available():
+        await _edit_query_message_resilient(query, "cc-switch 不可用。")
+        return
+
+    if not param or not param.startswith("switch:"):
+        await _edit_query_message_resilient(
+            query,
+            "无效的供应商切换操作，请重新执行 `/provider`。",
+            parse_mode="Markdown",
+        )
+        return
+
+    provider_id = param.split(":", 1)[1]
+
+    # Check if already current
+    current = await cc_switch.get_current_provider("claude")
+    if current and current.id == provider_id:
+        await _edit_query_message_resilient(
+            query,
+            f"当前已经是 `{current.name}` 供应商。",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Execute switch
+    result = await cc_switch.switch_provider(provider_id, "claude")
+
+    if result.status == "OK":
+        # Invalidate all sessions: clear current scope and bump generation
+        _, scope_state = _get_scope_state_for_query(query, context)
+        old_session_id = scope_state.get("claude_session_id")
+        scope_state["claude_session_id"] = None
+        scope_state["session_started"] = True
+        scope_state["force_new_session"] = True
+        if old_session_id:
+            permission_manager = context.bot_data.get("permission_manager")
+            if permission_manager:
+                permission_manager.clear_session(old_session_id)
+
+        url_display = result.base_url or "N/A"
+        await _edit_query_message_resilient(
+            query,
+            f"**API 供应商已切换**\n\n"
+            f"供应商：`{result.provider_name}`\n"
+            f"Base URL：`{url_display}`\n\n"
+            "已清空当前会话，下一次请求将使用新供应商。",
+            parse_mode="Markdown",
+        )
+    elif result.status == "DEGRADED":
+        await _edit_query_message_resilient(
+            query,
+            f"**供应商切换异常（DEGRADED）**\n\n"
+            f"错误：`{result.error}`\n\n"
+            "供应商切换功能已禁用，需要手动修复。",
+            parse_mode="Markdown",
+        )
+    else:
+        await _edit_query_message_resilient(
+            query,
+            f"**供应商切换失败**\n\n"
+            f"错误：`{result.error}`\n\n"
+            "请稍后重试或检查 cc-switch 配置。",
+            parse_mode="Markdown",
+        )
+
+    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    if audit_logger:
+        await audit_logger.log_command(
+            user_id=user_id,
+            command="provider_callback",
+            args=[provider_id],
+            success=(result.status == "OK"),
         )
 
 

@@ -493,6 +493,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{status_line}\n"
         f"{status_alias_line}\n"
         "• `/engine [claude|codex]` - Switch active CLI engine\n"
+        "• `/provider` - Switch API provider (cc-switch)\n"
         f"{model_line}"
         "• `/export` - Export session history\n"
         "• `/actions` - Show context-aware quick actions\n"
@@ -681,6 +682,74 @@ async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             command="engine",
             args=[requested_engine],
             success=True,
+        )
+
+
+async def switch_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /provider command to switch cc-switch API provider."""
+    from ..utils.cc_switch import CCSwitchManager
+
+    user_id = update.effective_user.id
+    settings: Settings = context.bot_data["settings"]
+    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+
+    # Permission check: restrict to allowed users
+    if settings.allowed_users and user_id not in settings.allowed_users:
+        await _reply_update_message_resilient(
+            update, context, "无权限执行供应商切换。"
+        )
+        return
+
+    cc_switch: CCSwitchManager | None = context.bot_data.get("cc_switch_manager")
+    if not cc_switch or not cc_switch.is_available():
+        await _reply_update_message_resilient(
+            update,
+            context,
+            "cc-switch 未安装或数据库不存在。\n"
+            "请先安装 cc-switch 桌面端并配置供应商。",
+        )
+        return
+
+    providers = await cc_switch.list_providers("claude")
+    if not providers:
+        await _reply_update_message_resilient(
+            update, context, "未找到 Claude 供应商配置。"
+        )
+        return
+
+    # Build inline keyboard
+    buttons = []
+    for p in providers:
+        label = p.name
+        if p.is_current:
+            label = f"[当前] {label}"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"provider:switch:{p.id}",
+                )
+            ]
+        )
+
+    current = next((p for p in providers if p.is_current), None)
+    current_name = current.name if current else "未知"
+    current_url = current.base_url or "未知" if current else "未知"
+
+    await _reply_update_message_resilient(
+        update,
+        context,
+        f"**API 供应商切换**\n\n"
+        f"当前供应商：`{current_name}`\n"
+        f"Base URL：`{current_url}`\n\n"
+        "点击下方按钮切换供应商：",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+    if audit_logger:
+        await audit_logger.log_command(
+            user_id=user_id, command="provider", args=[], success=True
         )
 
 

@@ -57,7 +57,7 @@ tmux capture-pane -t cli_tg_bot -p | tail -n 80
 
 重要约束：
 - **步骤 1-4 必须在同一次操作中连续执行**，不要在中间停下来等待用户确认。可以用 `&&` 串联或在一个 bash 调用中完成。
-- 执行约束：默认不自动重启；只有用户明确要求"重启"时，才执行重启流程。
+- 执行约束：修改 cli-tg 代码后**不要主动重启服务**，必须等用户明确说"重启"才执行重启流程。
 - `./scripts/restart-bot.sh` 会执行 `pkill` 停止旧进程后再 `poetry run claude-telegram-bot`，对 Claude CLI 与 Codex CLI 都生效。
 - 无响应排查顺序：先确认服务在线（`tmux` 会话、唯一进程、`getUpdates 200 OK`），再检查命令格式与路由。
 - 用户名一致性：`/engine@<bot_username>` 里的用户名必须与 Telegram `getMe` 返回一致；当前应为 `CodingSam_bot`，并保持 `.env` 的 `TELEGRAM_BOT_USERNAME` 同步。

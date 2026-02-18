@@ -164,6 +164,7 @@ class ClaudeCodeBot:
             ("resume", command.resume_command),
             ("model", command.model_command),
             ("codexdiag", command.codex_diag_command),
+            ("provider", command.switch_provider),
         ]
 
         for cmd, handler in handlers:

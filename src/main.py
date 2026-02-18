@@ -45,6 +45,8 @@ from src.services import (
 from src.storage.facade import Storage
 from src.storage.session_storage import SQLiteSessionStorage
 
+from src.bot.utils.cc_switch import CCSwitchManager
+
 _TELEGRAM_BOT_TOKEN_IN_URL_RE = re.compile(
     r"(https?://api\.telegram\.org/bot)([^/\s]+)"
 )
@@ -229,6 +231,14 @@ async def create_application(config: Settings) -> Dict[str, Any]:
                 "ENABLE_CODEX_CLI is true but codex binary not found; skip codex adapter"
             )
 
+    # Initialize cc-switch provider manager
+    cc_switch_manager = CCSwitchManager()
+    if cc_switch_manager.is_available():
+        logger.info("cc-switch available, running startup consistency check")
+        await cc_switch_manager.startup_consistency_check()
+    else:
+        logger.info("cc-switch not available, provider switching disabled")
+
     # Create bot with all dependencies
     dependencies = {
         "auth_manager": auth_manager,
@@ -244,6 +254,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "event_service": event_service,
         "session_service": session_service,
         "cli_integrations": cli_integrations,
+        "cc_switch_manager": cc_switch_manager,
     }
 
     bot = ClaudeCodeBot(config, dependencies)
