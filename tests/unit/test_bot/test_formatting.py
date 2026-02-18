@@ -161,6 +161,83 @@ class TestResponseFormatter:
         # Should reduce multiple newlines
         assert "\n\n\n" not in cleaned
 
+    def test_clean_text_strips_thinking_tags(self, formatter):
+        """Test that <thinking>...</thinking> blocks are removed."""
+        text = "<thinking>\nLet me analyze this.\n</thinking>\nHere is the answer."
+        cleaned = formatter._clean_text(text)
+
+        assert "<thinking>" not in cleaned
+        assert "Let me analyze this" not in cleaned
+        assert "Here is the answer." in cleaned
+
+    def test_clean_text_strips_antml_thinking_tags(self, formatter):
+        """Test that <thinking>...</thinking> blocks are removed."""
+        text = (
+            "<thinking>\nInternal reasoning here.\n"
+            "</thinking>\nVisible response."
+        )
+        cleaned = formatter._clean_text(text)
+
+        assert "<thinking>" not in cleaned
+        assert "Internal reasoning here" not in cleaned
+        assert "Visible response." in cleaned
+
+    def test_clean_text_strips_thinking_preserves_rest(self, formatter):
+        """Test that content before and after thinking tags is preserved."""
+        text = (
+            "Before thinking.\n"
+            "<thinking>\nsome reasoning\n</thinking>\n"
+            "After thinking."
+        )
+        cleaned = formatter._clean_text(text)
+
+        assert "Before thinking." in cleaned
+        assert "After thinking." in cleaned
+        assert "some reasoning" not in cleaned
+
+    def test_markdown_table_converted_to_box_drawing(self, formatter):
+        """Test that GFM Markdown tables are converted to box-drawing code blocks."""
+        text = (
+            "Here is a table:\n"
+            "| Name | Age |\n"
+            "|------|-----|\n"
+            "| Alice | 30 |\n"
+            "| Bob | 25 |\n"
+            "Done."
+        )
+        cleaned = formatter._clean_text(text)
+
+        # Should contain code block with box-drawing characters
+        assert "```" in cleaned
+        assert "\u2502" in cleaned  # vertical line
+        assert "\u2500" in cleaned  # horizontal line
+        # Original pipe-based table syntax should be gone
+        assert "|------|" not in cleaned
+        # Surrounding text preserved
+        assert "Here is a table:" in cleaned
+        assert "Done." in cleaned
+
+    def test_markdown_table_with_cjk(self, formatter):
+        """Test table conversion handles CJK wide characters correctly."""
+        text = (
+            "| \u8868 | \u7528\u9014 |\n"
+            "|---|------|\n"
+            "| users | \u7528\u6237\u8bb0\u5f55 |\n"
+        )
+        cleaned = formatter._clean_text(text)
+
+        assert "```" in cleaned
+        assert "users" in cleaned
+        assert "\u7528\u6237\u8bb0\u5f55" in cleaned
+
+    def test_markdown_table_inside_code_block_preserved(self, formatter):
+        """Test that table-like content inside code blocks is not converted."""
+        text = "```\n| col1 | col2 |\n|------|------|\n| a | b |\n```"
+        cleaned = formatter._clean_text(text)
+
+        # The pipe-based syntax should remain intact inside code block
+        assert "| col1 | col2 |" in cleaned
+
     def test_markdown_escaping(self, formatter):
         """Test markdown escaping keeps emphasis but escapes plain symbols."""
         text_with_markdown = "This has *bold* and _italic_ text and a plain * symbol"
@@ -171,6 +248,29 @@ class TestResponseFormatter:
         assert "_italic_" in result
         # Non-formatting symbol should be escaped.
         assert r"\*" in result
+
+    def test_unwrap_inline_code_url(self, formatter):
+        """URL-only inline code should be unwrapped to keep links clickable."""
+        text = "来源：`https://x.com/openai/status/123`"
+        cleaned = formatter._clean_text(text)
+
+        assert "来源：https://x.com/openai/status/123" in cleaned
+        assert "`https://x.com/openai/status/123`" not in cleaned
+
+    def test_markdown_escaping_preserves_url_underscores(self, formatter):
+        """Underscores in URLs should not be escaped by markdown sanitizer."""
+        text = "链接 https://x.com/open_ai/status/123"
+        escaped = formatter._escape_markdown_outside_code(text)
+
+        assert "https://x.com/open_ai/status/123" in escaped
+        assert "open\\_ai" not in escaped
+
+    def test_unwrap_inline_code_url_ignores_code_block(self, formatter):
+        """Backticked URLs inside fenced code blocks should stay unchanged."""
+        text = "```\n`https://x.com/openai/status/123`\n```"
+        cleaned = formatter._clean_text(text)
+
+        assert "`https://x.com/openai/status/123`" in cleaned
 
     def test_normalize_double_asterisk_bold(self, formatter):
         """Test GFM double-asterisk bold is normalized for Telegram Markdown."""

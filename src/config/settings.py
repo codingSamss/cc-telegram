@@ -110,6 +110,7 @@ class Settings(BaseSettings):
             "TodoWrite",
             "WebSearch",
             "Skill",
+            "AskUserQuestion",
         ],
         description="List of allowed Claude tools",
     )

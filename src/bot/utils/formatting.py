@@ -1,6 +1,7 @@
 """Format bot responses for optimal display."""
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -24,6 +25,18 @@ class FormattedMessage:
 
 class ResponseFormatter:
     """Format Claude responses for Telegram display."""
+
+    _INLINE_CODE_URL_PATTERN = re.compile(r"`\s*(https?://[^\s`]+)\s*`")
+    _URL_PATTERN = re.compile(r"https?://[^\s<`]+")
+    _THINKING_TAG_PATTERN = re.compile(
+        r"<(?:antml:)?thinking>\s*[\s\S]*?</(?:antml:)?thinking>\s*",
+        re.DOTALL,
+    )
+    # Matches a contiguous block of GFM-style table lines (header + separator + rows).
+    _MD_TABLE_BLOCK_PATTERN = re.compile(
+        r"(?:^[ \t]*\|.+\|[ \t]*\n){2,}",
+        re.MULTILINE,
+    )
 
     def __init__(self, settings: Settings):
         """Initialize formatter with settings."""
@@ -425,8 +438,19 @@ class ResponseFormatter:
 
     def _clean_text(self, text: str) -> str:
         """Clean text for Telegram display."""
+        # Strip leaked thinking tags (e.g. <thinking>...</thinking>,
+        # <thinking>...</thinking>) that may leak from model output.
+        text = self._THINKING_TAG_PATTERN.sub("", text)
+
+        # Convert GFM Markdown tables into fenced code blocks with box-drawing
+        # characters so they render nicely in Telegram's monospace font.
+        text = self._convert_markdown_tables(text)
+
         # Remove excessive whitespace
         text = re.sub(r"\n{3,}", "\n\n", text)
+
+        # Convert URL-only inline code markers to plain links so Telegram can open them.
+        text = self._unwrap_inline_code_urls(text)
 
         # Normalize common Markdown syntax from Claude/GFM output
         # into Telegram legacy Markdown-compatible markers.
@@ -437,6 +461,109 @@ class ResponseFormatter:
         text = self._escape_markdown_outside_code(text)
 
         return text.strip()
+
+    def _convert_markdown_tables(self, text: str) -> str:
+        """Convert GFM Markdown tables to box-drawing code blocks.
+
+        Scans *outside* existing fenced code blocks for Markdown table syntax
+        (``| col | col |``) and replaces each table with a ````` ``` ````` block
+        using Unicode box-drawing characters for clean Telegram display.
+        """
+        parts: list[str] = []
+        in_code_block = False
+        buf: list[str] = []
+
+        def _flush_buf() -> None:
+            if not buf:
+                return
+            segment = "\n".join(buf)
+            segment = self._MD_TABLE_BLOCK_PATTERN.sub(
+                lambda m: self._render_table_block(m.group(0)), segment
+            )
+            parts.append(segment)
+            buf.clear()
+
+        for line in text.split("\n"):
+            if line.strip().startswith("```"):
+                if not in_code_block:
+                    _flush_buf()
+                in_code_block = not in_code_block
+                parts.append(line)
+            elif in_code_block:
+                parts.append(line)
+            else:
+                buf.append(line)
+
+        _flush_buf()
+        return "\n".join(parts)
+
+    @staticmethod
+    def _render_table_block(raw: str) -> str:
+        """Render a Markdown table string as a box-drawing code block."""
+        lines = [ln.strip() for ln in raw.strip().splitlines()]
+        # Parse cells per row, skip the separator line (|---|---|)
+        rows: list[list[str]] = []
+        for line in lines:
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            # Detect separator row: all cells match  ---  or  :---:  etc.
+            if all(re.fullmatch(r":?-{1,}:?", c) for c in cells):
+                continue
+            rows.append(cells)
+
+        if not rows:
+            return raw  # nothing to render
+
+        # Determine column widths (respect wide chars like CJK)
+        num_cols = max(len(r) for r in rows)
+        # Pad rows that have fewer columns
+        for r in rows:
+            while len(r) < num_cols:
+                r.append("")
+
+        col_widths = []
+        for ci in range(num_cols):
+            col_widths.append(max(_display_width(r[ci]) for r in rows))
+
+        def _pad(cell: str, width: int) -> str:
+            """Pad *cell* to *width* accounting for wide characters."""
+            pad = width - _display_width(cell)
+            return cell + " " * pad
+
+        # Build box-drawing table
+        top = "\u250c" + "\u252c".join("\u2500" * (w + 2) for w in col_widths) + "\u2510"
+        mid = "\u251c" + "\u253c".join("\u2500" * (w + 2) for w in col_widths) + "\u2524"
+        bot = "\u2514" + "\u2534".join("\u2500" * (w + 2) for w in col_widths) + "\u2518"
+
+        out_lines = [top]
+        for ri, row in enumerate(rows):
+            cells = " \u2502 ".join(_pad(row[ci], col_widths[ci]) for ci in range(num_cols))
+            out_lines.append(f"\u2502 {cells} \u2502")
+            if ri == 0 and len(rows) > 1:
+                out_lines.append(mid)
+        out_lines.append(bot)
+
+        return "```\n" + "\n".join(out_lines) + "\n```"
+
+    def _unwrap_inline_code_urls(self, text: str) -> str:
+        """Remove inline-code backticks around URL-only tokens outside code blocks."""
+        parts = []
+        in_code_block = False
+
+        for line in text.split("\n"):
+            if line.strip().startswith("```"):
+                in_code_block = not in_code_block
+                parts.append(line)
+                continue
+
+            if in_code_block:
+                parts.append(line)
+                continue
+
+            parts.append(
+                self._INLINE_CODE_URL_PATTERN.sub(lambda m: m.group(1), line)
+            )
+
+        return "\n".join(parts)
 
     def _normalize_markdown_outside_code(self, text: str) -> str:
         """Normalize common Markdown markers outside of code blocks.
@@ -508,6 +635,17 @@ class ResponseFormatter:
                 key = f"@@FMT{len(placeholders)}@@"
                 placeholders[key] = token_text
                 return key
+
+            def _replace_url(match: re.Match[str]) -> str:
+                url = match.group(0)
+                stripped = url.rstrip(".,;:!?)]}")
+                trailing = url[len(stripped) :]
+                if not stripped:
+                    return url
+                return f"{_store(stripped)}{trailing}"
+
+            # Protect URLs first, so underscores in links don't get escaped.
+            segment = self._URL_PATTERN.sub(_replace_url, segment)
 
             def _replace_bold(match: re.Match[str]) -> str:
                 inner = (
@@ -796,3 +934,12 @@ class CodeHighlighter:
             return f"```{language}\n{code}\n```"
         else:
             return f"```\n{code}\n```"
+
+
+def _display_width(text: str) -> int:
+    """Return the display width of *text*, counting wide (CJK) chars as 2."""
+    width = 0
+    for ch in text:
+        eaw = unicodedata.east_asian_width(ch)
+        width += 2 if eaw in ("W", "F") else 1
+    return width
