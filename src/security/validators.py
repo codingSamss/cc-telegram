@@ -165,7 +165,7 @@ class SecurityValidator:
                     return (
                         False,
                         None,
-                        f"Invalid path: contains forbidden pattern '{pattern}'",
+                        "Invalid path: contains forbidden characters",
                     )
 
             # Handle path resolution

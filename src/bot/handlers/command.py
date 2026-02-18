@@ -1062,7 +1062,8 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await audit_logger.log_command(user_id, "ls", [], True)
 
     except Exception as e:
-        error_msg = f"❌ Error listing directory: {str(e)}"
+        logger.error("ls command failed", error=str(e))
+        error_msg = "❌ Error listing directory"
         await _reply_update_message_resilient(update, context, error_msg)
 
         # Log failed command
@@ -1155,11 +1156,19 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 resolved_path = settings.approved_directory
             elif target_path == "..":
                 resolved_path = current_dir.parent
-                if not str(resolved_path).startswith(str(settings.approved_directory)):
+                try:
+                    resolved_path.relative_to(settings.approved_directory)
+                except ValueError:
                     resolved_path = settings.approved_directory
             else:
-                resolved_path = current_dir / target_path
-                resolved_path = resolved_path.resolve()
+                resolved_path = (current_dir / target_path).resolve()
+                try:
+                    resolved_path.relative_to(settings.approved_directory)
+                except ValueError:
+                    await _reply_update_message_resilient(
+                        update, context, "❌ **Access Denied**\n\nPath outside approved directory.", parse_mode="Markdown"
+                    )
+                    return
 
         # Check if directory exists and is actually a directory
         if not resolved_path.exists():
@@ -1209,7 +1218,8 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await audit_logger.log_command(user_id, "cd", [target_path], True)
 
     except Exception as e:
-        error_msg = f"❌ **Error changing directory**\n\n{str(e)}"
+        logger.error("cd command failed", error=str(e))
+        error_msg = "❌ **Error changing directory**"
         await _reply_update_message_resilient(
             update, context, error_msg, parse_mode="Markdown"
         )
@@ -1799,6 +1809,12 @@ async def codex_diag_command(
         else:
             explicit_session_id = args[0]
 
+    if explicit_session_id:
+        import re
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", explicit_session_id, re.IGNORECASE):
+            await _reply_update_message_resilient(update, context, "❌ 无效的 session ID 格式")
+            return
+
     script_path = (
         Path(__file__).resolve().parents[3] / "scripts" / "cc_codex_diagnose.py"
     )
@@ -1856,7 +1872,8 @@ async def codex_diag_command(
             )
         return
     except Exception as e:
-        await _edit_message_resilient(status_msg, f"❌ 执行诊断失败：{e}")
+        logger.error("codexdiag failed", error=str(e))
+        await _edit_message_resilient(status_msg, "❌ 执行诊断失败")
         if audit_logger:
             await audit_logger.log_command(
                 user_id=user_id,

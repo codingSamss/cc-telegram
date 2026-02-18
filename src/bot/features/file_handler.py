@@ -8,6 +8,7 @@ Features:
 - Diff generation
 """
 
+import os
 import shutil
 import tarfile
 import uuid
@@ -51,7 +52,8 @@ class FileHandler:
         self.config = config
         self.security = security
         self.temp_dir = Path("/tmp/claude_bot_files")
-        self.temp_dir.mkdir(exist_ok=True)
+        self.temp_dir.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(self.temp_dir, 0o700)
 
         # Supported code extensions
         self.code_extensions = {
@@ -161,9 +163,10 @@ class FileHandler:
         # Get file
         file = await document.get_file()
 
-        # Create temp file path
-        file_name = document.file_name or f"file_{uuid.uuid4()}"
-        file_path = self.temp_dir / file_name
+        # Create temp file path - sanitize filename to prevent path traversal
+        raw_name = document.file_name or f"file_{uuid.uuid4()}"
+        safe_name = f"{uuid.uuid4()}_{Path(raw_name).name}"
+        file_path = self.temp_dir / safe_name
 
         # Download to path
         await file.download_to_drive(str(file_path))
@@ -234,6 +237,9 @@ class FileHandler:
                     for member in tf.getmembers():
                         # Prevent path traversal
                         if member.name.startswith("/") or ".." in member.name:
+                            continue
+                        # Prevent symlink/hardlink escape attacks
+                        if member.issym() or member.islnk() or member.isdev():
                             continue
 
                         tf.extract(member, extract_dir)

@@ -71,8 +71,8 @@ async def security_middleware(
 
     if not security_validator:
         logger.error("Security validator not available in middleware context")
-        # Continue without validation (log error but don't block)
-        return await handler(event, data)
+        # fail-closed: block request when security component is unavailable
+        return
 
     # Validate text content if present
     message = event.effective_message
