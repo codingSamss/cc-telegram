@@ -108,6 +108,67 @@ def update_path_for_claude(claude_cli_path: Optional[str] = None) -> bool:
     return False
 
 
+def strip_thinking_blocks_from_session(
+    session_id: str, working_directory: str
+) -> bool:
+    """Remove thinking blocks from a Claude session JSONL file.
+
+    Thinking blocks carry cryptographic signatures tied to the API provider;
+    after a provider switch the signatures become invalid.  Stripping them
+    allows the session to be resumed without losing conversational context.
+
+    Returns True if the file was modified, False otherwise.
+    """
+    home = Path.home()
+    # Claude stores sessions under ~/.claude/projects/{project_hash}/{sid}.jsonl
+    # project_hash: leading '/' replaced by '-', e.g. /Users/foo -> -Users-foo
+    project_hash = working_directory.replace("/", "-")
+    session_file = home / ".claude" / "projects" / project_hash / f"{session_id}.jsonl"
+
+    if not session_file.exists():
+        logger.warning(
+            "Session file not found for thinking-block strip",
+            session_id=session_id,
+            path=str(session_file),
+        )
+        return False
+
+    modified = False
+    new_lines: list[str] = []
+    for raw_line in session_file.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            new_lines.append(raw_line)
+            continue
+        try:
+            obj = json.loads(raw_line)
+        except json.JSONDecodeError:
+            new_lines.append(raw_line)
+            continue
+
+        if obj.get("type") == "assistant" and isinstance(obj.get("message", {}).get("content"), list):
+            original = obj["message"]["content"]
+            filtered = [b for b in original if b.get("type") != "thinking"]
+            if len(filtered) != len(original):
+                obj["message"]["content"] = filtered
+                modified = True
+                raw_line = json.dumps(obj, ensure_ascii=False)
+
+        new_lines.append(raw_line)
+
+    if not modified:
+        return False
+
+    # Atomic write: tmp file + replace
+    tmp_file = session_file.with_suffix(".jsonl.tmp")
+    tmp_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    tmp_file.replace(session_file)
+    logger.info(
+        "Stripped thinking blocks from session file",
+        session_id=session_id,
+    )
+    return True
+
+
 @dataclass
 class ClaudeResponse:
     """Response from Claude Code SDK."""

@@ -1388,12 +1388,9 @@ async def handle_provider_callback(
     result = await cc_switch.switch_provider(provider_id, "claude")
 
     if result.status == "OK":
-        # Invalidate all sessions: clear current scope and bump generation
+        # Keep session ID — facade will strip thinking blocks on resume if needed
         _, scope_state = _get_scope_state_for_query(query, context)
         old_session_id = scope_state.get("claude_session_id")
-        scope_state["claude_session_id"] = None
-        scope_state["session_started"] = True
-        scope_state["force_new_session"] = True
         if old_session_id:
             permission_manager = context.bot_data.get("permission_manager")
             if permission_manager:
@@ -1405,7 +1402,7 @@ async def handle_provider_callback(
             f"**API 供应商已切换**\n\n"
             f"供应商：`{result.provider_name}`\n"
             f"Base URL：`{url_display}`\n\n"
-            "已清空当前会话，下一次请求将使用新供应商。",
+            "当前会话将自动续接，下一次请求将使用新供应商。",
             parse_mode="Markdown",
         )
     elif result.status == "DEGRADED":

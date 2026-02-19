@@ -15,7 +15,7 @@ from .exceptions import ClaudeProcessError, ClaudeToolValidationError
 from .integration import ClaudeProcessManager, ClaudeResponse, StreamUpdate
 from .monitor import ToolMonitor
 from .permissions import PermissionManager, PermissionRequestCallback
-from .sdk_integration import ClaudeSDKManager
+from .sdk_integration import ClaudeSDKManager, strip_thinking_blocks_from_session
 from .session import SessionManager
 
 logger = structlog.get_logger()
@@ -193,16 +193,45 @@ class ClaudeIntegration:
             except asyncio.CancelledError:
                 raise
             except Exception as resume_error:
-                # If resume failed (e.g., session expired on Claude's side),
-                # behavior depends on session source
-                if (
-                    should_continue
-                    and "no conversation found" in str(resume_error).lower()
-                ):
-                    session_source = getattr(session, "source", "bot")
+                resume_error_str = str(resume_error).lower()
+                is_signature_failure = should_continue and (
+                    "invalid signature" in resume_error_str
+                )
+                is_session_gone = should_continue and (
+                    "no conversation found" in resume_error_str
+                )
 
+                if is_signature_failure and claude_session_id:
+                    # Try stripping thinking blocks and retrying same session
+                    stripped = strip_thinking_blocks_from_session(
+                        claude_session_id, working_directory
+                    )
+                    if stripped:
+                        try:
+                            logger.info(
+                                "Retrying resume after stripping thinking blocks",
+                                session_id=claude_session_id,
+                            )
+                            response = await self._execute_with_fallback(
+                                prompt=prompt,
+                                working_directory=working_directory,
+                                session_id=claude_session_id,
+                                continue_session=True,
+                                stream_callback=stream_handler,
+                                permission_callback=permission_callback,
+                                model=model,
+                                images=images,
+                            )
+                        except Exception:
+                            # Strip retry failed — fall through to new-session fallback
+                            is_session_gone = True
+                            stripped = False
+                    if not stripped:
+                        is_session_gone = True
+
+                if is_session_gone:
+                    session_source = getattr(session, "source", "bot")
                     if session_source == "desktop_adopted":
-                        # Adopted desktop sessions: explicit error, no silent fallback
                         logger.error(
                             "Adopted desktop session no longer available",
                             session_id=claude_session_id,
@@ -217,7 +246,6 @@ class ClaudeIntegration:
                             f"session, or start a new one."
                         )
                     else:
-                        # Bot-created sessions: silent fallback to fresh session
                         logger.warning(
                             "Session resume failed, starting fresh session",
                             failed_session_id=claude_session_id,
@@ -237,7 +265,7 @@ class ClaudeIntegration:
                             model=model,
                             images=images,
                         )
-                else:
+                elif not is_signature_failure:
                     raise
 
             if model and self._is_invalid_claude_request_response(response):
