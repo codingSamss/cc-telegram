@@ -142,7 +142,7 @@ poetry run python -m src.main
 |------|------|------|
 | `/start` | 显示欢迎页与快捷入口 | 全部 |
 | `/help` | 查看完整命令说明 | 全部 |
-| `/engine [claude|codex]` | 切换 CLI 引擎（也可不带参数走按钮） | 全部 |
+| `/engine [claude\|codex]` | 切换 CLI 引擎（也可不带参数走按钮） | 全部 |
 | `/resume` | 恢复桌面端最近会话 | 全部 |
 | `/new` | 清除当前绑定并新建会话 | 全部 |
 | `/continue [message]` | 显式续接当前会话 | 全部 |
@@ -150,8 +150,8 @@ poetry run python -m src.main
 | `/context [full]` | 查看会话上下文与用量 | 全部（Claude 主展示） |
 | `/status [full]` | `/context` 的兼容别名 | 全部（Codex 主展示） |
 | `/model` | Claude：按钮切换 Sonnet/Opus/Haiku | Claude |
-| `/model [name|default]` | Codex：设置/清除 `--model` | Codex |
-| `/codexdiag [root|<session_id>]` | 诊断 Codex MCP 调用情况 | Codex |
+| `/model [name\|default]` | Codex：设置/清除 `--model` | Codex |
+| `/codexdiag [root\|<session_id>]` | 诊断 Codex MCP 调用情况 | Codex |
 | `/cd <path>` | 切换目录（带安全校验） | 全部 |
 | `/ls` | 列出当前目录内容 | 全部 |
 | `/pwd` | 查看当前目录 | 全部 |
