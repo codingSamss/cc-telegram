@@ -1,28 +1,28 @@
 # CLITG
 
-Telegram Bot for Claude Code - 通过 Telegram 远程操控 Claude Code，支持 Claude/Codex 双引擎切换、多会话、图片分析、MCP 集成、流式输出。
+通过 IM 远程操控 CLI 编码智能体，支持多引擎切换、多会话、工具权限审批、流式输出。
 
-基于 Python，使用 `python-telegram-bot` (Polling 模式) + `claude-agent-sdk`，无需 Cloudflare Tunnel、tmux 等外部依赖。启动即用。
+基于 Python，当前集成 Telegram + Claude/Codex 双引擎。Long Polling 模式，无需公网 IP 或反向代理，启动即用。
 
 ## 架构概览
 
 ```
-手机 Telegram App
-    |  HTTPS (TLS 加密)
+IM 客户端 (Telegram / ...)
+    |  HTTPS
     v
-Telegram Bot API 服务器
-    |  Long Polling (Bot 主动拉取)
+IM 平台 API
+    |  Long Polling / Webhook
     v
 本地 Python Bot 进程
-    |  claude-agent-sdk async query()
+    |  引擎抽象层 (SDK / CLI 子进程)
     v
-Claude Code (SDK 集成 / CLI 子进程 fallback)
+CLI 编码智能体 (Claude / Codex / ...)
     |  结果解析 + SQLite 存储
     v
-Telegram 回复用户
+IM 回复用户
 ```
 
-Bot 使用 Long Polling 模式主动拉取消息，不需要公网 IP 或反向代理。Claude 集成采用双后端架构：SDK 为主、CLI 子进程兜底，SDK 失败时自动切换。
+Bot 使用 Long Polling 模式主动拉取消息，不需要公网 IP 或反向代理。引擎集成采用双后端架构：SDK 为主、CLI 子进程兜底，失败时自动切换。
 
 ## 前置要求
 
