@@ -80,6 +80,13 @@ class Settings(BaseSettings):
         DEFAULT_CLAUDE_MAX_COST_PER_USER, description="Max cost per user"
     )
     use_sdk: bool = Field(True, description="Use Python SDK instead of CLI subprocess")
+    sdk_enable_tool_permission_gate: bool = Field(
+        False,
+        description=(
+            "Enable SDK tool permission gate (requires SDK client mode with "
+            "can_use_tool callback)"
+        ),
+    )
     enable_codex_cli: bool = Field(
         False,
         description="Enable Codex CLI adapter (subprocess mode)",

@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Coroutine, Dict, Optional, Protocol, Set
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Protocol, Set
 
 import structlog
 
@@ -12,7 +12,8 @@ logger = structlog.get_logger()
 
 # Type alias for the callback that sends Telegram permission buttons
 PermissionRequestCallback = Callable[
-    [str, str, Dict[str, Any], str],  # request_id, tool_name, tool_input, session_id
+    [str, str, Dict[str, Any], str, Optional[List[Dict[str, Any]]]],
+    # request_id, tool_name, tool_input, session_id, permission_suggestions
     Coroutine[Any, Any, None],
 ]
 
@@ -100,6 +101,7 @@ class PermissionManager:
         user_id: int,
         session_id: str,
         send_buttons_callback: PermissionRequestCallback,
+        permission_suggestions: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """Request permission from user via Telegram buttons.
 
@@ -133,6 +135,8 @@ class PermissionManager:
             request_id=request_id,
             tool_name=tool_name,
             user_id=user_id,
+            has_suggestions=bool(permission_suggestions),
+            suggestion_count=len(permission_suggestions or []),
         )
 
         try:
@@ -145,7 +149,13 @@ class PermissionManager:
             )
 
             # Send Telegram buttons to user
-            await send_buttons_callback(request_id, tool_name, tool_input, session_id)
+            await send_buttons_callback(
+                request_id,
+                tool_name,
+                tool_input,
+                session_id,
+                permission_suggestions,
+            )
 
             # Wait for user response with timeout
             result = await asyncio.wait_for(future, timeout=self.timeout_seconds)

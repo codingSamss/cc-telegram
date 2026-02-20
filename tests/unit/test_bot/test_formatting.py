@@ -84,6 +84,53 @@ class TestResponseFormatter:
         for msg in messages:
             assert len(msg.text) <= formatter.max_message_length
 
+    def test_short_multi_code_blocks_stays_single_message(self, formatter):
+        """Short responses should not be semantically split into multiple bubbles."""
+        text = (
+            "先看三个示例：\n"
+            "```python\nprint('one')\n```\n"
+            "```javascript\nconsole.log('two')\n```\n"
+            '```json\n{"three": true}\n```'
+        )
+
+        messages = formatter.format_claude_response(text)
+
+        assert len(messages) == 1
+        assert "📄 **Code**" not in messages[0].text
+        assert "```" in messages[0].text
+
+    def test_short_file_operation_text_stays_single_message(self, formatter):
+        """Short file-operation prose should remain in one message bubble."""
+        text = (
+            "处理结果：\n"
+            "Reading file src/main.py\n"
+            "Writing to src/main.py\n"
+            "Done."
+        )
+
+        messages = formatter.format_claude_response(text)
+
+        assert len(messages) == 1
+        assert "📁 **File Operations**" not in messages[0].text
+
+    def test_long_complex_response_uses_length_split_not_semantic_labels(
+        self, formatter
+    ):
+        """Long mixed content should keep original flow without semantic label bubbles."""
+        long_prefix = "A" * 3950
+        text = (
+            f"{long_prefix}\n"
+            "```python\nprint('one')\n```\n"
+            "```javascript\nconsole.log('two')\n```\n"
+            '```json\n{"three": true}\n```'
+        )
+
+        messages = formatter.format_claude_response(text)
+
+        assert len(messages) > 1
+        assert all("📄 **Code**" not in message.text for message in messages)
+        assert all("📁 **File Operations**" not in message.text for message in messages)
+
     def test_format_error_message(self, formatter):
         """Test error message formatting."""
         error_msg = formatter.format_error_message("Something went wrong", "Error")
@@ -172,10 +219,7 @@ class TestResponseFormatter:
 
     def test_clean_text_strips_antml_thinking_tags(self, formatter):
         """Test that <thinking>...</thinking> blocks are removed."""
-        text = (
-            "<thinking>\nInternal reasoning here.\n"
-            "</thinking>\nVisible response."
-        )
+        text = "<thinking>\nInternal reasoning here.\n" "</thinking>\nVisible response."
         cleaned = formatter._clean_text(text)
 
         assert "<thinking>" not in cleaned
@@ -313,9 +357,7 @@ class TestResponseFormatter:
     def test_normalize_horizontal_rule(self, formatter):
         """Test horizontal rules are converted to visual separators."""
         for rule in ["---", "***", "___", "-----"]:
-            result = formatter._normalize_markdown_outside_code(
-                f"Above\n{rule}\nBelow"
-            )
+            result = formatter._normalize_markdown_outside_code(f"Above\n{rule}\nBelow")
             assert "———" in result
             assert rule not in result
 

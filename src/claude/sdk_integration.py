@@ -28,6 +28,7 @@ from claude_agent_sdk import (
     Message,
     ProcessError,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -108,9 +109,7 @@ def update_path_for_claude(claude_cli_path: Optional[str] = None) -> bool:
     return False
 
 
-def strip_thinking_blocks_from_session(
-    session_id: str, working_directory: str
-) -> bool:
+def strip_thinking_blocks_from_session(session_id: str, working_directory: str) -> bool:
     """Remove thinking blocks from a Claude session JSONL file.
 
     Thinking blocks carry cryptographic signatures tied to the API provider;
@@ -145,7 +144,9 @@ def strip_thinking_blocks_from_session(
             new_lines.append(raw_line)
             continue
 
-        if obj.get("type") == "assistant" and isinstance(obj.get("message", {}).get("content"), list):
+        if obj.get("type") == "assistant" and isinstance(
+            obj.get("message", {}).get("content"), list
+        ):
             original = obj["message"]["content"]
             filtered = [b for b in original if b.get("type") != "thinking"]
             if len(filtered) != len(original):
@@ -797,9 +798,107 @@ class ClaudeSDKManager:
                         content=content,
                     )
                     await stream_callback(update)
+            elif isinstance(message, SystemMessage):
+                raw_data = getattr(message, "data", {})
+                subtype = str(getattr(message, "subtype", "") or "").strip()
+                metadata = self._build_sdk_system_metadata(raw_data, subtype=subtype)
+
+                # Avoid duplicate generic init updates: we already emit a synthetic
+                # init event. Only emit SDK init when it carries extra capability info.
+                if subtype == "init":
+                    has_extra_capabilities = any(
+                        (
+                            metadata.get("supports_effort") is not None,
+                            bool(metadata.get("supported_effort_levels")),
+                            metadata.get("supports_adaptive_thinking") is not None,
+                            bool(str(metadata.get("permission_mode") or "").strip()),
+                        )
+                    )
+                    if not has_extra_capabilities:
+                        return
+
+                content: Optional[str] = None
+                if isinstance(raw_data, dict):
+                    content = str(raw_data.get("message") or "").strip() or None
+
+                update = StreamUpdate(
+                    type="system",
+                    content=content,
+                    metadata=metadata,
+                )
+                await stream_callback(update)
 
         except Exception as e:
             logger.warning("Stream callback failed", error=str(e))
+
+    @staticmethod
+    def _build_sdk_system_metadata(payload: Any, *, subtype: str) -> Dict[str, Any]:
+        """Build StreamUpdate metadata from SDK SystemMessage payload."""
+        raw: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+        metadata: Dict[str, Any] = {"subtype": subtype}
+
+        if subtype == "init":
+            metadata.update(
+                {
+                    "tools": raw.get("tools", []),
+                    "mcp_servers": raw.get("mcp_servers", []),
+                    "model": raw.get("model"),
+                    "cwd": raw.get("cwd"),
+                    "permission_mode": raw.get("permissionMode"),
+                }
+            )
+
+        metadata.update(ClaudeSDKManager._extract_model_capabilities(raw))
+        return metadata
+
+    @staticmethod
+    def _extract_model_capabilities(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract optional model capability fields from SDK stream payload."""
+        if not isinstance(payload, dict):
+            return {}
+
+        model_info = payload.get("modelInfo")
+        if not isinstance(model_info, dict):
+            model_info = payload.get("model_info")
+        if not isinstance(model_info, dict):
+            model_info = {}
+
+        capabilities: Dict[str, Any] = {}
+
+        supports_effort = payload.get("supportsEffort")
+        if supports_effort is None:
+            supports_effort = model_info.get("supportsEffort")
+        if supports_effort is None:
+            supports_effort = model_info.get("supports_effort")
+        if supports_effort is not None:
+            normalized_supports_effort = bool(supports_effort)
+            capabilities["supports_effort"] = normalized_supports_effort
+            capabilities["supportsEffort"] = normalized_supports_effort
+
+        effort_levels = payload.get("supportedEffortLevels")
+        if effort_levels is None:
+            effort_levels = model_info.get("supportedEffortLevels")
+        if effort_levels is None:
+            effort_levels = model_info.get("supported_effort_levels")
+        if isinstance(effort_levels, (list, tuple)):
+            normalized = [
+                str(level).strip() for level in effort_levels if str(level).strip()
+            ]
+            if normalized:
+                capabilities["supported_effort_levels"] = normalized
+                capabilities["supportedEffortLevels"] = normalized
+
+        supports_adaptive_thinking = payload.get("supportsAdaptiveThinking")
+        if supports_adaptive_thinking is None:
+            supports_adaptive_thinking = model_info.get("supportsAdaptiveThinking")
+        if supports_adaptive_thinking is None:
+            supports_adaptive_thinking = model_info.get("supports_adaptive_thinking")
+        if supports_adaptive_thinking is not None:
+            normalized_supports_adaptive = bool(supports_adaptive_thinking)
+            capabilities["supports_adaptive_thinking"] = normalized_supports_adaptive
+            capabilities["supportsAdaptiveThinking"] = normalized_supports_adaptive
+
+        return capabilities
 
     def _build_model_usage(
         self,
@@ -1071,6 +1170,7 @@ class ClaudeSDKManager:
             messages: List[Message] = []
             client = ClaudeSDKClient(options)
             model_resolved_emitted = False
+            disconnect_timeout = max(1, min(10, self.config.claude_timeout_seconds))
             try:
                 # connect() without prompt — establishes connection only
                 await asyncio.wait_for(
@@ -1078,36 +1178,58 @@ class ClaudeSDKManager:
                     timeout=self.config.claude_timeout_seconds,
                 )
 
-                # Send prompt via client.query()
-                # Build multimodal prompt if images are provided
-                if images:
-                    query_prompt = await self._build_multimodal_prompt(prompt, images)
-                    await client.query(query_prompt)
-                else:
-                    await client.query(prompt)
+                async def _query_and_collect_messages() -> None:
+                    nonlocal model_resolved_emitted
 
-                # Receive messages until ResultMessage
-                async for message in client.receive_response():
-                    messages.append(message)
-                    if stream_callback and not model_resolved_emitted:
-                        model_name = getattr(message, "model", None)
-                        if model_name:
-                            model_resolved_emitted = (
-                                await self._emit_model_resolved_update(
-                                    stream_callback, str(model_name)
+                    # Send prompt via client.query()
+                    # Build multimodal prompt if images are provided
+                    if images:
+                        query_prompt = await self._build_multimodal_prompt(
+                            prompt, images
+                        )
+                        await client.query(query_prompt)
+                    else:
+                        await client.query(prompt)
+
+                    # Receive messages until ResultMessage
+                    async for message in client.receive_response():
+                        messages.append(message)
+                        if stream_callback and not model_resolved_emitted:
+                            model_name = getattr(message, "model", None)
+                            if model_name:
+                                model_resolved_emitted = (
+                                    await self._emit_model_resolved_update(
+                                        stream_callback, str(model_name)
+                                    )
                                 )
-                            )
-                    if stream_callback:
-                        try:
-                            await self._handle_stream_message(message, stream_callback)
-                        except Exception as cb_err:
-                            logger.warning(
-                                "Stream callback failed",
-                                error=str(cb_err),
-                            )
+                        if stream_callback:
+                            try:
+                                await self._handle_stream_message(
+                                    message, stream_callback
+                                )
+                            except Exception as cb_err:
+                                logger.warning(
+                                    "Stream callback failed",
+                                    error=str(cb_err),
+                                )
+                        if isinstance(message, ResultMessage):
+                            break
+
+                await asyncio.wait_for(
+                    _query_and_collect_messages(),
+                    timeout=self.config.claude_timeout_seconds,
+                )
             finally:
                 try:
-                    await client.disconnect()
+                    await asyncio.wait_for(
+                        client.disconnect(),
+                        timeout=disconnect_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timed out while disconnecting Claude SDK Client",
+                        timeout_seconds=disconnect_timeout,
+                    )
                 except Exception as disconnect_error:
                     logger.warning(
                         "Failed to disconnect Claude SDK Client cleanly",

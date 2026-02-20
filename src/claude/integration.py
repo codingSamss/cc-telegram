@@ -946,9 +946,59 @@ class ClaudeProcessManager:
             session_context={"session_id": msg.get("session_id")},
         )
 
+    @staticmethod
+    def _extract_model_capabilities(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract optional model capability fields from stream payload."""
+        if not isinstance(payload, dict):
+            return {}
+
+        model_info = payload.get("modelInfo")
+        if not isinstance(model_info, dict):
+            model_info = payload.get("model_info")
+        if not isinstance(model_info, dict):
+            model_info = {}
+
+        capabilities: Dict[str, Any] = {}
+
+        supports_effort = payload.get("supportsEffort")
+        if supports_effort is None:
+            supports_effort = model_info.get("supportsEffort")
+        if supports_effort is None:
+            supports_effort = model_info.get("supports_effort")
+        if supports_effort is not None:
+            normalized_supports_effort = bool(supports_effort)
+            capabilities["supports_effort"] = normalized_supports_effort
+            capabilities["supportsEffort"] = normalized_supports_effort
+
+        effort_levels = payload.get("supportedEffortLevels")
+        if effort_levels is None:
+            effort_levels = model_info.get("supportedEffortLevels")
+        if effort_levels is None:
+            effort_levels = model_info.get("supported_effort_levels")
+        if isinstance(effort_levels, (list, tuple)):
+            normalized = [
+                str(level).strip() for level in effort_levels if str(level).strip()
+            ]
+            if normalized:
+                capabilities["supported_effort_levels"] = normalized
+                capabilities["supportedEffortLevels"] = normalized
+
+        supports_adaptive_thinking = payload.get("supportsAdaptiveThinking")
+        if supports_adaptive_thinking is None:
+            supports_adaptive_thinking = model_info.get("supportsAdaptiveThinking")
+        if supports_adaptive_thinking is None:
+            supports_adaptive_thinking = model_info.get("supports_adaptive_thinking")
+        if supports_adaptive_thinking is not None:
+            normalized_supports_adaptive = bool(supports_adaptive_thinking)
+            capabilities["supports_adaptive_thinking"] = normalized_supports_adaptive
+            capabilities["supportsAdaptiveThinking"] = normalized_supports_adaptive
+
+        return capabilities
+
     def _parse_system_message(self, msg: Dict) -> StreamUpdate:
         """Parse system messages including init and other subtypes."""
         subtype = msg.get("subtype")
+        model_capabilities = self._extract_model_capabilities(msg)
 
         if subtype == "init":
             # Initial system message with available tools
@@ -961,6 +1011,7 @@ class ClaudeProcessManager:
                     "model": msg.get("model"),
                     "cwd": msg.get("cwd"),
                     "permission_mode": msg.get("permissionMode"),
+                    **model_capabilities,
                 },
                 session_context={"session_id": msg.get("session_id")},
             )
@@ -969,7 +1020,10 @@ class ClaudeProcessManager:
             return StreamUpdate(
                 type="system",
                 content=msg.get("message", str(msg)),
-                metadata={"subtype": subtype},
+                metadata={
+                    "subtype": subtype,
+                    **model_capabilities,
+                },
                 timestamp=msg.get("timestamp"),
                 session_context={"session_id": msg.get("session_id")},
             )

@@ -1,5 +1,6 @@
 """Tests for Claude integration facade fallback behavior."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -230,6 +231,40 @@ class TestClaudeIntegrationFacade:
         sdk_manager.execute_with_client.assert_awaited_once()
         sdk_manager.execute_command.assert_not_awaited()
         process_manager.execute_command.assert_not_awaited()
+
+    async def test_permission_callback_forwards_sdk_suggestions(self, tmp_path):
+        """SDK permission callback should pass permission suggestions to manager."""
+        config = _build_config(tmp_path, use_sdk=True, claude_allowed_tools=[])
+        sdk_manager = MagicMock()
+        process_manager = MagicMock()
+        facade = _build_facade(config, sdk_manager, process_manager)
+        facade.permission_manager.request_permission = AsyncMock(return_value=True)
+
+        send_buttons = AsyncMock()
+        can_use_tool = facade._build_permission_callback(
+            user_id=123,
+            session_id="session-1",
+            send_buttons_callback=send_buttons,
+        )
+
+        suggestions = [
+            {
+                "type": "addRules",
+                "behavior": "allow",
+                "destination": "session",
+                "rules": [{"toolName": "Bash", "ruleContent": "npm test"}],
+            }
+        ]
+        result = await can_use_tool(
+            "Bash",
+            {"command": "npm test"},
+            SimpleNamespace(suggestions=suggestions),
+        )
+
+        assert getattr(result, "behavior", None) == "allow"
+        kwargs = facade.permission_manager.request_permission.await_args.kwargs
+        assert kwargs["tool_name"] == "Bash"
+        assert kwargs["permission_suggestions"] == suggestions
 
     async def test_get_precise_context_usage_parses_and_uses_cache(self, tmp_path):
         """Exact context probe should parse /context output and cache by session."""

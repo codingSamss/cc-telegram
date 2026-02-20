@@ -106,7 +106,11 @@ async def test_request_permission_persists_and_resolves_allow():
     manager = PermissionManager(timeout_seconds=2, approval_repository=repo)
 
     async def send_buttons(
-        request_id: str, tool_name: str, tool_input: Dict[str, Any], session_id: str
+        request_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        session_id: str,
+        permission_suggestions: Optional[list[Dict[str, Any]]] = None,
     ) -> None:
         manager.resolve_permission(request_id, "allow", user_id=100)
 
@@ -134,7 +138,11 @@ async def test_allow_all_is_session_scoped_and_skips_reprompt():
     callback_invocations = {"count": 0}
 
     async def send_buttons(
-        request_id: str, tool_name: str, tool_input: Dict[str, Any], session_id: str
+        request_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        session_id: str,
+        permission_suggestions: Optional[list[Dict[str, Any]]] = None,
     ) -> None:
         callback_invocations["count"] += 1
         manager.resolve_permission(request_id, "allow_all", user_id=200)
@@ -172,7 +180,11 @@ async def test_request_permission_timeout_persists_expired():
     manager = PermissionManager(timeout_seconds=0, approval_repository=repo)
 
     async def send_buttons(
-        request_id: str, tool_name: str, tool_input: Dict[str, Any], session_id: str
+        request_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        session_id: str,
+        permission_suggestions: Optional[list[Dict[str, Any]]] = None,
     ) -> None:
         # Intentionally do nothing so wait_for times out immediately.
         return None
@@ -190,3 +202,41 @@ async def test_request_permission_timeout_persists_expired():
     request = next(iter(repo.requests.values()))
     assert request["status"] == "expired"
     assert request["decision"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_permission_forwards_suggestions_to_callback():
+    """SDK permission suggestions should be forwarded to Telegram callback."""
+    repo = InMemoryApprovalRequestRepository()
+    manager = PermissionManager(timeout_seconds=2, approval_repository=repo)
+    captured: Dict[str, Any] = {}
+
+    async def send_buttons(
+        request_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        session_id: str,
+        permission_suggestions: Optional[list[Dict[str, Any]]] = None,
+    ) -> None:
+        captured["suggestions"] = permission_suggestions
+        manager.resolve_permission(request_id, "allow", user_id=400)
+
+    suggestions = [
+        {
+            "type": "addRules",
+            "behavior": "allow",
+            "destination": "session",
+            "rules": [{"toolName": "Bash", "ruleContent": "npm test"}],
+        }
+    ]
+    allowed = await manager.request_permission(
+        tool_name="Bash",
+        tool_input={"command": "npm test"},
+        user_id=400,
+        session_id="session-suggestions",
+        send_buttons_callback=send_buttons,
+        permission_suggestions=suggestions,
+    )
+
+    assert allowed is True
+    assert captured["suggestions"] == suggestions

@@ -2108,7 +2108,7 @@ async def handle_text_message(
             except Exception as e:
                 logger.warning("Failed to process stream update", error=str(e))
 
-        # Build permission handler only when SDK is active
+        # Build permission handler only when SDK permission gate is enabled
         settings_obj: Settings = context.bot_data["settings"]
         permission_handler = build_permission_handler(
             bot=context.bot,
@@ -4250,6 +4250,74 @@ def _format_tool_input_summary(tool_name: str, tool_input: dict) -> str:
     return "\n".join(parts)
 
 
+def _format_permission_suggestions(
+    permission_suggestions: Optional[list[dict[str, Any]]],
+) -> str:
+    """Render compact permission suggestion lines for Telegram approval prompt."""
+    if not permission_suggestions:
+        return ""
+
+    def _safe_code(value: Any, max_len: int = 180) -> str:
+        text = " ".join(str(value).split()).replace("`", "'")
+        if len(text) > max_len:
+            return text[:max_len] + "..."
+        return text
+
+    rendered: list[str] = []
+    for suggestion in permission_suggestions[:3]:
+        if not isinstance(suggestion, dict):
+            continue
+
+        suggestion_type = str(suggestion.get("type") or "").strip()
+        behavior = str(suggestion.get("behavior") or "").strip()
+        mode = str(suggestion.get("mode") or "").strip()
+        destination = str(suggestion.get("destination") or "").strip()
+
+        labels: list[str] = []
+        if suggestion_type:
+            labels.append(suggestion_type)
+        if behavior:
+            labels.append(f"behavior={behavior}")
+        if mode:
+            labels.append(f"mode={mode}")
+        if destination:
+            labels.append(f"dest={destination}")
+
+        rule_preview = ""
+        rules = suggestion.get("rules")
+        if isinstance(rules, list) and rules:
+            first_rule = rules[0]
+            if isinstance(first_rule, dict):
+                tool_name = str(
+                    first_rule.get("toolName") or first_rule.get("tool_name") or ""
+                ).strip()
+                rule_content = str(
+                    first_rule.get("ruleContent")
+                    or first_rule.get("rule_content")
+                    or ""
+                ).strip()
+                if tool_name and rule_content:
+                    rule_preview = f"{tool_name}: {rule_content}"
+                elif tool_name:
+                    rule_preview = tool_name
+                elif rule_content:
+                    rule_preview = rule_content
+
+        rendered_line = ", ".join(labels) if labels else "permission update"
+        if rule_preview:
+            rendered_line = f"{rendered_line}; rule={rule_preview}"
+        rendered.append(f"• `{_safe_code(rendered_line)}`")
+
+    if not rendered:
+        return ""
+
+    extra_count = max(len(permission_suggestions) - len(rendered), 0)
+    if extra_count > 0:
+        rendered.append(f"• `{extra_count}` more suggestion(s)")
+
+    return "Suggested permission updates:\n" + "\n".join(rendered)
+
+
 def build_permission_handler(
     bot: Any,
     chat_id: int,
@@ -4259,10 +4327,14 @@ def build_permission_handler(
 ) -> Optional[Callable]:
     """Build a permission button sender callback for SDK tool permission requests.
 
-    Returns None if SDK is not active. The returned callback can be passed as
-    ``permission_handler`` to ``ClaudeIntegration.run_command``.
+    Returns None unless SDK mode and permission gate are both enabled. The
+    returned callback can be passed as ``permission_handler`` to
+    ``ClaudeIntegration.run_command``.
     """
-    if not settings.use_sdk:
+    if not getattr(settings, "use_sdk", False):
+        return None
+
+    if not getattr(settings, "sdk_enable_tool_permission_gate", False):
         return None
 
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -4272,8 +4344,10 @@ def build_permission_handler(
         tool_name: str,
         tool_input: dict,
         sess_id: str,
+        permission_suggestions: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         input_summary = _format_tool_input_summary(tool_name, tool_input)
+        suggestions_summary = _format_permission_suggestions(permission_suggestions)
         tool_label = str(tool_name or "unknown").replace("`", "'")
         session_label = str(sess_id or "").replace("`", "'")
         short_session = f"{session_label[:8]}..." if session_label else "n/a"
@@ -4296,17 +4370,23 @@ def build_permission_handler(
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        text_lines = [
+            "**Tool Permission Request**",
+            "",
+            f"CLI wants to use: `{tool_label}`",
+            f"Request: `{request_id}`",
+            f"Session: `{short_session}`",
+        ]
+        if input_summary:
+            text_lines.extend([input_summary])
+        if suggestions_summary:
+            text_lines.extend(["", suggestions_summary])
+        text_lines.extend(["", "Allow this action?"])
+
         await send_message_resilient(
             bot=bot,
             chat_id=chat_id,
-            text=(
-                f"**Tool Permission Request**\n\n"
-                f"CLI wants to use: `{tool_label}`\n"
-                f"Request: `{request_id}`\n"
-                f"Session: `{short_session}`\n"
-                f"{input_summary}\n\n"
-                f"Allow this action?"
-            ),
+            text="\n".join(text_lines),
             parse_mode="Markdown",
             reply_markup=reply_markup,
             message_thread_id=message_thread_id,

@@ -10,6 +10,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -443,6 +444,62 @@ class TestClaudeSDKManager:
         assert any(u.type == "assistant" and u.tool_calls for u in updates)
         assert any(u.type == "tool_result" for u in updates)
 
+    async def test_handle_stream_message_emits_init_when_capabilities_present(
+        self, sdk_manager
+    ):
+        """SDK SystemMessage init should be forwarded when capability metadata exists."""
+        updates = []
+
+        async def stream_callback(update: StreamUpdate):
+            updates.append(update)
+
+        message = SystemMessage(
+            subtype="init",
+            data={
+                "subtype": "init",
+                "supportsEffort": True,
+                "supportedEffortLevels": ["low", "high"],
+                "supportsAdaptiveThinking": False,
+                "permissionMode": "default",
+            },
+        )
+
+        await sdk_manager._handle_stream_message(message, stream_callback)
+
+        assert len(updates) == 1
+        assert updates[0].type == "system"
+        assert updates[0].metadata is not None
+        assert updates[0].metadata.get("subtype") == "init"
+        assert updates[0].metadata.get("supportsEffort") is True
+        assert updates[0].metadata.get("supports_effort") is True
+        assert updates[0].metadata.get("supportedEffortLevels") == ["low", "high"]
+        assert updates[0].metadata.get("supported_effort_levels") == ["low", "high"]
+        assert updates[0].metadata.get("supportsAdaptiveThinking") is False
+        assert updates[0].metadata.get("supports_adaptive_thinking") is False
+        assert updates[0].metadata.get("permission_mode") == "default"
+
+    async def test_handle_stream_message_skips_plain_init_without_capabilities(
+        self, sdk_manager
+    ):
+        """SDK generic init should be skipped to avoid duplicate synthetic init updates."""
+        updates = []
+
+        async def stream_callback(update: StreamUpdate):
+            updates.append(update)
+
+        message = SystemMessage(
+            subtype="init",
+            data={
+                "subtype": "init",
+                "tools": ["Read"],
+                "cwd": "/test",
+            },
+        )
+
+        await sdk_manager._handle_stream_message(message, stream_callback)
+
+        assert updates == []
+
     async def test_execute_command_timeout(self, sdk_manager):
         """Test command execution timeout."""
         import asyncio
@@ -460,6 +517,123 @@ class TestClaudeSDKManager:
                     prompt="Test prompt",
                     working_directory=Path("/test"),
                 )
+
+    async def test_execute_with_client_stops_after_result_message(self, sdk_manager):
+        """Client mode should stop reading stream once ResultMessage is received."""
+
+        class FakeClient:
+            instances = []
+
+            def __init__(self, options):
+                self.options = options
+                self.disconnected = False
+                FakeClient.instances.append(self)
+
+            async def connect(self):
+                return None
+
+            async def query(self, prompt):
+                self.prompt = prompt
+
+            async def receive_response(self):
+                yield _make_assistant_message("Client response")
+                yield _make_result_message(
+                    session_id="client-session",
+                    total_cost_usd=0.02,
+                )
+                yield _make_assistant_message("Should be ignored")
+
+            async def disconnect(self):
+                self.disconnected = True
+
+        with patch("src.claude.sdk_integration.ClaudeSDKClient", FakeClient):
+            response = await sdk_manager.execute_with_client(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.session_id == "client-session"
+        assert "Client response" in response.content
+        assert "Should be ignored" not in response.content
+        assert FakeClient.instances[0].disconnected is True
+
+    async def test_execute_with_client_times_out_while_receiving(self, sdk_manager):
+        """Client mode should timeout if receive_response hangs."""
+        import asyncio
+
+        class HangingClient:
+            instances = []
+
+            def __init__(self, options):
+                self.options = options
+                self.disconnected = False
+                HangingClient.instances.append(self)
+
+            async def connect(self):
+                return None
+
+            async def query(self, prompt):
+                self.prompt = prompt
+
+            async def receive_response(self):
+                await asyncio.sleep(5)
+                if False:
+                    yield None
+
+            async def disconnect(self):
+                self.disconnected = True
+
+        from src.claude.exceptions import ClaudeTimeoutError
+
+        with patch("src.claude.sdk_integration.ClaudeSDKClient", HangingClient):
+            with pytest.raises(ClaudeTimeoutError):
+                await sdk_manager.execute_with_client(
+                    prompt="Test prompt",
+                    working_directory=Path("/test"),
+                )
+
+        assert HangingClient.instances[0].disconnected is True
+
+    async def test_execute_with_client_disconnect_timeout_is_non_fatal(
+        self, sdk_manager
+    ):
+        """Slow disconnect should be logged but must not fail successful response."""
+        import asyncio
+
+        class SlowDisconnectClient:
+            instances = []
+
+            def __init__(self, options):
+                self.options = options
+                self.disconnect_called = False
+                SlowDisconnectClient.instances.append(self)
+
+            async def connect(self):
+                return None
+
+            async def query(self, prompt):
+                self.prompt = prompt
+
+            async def receive_response(self):
+                yield _make_assistant_message("Client ok")
+                yield _make_result_message(session_id="client-ok")
+
+            async def disconnect(self):
+                self.disconnect_called = True
+                await asyncio.sleep(5)
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient",
+            SlowDisconnectClient,
+        ):
+            response = await sdk_manager.execute_with_client(
+                prompt="Test prompt",
+                working_directory=Path("/test"),
+            )
+
+        assert response.session_id == "client-ok"
+        assert "Client ok" in response.content
+        assert SlowDisconnectClient.instances[0].disconnect_called is True
 
     async def test_session_management(self, sdk_manager):
         """Test session management."""

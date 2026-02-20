@@ -12,7 +12,7 @@ from src.bot.handlers.message import build_permission_handler
 async def test_permission_prompt_sent_to_same_topic_thread():
     """Permission prompt should stay in the same Telegram topic thread."""
     bot = SimpleNamespace(send_message=AsyncMock())
-    settings = SimpleNamespace(use_sdk=True)
+    settings = SimpleNamespace(use_sdk=True, sdk_enable_tool_permission_gate=True)
     handler = build_permission_handler(
         bot=bot,
         chat_id=-100123,
@@ -39,7 +39,7 @@ async def test_permission_prompt_sent_to_same_topic_thread():
 async def test_permission_prompt_omits_thread_when_not_in_topic():
     """Permission prompt should omit thread id when no topic is active."""
     bot = SimpleNamespace(send_message=AsyncMock())
-    settings = SimpleNamespace(use_sdk=True)
+    settings = SimpleNamespace(use_sdk=True, sdk_enable_tool_permission_gate=True)
     handler = build_permission_handler(
         bot=bot,
         chat_id=123456,
@@ -65,7 +65,7 @@ async def test_permission_prompt_omits_thread_when_not_in_topic():
 async def test_permission_prompt_drops_thread_in_private_chat():
     """Private chat should never include message_thread_id."""
     bot = SimpleNamespace(send_message=AsyncMock())
-    settings = SimpleNamespace(use_sdk=True)
+    settings = SimpleNamespace(use_sdk=True, sdk_enable_tool_permission_gate=True)
     handler = build_permission_handler(
         bot=bot,
         chat_id=123456,
@@ -96,7 +96,7 @@ async def test_permission_prompt_retries_without_thread_when_thread_missing():
             side_effect=[Exception("Bad Request: message thread not found"), object()]
         )
     )
-    settings = SimpleNamespace(use_sdk=True)
+    settings = SimpleNamespace(use_sdk=True, sdk_enable_tool_permission_gate=True)
     handler = build_permission_handler(
         bot=bot,
         chat_id=-100123,
@@ -129,7 +129,7 @@ async def test_permission_prompt_retries_without_markdown_on_parse_error():
             side_effect=[Exception("Bad Request: can't parse entities"), object()]
         )
     )
-    settings = SimpleNamespace(use_sdk=True)
+    settings = SimpleNamespace(use_sdk=True, sdk_enable_tool_permission_gate=True)
     handler = build_permission_handler(
         bot=bot,
         chat_id=-100123,
@@ -152,3 +152,54 @@ async def test_permission_prompt_retries_without_markdown_on_parse_error():
     second_call_kwargs = bot.send_message.await_args_list[1].kwargs
     assert first_call_kwargs["parse_mode"] == "Markdown"
     assert "parse_mode" not in second_call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_permission_prompt_includes_sdk_permission_suggestions():
+    """Permission prompt should show SDK-suggested permission updates."""
+    bot = SimpleNamespace(send_message=AsyncMock())
+    settings = SimpleNamespace(use_sdk=True, sdk_enable_tool_permission_gate=True)
+    handler = build_permission_handler(
+        bot=bot,
+        chat_id=-100123,
+        settings=settings,
+        chat_type="supergroup",
+        message_thread_id=42,
+    )
+
+    assert handler is not None
+
+    await handler(
+        "req-suggest",
+        "Bash",
+        {"command": "npm test"},
+        "session-suggest",
+        [
+            {
+                "type": "addRules",
+                "behavior": "allow",
+                "destination": "session",
+                "rules": [{"toolName": "Bash", "ruleContent": "npm test"}],
+            }
+        ],
+    )
+
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Suggested permission updates" in text
+    assert "addRules" in text
+    assert "Bash: npm test" in text
+
+
+def test_permission_handler_disabled_when_gate_is_off():
+    """Permission handler should stay disabled unless gate flag is enabled."""
+    bot = SimpleNamespace(send_message=AsyncMock())
+    settings = SimpleNamespace(use_sdk=True, sdk_enable_tool_permission_gate=False)
+
+    handler = build_permission_handler(
+        bot=bot,
+        chat_id=123456,
+        settings=settings,
+        message_thread_id=1,
+    )
+
+    assert handler is None

@@ -60,6 +60,37 @@ class ClaudeIntegration:
         content = str(getattr(response, "content", "") or "").lower()
         return "invalid claude code request" in content
 
+    @staticmethod
+    def _normalize_permission_suggestions(raw: Any) -> List[Dict[str, Any]]:
+        """Normalize SDK permission suggestions into plain dict payloads."""
+        if not isinstance(raw, list):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        for suggestion in raw:
+            payload: Optional[Dict[str, Any]] = None
+            if isinstance(suggestion, dict):
+                payload = suggestion
+            elif hasattr(suggestion, "to_dict") and callable(suggestion.to_dict):
+                try:
+                    candidate = suggestion.to_dict()
+                    if isinstance(candidate, dict):
+                        payload = candidate
+                except Exception:
+                    payload = None
+            elif hasattr(suggestion, "__dict__"):
+                try:
+                    candidate = dict(vars(suggestion))
+                    if isinstance(candidate, dict):
+                        payload = candidate
+                except Exception:
+                    payload = None
+
+            if payload:
+                normalized.append(payload)
+
+        return normalized
+
     async def run_command(
         self,
         prompt: str,
@@ -1038,6 +1069,10 @@ class ClaudeIntegration:
             if tool_name in allowed_tools:
                 return PermissionResultAllow()
 
+            permission_suggestions = self._normalize_permission_suggestions(
+                getattr(context, "suggestions", None)
+            )
+
             # All other tools go through Telegram approval
             allowed = await permission_manager.request_permission(
                 tool_name=tool_name,
@@ -1045,6 +1080,7 @@ class ClaudeIntegration:
                 user_id=user_id,
                 session_id=session_id,
                 send_buttons_callback=send_buttons_callback,
+                permission_suggestions=permission_suggestions or None,
             )
             if allowed:
                 return PermissionResultAllow()

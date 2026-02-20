@@ -370,6 +370,38 @@ def test_parse_stream_message_supports_codex_turn_failed(tmp_path):
     assert update.metadata and update.metadata.get("engine") == "codex"
 
 
+def test_parse_system_init_includes_model_capabilities(tmp_path):
+    """System init should expose model capability fields for downstream UI usage."""
+    manager = _build_manager(tmp_path)
+    update = manager._parse_system_message(
+        {
+            "subtype": "init",
+            "tools": ["Read"],
+            "permissionMode": "default",
+            "modelInfo": {
+                "supportsEffort": True,
+                "supportedEffortLevels": ["low", "medium", "high"],
+                "supportsAdaptiveThinking": False,
+            },
+        }
+    )
+
+    assert update.type == "system"
+    assert update.metadata is not None
+    assert update.metadata.get("subtype") == "init"
+    assert update.metadata.get("supportsEffort") is True
+    assert update.metadata.get("supports_effort") is True
+    assert update.metadata.get("supportedEffortLevels") == ["low", "medium", "high"]
+    assert update.metadata.get("supported_effort_levels") == [
+        "low",
+        "medium",
+        "high",
+    ]
+    assert update.metadata.get("supportsAdaptiveThinking") is False
+    assert update.metadata.get("supports_adaptive_thinking") is False
+    assert update.metadata.get("permission_mode") == "default"
+
+
 @pytest.mark.asyncio
 async def test_start_process_unsets_claudecode_env(tmp_path, monkeypatch):
     """Subprocess mode should not inherit CLAUDECODE marker."""

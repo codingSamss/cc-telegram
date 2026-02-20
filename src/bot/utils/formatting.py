@@ -47,20 +47,23 @@ class ResponseFormatter:
     def format_claude_response(
         self, text: str, context: Optional[dict] = None
     ) -> List[FormattedMessage]:
-        """Enhanced formatting with context awareness and semantic chunking."""
+        """Format Claude responses for Telegram with minimal fragmentation."""
         # Clean and prepare text
         text = self._clean_text(text)
 
-        # Check if we need semantic chunking (for complex content)
-        if self._should_use_semantic_chunking(text):
-            # Use enhanced semantic chunking for complex content
-            chunks = self._semantic_chunk(text, context)
-            messages = []
-            for chunk in chunks:
-                formatted = self._format_chunk(chunk)
-                messages.extend(formatted)
+        messages: List[FormattedMessage]
+
+        # Prefer a single message bubble when the cleaned payload already fits
+        # Telegram limits; this avoids fragmented text/code rendering in chat.
+        if len(text) <= self.max_message_length:
+            single_text = self._format_code_blocks(text)
+            if len(single_text) <= self.max_message_length:
+                messages = [FormattedMessage(single_text)]
+            else:
+                messages = self._split_message(single_text)
         else:
-            # Use original simple formatting for basic content
+            # For long replies, prefer contiguous length-based splitting so code
+            # and explanation stay in-order and avoid per-section bubbles.
             text = self._format_code_blocks(text)
             messages = self._split_message(text)
 
@@ -530,13 +533,21 @@ class ResponseFormatter:
             return cell + " " * pad
 
         # Build box-drawing table
-        top = "\u250c" + "\u252c".join("\u2500" * (w + 2) for w in col_widths) + "\u2510"
-        mid = "\u251c" + "\u253c".join("\u2500" * (w + 2) for w in col_widths) + "\u2524"
-        bot = "\u2514" + "\u2534".join("\u2500" * (w + 2) for w in col_widths) + "\u2518"
+        top = (
+            "\u250c" + "\u252c".join("\u2500" * (w + 2) for w in col_widths) + "\u2510"
+        )
+        mid = (
+            "\u251c" + "\u253c".join("\u2500" * (w + 2) for w in col_widths) + "\u2524"
+        )
+        bot = (
+            "\u2514" + "\u2534".join("\u2500" * (w + 2) for w in col_widths) + "\u2518"
+        )
 
         out_lines = [top]
         for ri, row in enumerate(rows):
-            cells = " \u2502 ".join(_pad(row[ci], col_widths[ci]) for ci in range(num_cols))
+            cells = " \u2502 ".join(
+                _pad(row[ci], col_widths[ci]) for ci in range(num_cols)
+            )
             out_lines.append(f"\u2502 {cells} \u2502")
             if ri == 0 and len(rows) > 1:
                 out_lines.append(mid)
@@ -559,9 +570,7 @@ class ResponseFormatter:
                 parts.append(line)
                 continue
 
-            parts.append(
-                self._INLINE_CODE_URL_PATTERN.sub(lambda m: m.group(1), line)
-            )
+            parts.append(self._INLINE_CODE_URL_PATTERN.sub(lambda m: m.group(1), line))
 
         return "\n".join(parts)
 
@@ -627,6 +636,7 @@ class ResponseFormatter:
 
     def _escape_markdown_outside_code(self, text: str) -> str:
         """Escape Markdown characters outside of code blocks."""
+
         # Preserve intentional Markdown emphasis while escaping non-formatting chars.
         def _escape_segment(segment: str) -> str:
             placeholders: dict[str, str] = {}
@@ -648,19 +658,11 @@ class ResponseFormatter:
             segment = self._URL_PATTERN.sub(_replace_url, segment)
 
             def _replace_bold(match: re.Match[str]) -> str:
-                inner = (
-                    match.group(1)
-                    .replace("_", r"\_")
-                    .replace("*", r"\*")
-                )
+                inner = match.group(1).replace("_", r"\_").replace("*", r"\*")
                 return _store(f"*{inner}*")
 
             def _replace_italic(match: re.Match[str]) -> str:
-                inner = (
-                    match.group(1)
-                    .replace("_", r"\_")
-                    .replace("*", r"\*")
-                )
+                inner = match.group(1).replace("_", r"\_").replace("*", r"\*")
                 return _store(f"_{inner}_")
 
             # Protect bold/italic fragments first.
