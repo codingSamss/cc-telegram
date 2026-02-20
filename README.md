@@ -1,59 +1,86 @@
 # CLITG
 
-通过 IM 远程操控 CLI 编码智能体，支持多引擎切换、多会话、工具权限审批、流式输出。
+通过 TG（Telegram）远程操控 CLI 编码智能体的机器人，支持 Claude/Codex 双引擎、项目级会话、文件与图片输入、会话导出与安全审计。
 
-基于 Python，当前集成 Telegram + Claude/Codex 双引擎。Long Polling 模式，无需公网 IP 或反向代理，启动即用。
+当前实现基于 Long Polling（无需公网 IP/反向代理），核心代码入口见 `src/main.py`，命令注册见 `src/bot/core.py`。
+
+## 核心能力
+
+- 双引擎：`claude`（默认）+ 可选 `codex`
+- 会话管理：按用户 + 聊天作用域 + 目录隔离
+- 目录安全：仅允许 `APPROVED_DIRECTORY` 及子目录
+- 文件处理：文本/代码/压缩包（含基础安全检查）
+- 图片处理：支持多图输入与进度流式反馈
+- 导出能力：会话可导出为 Markdown/HTML/JSON
+- 安全治理：认证、限流、审计、工具权限审批
 
 ## 架构概览
 
-```
-IM 客户端 (Telegram / ...)
-    |  HTTPS
-    v
-IM 平台 API
-    |  Long Polling / Webhook
-    v
-本地 Python Bot 进程
-    |  引擎抽象层 (SDK / CLI 子进程)
-    v
-CLI 编码智能体 (Claude / Codex / ...)
-    |  结果解析 + SQLite 存储
-    v
-IM 回复用户
+```mermaid
+flowchart LR
+    subgraph U["接入层"]
+        A["TG Client"]
+        B["Telegram Bot API<br/>Long Polling"]
+    end
+
+    subgraph C["Bot 编排层"]
+        C1["CLITG Bot<br/>python-telegram-bot"]
+        C2["Session / Security / Rate Limit / Audit"]
+    end
+
+    subgraph E["引擎层"]
+        E0{"Engine Facade"}
+        E1["Claude SDK"]
+        E2["Claude CLI Subprocess"]
+        E3["Codex CLI Adapter"]
+    end
+
+    subgraph S["存储层"]
+        S1["SQLite<br/>Session / Events / Approvals / Audit"]
+    end
+
+    A -->|HTTPS| B --> C1
+    C1 --> C2
+    C1 --> E0
+    E0 --> E1
+    E0 --> E2
+    E0 --> E3
+    C1 <--> S1
 ```
 
-Bot 使用 Long Polling 模式主动拉取消息，不需要公网 IP 或反向代理。引擎集成采用双后端架构：SDK 为主、CLI 子进程兜底，失败时自动切换。
+```text
+TG Client -> Telegram Bot API -> CLITG Bot -> Engine Facade -> Claude/Codex
+                                  |
+                                  -> SQLite (Session/Event/Audit)
+```
+
+说明：
+- 默认走 `USE_SDK=true` 的 Claude SDK 路径。
+- SDK 遇到可重试错误时，会尝试 CLI 子进程兜底（见 `src/claude/facade.py`）。
+- Codex 通过 CLI 适配接入（`ENABLE_CODEX_CLI=true`）。
 
 ## 前置要求
 
-- Python 3.10+ (推荐 3.11)
-- [Poetry](https://python-poetry.org/) 包管理器
-- Claude Code CLI (已登录认证)
-- Telegram 账号
+- Python 3.10+（推荐 3.11）
+- [Poetry](https://python-poetry.org/) 包管理
+- Telegram 账号 + BotFather 创建的 Bot
+- Claude CLI 已安装并认证（建议）
+- 可选：Codex CLI（如需 Codex 引擎）
 
-## 部署步骤
+## 快速开始
 
-### Step 1: 安装系统依赖
+### 1) 安装依赖
 
 ```bash
 # macOS
 brew install python@3.11
-
-# Poetry
 curl -sSL https://install.python-poetry.org | python3 -
 
-# Node.js (CLI fallback 模式需要)
+# Claude CLI / Codex CLI 依赖 Node 环境时
 brew install node
 ```
 
-### Step 2: 创建 Telegram Bot
-
-1. 在 Telegram 搜索 `@BotFather`，发送 `/newbot`
-2. 按提示设置 Bot 名称，获得 **Bot Token** (格式: `1234567890:ABC-DEF...`)
-3. 记下 Bot 用户名 (不带 `@`)
-4. 获取你的 User ID: 向 `@userinfobot` 发消息，记下返回的数字
-
-### Step 3: 克隆项目并安装依赖
+### 2) 安装项目
 
 ```bash
 git clone <repo-url> ~/cli-tg
@@ -61,156 +88,183 @@ cd ~/cli-tg
 poetry install
 ```
 
-### Step 4: 配置环境变量
+### 3) 配置 Telegram Bot
+
+1. 在 Telegram 中打开 `@BotFather`，执行 `/newbot`
+2. 获取 `TELEGRAM_BOT_TOKEN`
+3. 记录 Bot 用户名（不带 `@`）
+4. 向 `@userinfobot` 发送消息，获取自己的 Telegram User ID
+
+### 4) 配置环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`，填写以下必填项:
+最小可用配置：
 
 ```bash
-# === 必填 ===
-TELEGRAM_BOT_TOKEN=<从 BotFather 获取>
-TELEGRAM_BOT_USERNAME=<Bot 用户名，不带 @>
-APPROVED_DIRECTORY=/path/to/your/projects
+TELEGRAM_BOT_TOKEN=<BotFather token>
+TELEGRAM_BOT_USERNAME=<bot username without @>
+APPROVED_DIRECTORY=<absolute path>
+ALLOWED_USERS=<your telegram user id>
+```
 
-# === 安全 ===
-ALLOWED_USERS=<你的 Telegram User ID>
+推荐引擎配置（与当前代码默认一致）：
 
-# === CLI 引擎集成 ===
-USE_SDK=false
-CLAUDE_CLI_PATH=./claude-wrapper.sh
-CLAUDE_MAX_TURNS=50
-CLAUDE_TIMEOUT_SECONDS=600
+```bash
+# Claude 主路径（默认）
+USE_SDK=true
 
-# 可选：开启 Codex 引擎适配
-ENABLE_CODEX_CLI=true
+# 可选：启用 Codex CLI 适配
+ENABLE_CODEX_CLI=false
 CODEX_CLI_PATH=
-
-# 建议默认 false，避免 MCP 启动卡顿；需要 MCP 工具时再临时打开
 CODEX_ENABLE_MCP=false
 ```
 
-完整配置项参考 `.env.example`。
+说明：
+- `APPROVED_DIRECTORY` 必须是已存在的绝对目录，否则启动失败。
+- 生产环境必须至少启用一种认证来源：`ALLOWED_USERS` 或 `ENABLE_TOKEN_AUTH=true`。
+- 若 `ALLOWED_USERS` 为空且 `DEVELOPMENT_MODE=true`，会进入开发放行模式（仅建议本地调试）。
 
-### Step 5: 配置 claude-wrapper.sh
-
-如果使用 CLI 子进程模式 (`USE_SDK=false`)，建议从模板复制：
-
-```bash
-cp claude-wrapper.example.sh claude-wrapper.sh
-chmod +x claude-wrapper.sh
-```
-
-然后按你的本机环境修改 `claude-wrapper.sh`（例如代理地址、CLI 路径）。  
-本地 `claude-wrapper.sh` 保持在 `.gitignore` 中，避免把机器相关配置提交到仓库。
-
-### Step 6: 确保 Claude CLI 已认证
+### 5) 启动
 
 ```bash
-# 安装 Claude Code CLI
-npm install -g @anthropic-ai/claude-code
-
-# 登录认证
-claude auth login
-
-# 验证状态
-claude auth status
-```
-
-### Step 7: 启动
-
-```bash
-# 普通启动
 make run
-
-# 或 Debug 日志启动
+# 或
 make run-debug
-
-# 或直接运行
-poetry run python -m src.main
+# 或
+poetry run cli-tg-bot --debug
 ```
 
-启动后在 Telegram 中给 Bot 发消息即可使用。
+## 关键配置项
 
-## 日常使用
+完整配置请以 `.env.example` 为准，这里列常用项：
 
-### Bot 命令（与当前版本同步）
+- 认证与安全
+  - `ALLOWED_USERS`：白名单用户 ID（逗号分隔）
+  - `ENABLE_TOKEN_AUTH` / `AUTH_TOKEN_SECRET`：令牌认证
+  - `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW` / `RATE_LIMIT_BURST`：限流参数
+- Claude 引擎
+  - `USE_SDK`：是否走 SDK
+  - `CLAUDE_CLI_PATH`：CLI 路径（CLI 模式或 SDK fallback 使用）
+  - `CLAUDE_MODEL` / `CLAUDE_MAX_TURNS` / `CLAUDE_TIMEOUT_SECONDS`
+  - `CLAUDE_SETTING_SOURCES`：通常留空，特殊网关场景再配置
+- Codex 引擎
+  - `ENABLE_CODEX_CLI`：启用 Codex 适配
+  - `CODEX_CLI_PATH`：Codex 二进制路径（留空时尝试 PATH）
+  - `CODEX_ENABLE_MCP`：是否允许 Codex 读取 MCP 配置
+- 存储与功能
+  - `DATABASE_URL`（默认 `sqlite:///data/bot.db`）
+  - `ENABLE_GIT_INTEGRATION` / `ENABLE_FILE_UPLOADS` / `ENABLE_QUICK_ACTIONS`
 
-| 命令 | 说明 | 适用引擎 |
-|------|------|------|
-| `/start` | 显示欢迎页与快捷入口 | 全部 |
-| `/help` | 查看完整命令说明 | 全部 |
-| `/engine [claude\|codex]` | 切换 CLI 引擎（也可不带参数走按钮） | 全部 |
-| `/resume` | 恢复桌面端最近会话 | 全部 |
-| `/new` | 清除当前绑定并新建会话 | 全部 |
-| `/continue [message]` | 显式续接当前会话 | 全部 |
-| `/end` | 结束当前会话 | 全部 |
-| `/context [full]` | 查看会话上下文与用量 | 全部（Claude 主展示） |
-| `/status [full]` | `/context` 的兼容别名 | 全部（Codex 主展示） |
-| `/model` | Claude：按钮切换 Sonnet/Opus/Haiku | Claude |
-| `/model [name\|default]` | Codex：设置/清除 `--model` | Codex |
-| `/codexdiag [root\|<session_id>]` | 诊断 Codex MCP 调用情况 | Codex |
-| `/cd <path>` | 切换目录（带安全校验） | 全部 |
-| `/ls` | 列出当前目录内容 | 全部 |
-| `/pwd` | 查看当前目录 | 全部 |
-| `/projects` | 显示可用项目 | 全部 |
-| `/git` | Git 仓库信息与操作入口 | 全部 |
-| `/actions` | 快捷动作菜单 | 全部 |
-| `/export` | 导出当前会话 | 全部 |
-| `/cancel` | 取消当前运行中的任务 | 全部 |
+## 命令清单（与代码同步）
 
-### 使用方式
+以下命令来源于 `src/bot/core.py` 当前注册项：
 
-- 直接发送文本消息 = 向当前引擎（Claude/Codex）下达指令
-- 发送文件 = 由当前引擎分析文件内容（支持代码、配置、文档）
-- 发送图片 = 引擎分析截图/图表（能力取决于当前引擎与模式）
-- 会话按“用户 + 会话作用域（私聊/群聊话题）+ 目录”维护
-- 引擎切换后会清理旧会话绑定，并引导你重新选择目录与可恢复会话
+| 命令 | 说明 |
+|---|---|
+| `/start` | 欢迎页与快捷入口 |
+| `/help` | 查看完整帮助 |
+| `/new` | 新建会话并清理当前上下文绑定 |
+| `/continue [message]` | 显式继续当前会话 |
+| `/end` | 结束当前会话 |
+| `/resume` | 从桌面会话恢复 |
+| `/engine [claude\|codex]` | 切换引擎 |
+| `/context [full]` | 会话状态/用量（Claude 主命令） |
+| `/status [full]` | 会话状态/用量（Codex 主命令） |
+| `/model` / `/model <name\|default>` | 模型查看/切换（行为随引擎变化） |
+| `/codexdiag [root\|<session_id>]` | Codex MCP 诊断（Codex 引擎） |
+| `/provider` | 切换 cc-switch API 供应商（Claude 菜单显示） |
+| `/cd <path>` | 切换目录（带安全校验） |
+| `/ls` | 列目录 |
+| `/pwd` | 当前目录 |
+| `/projects` | 列出可用项目 |
+| `/git` | 安全 Git 信息与快捷操作 |
+| `/actions` | 快捷动作面板 |
+| `/export` | 导出当前会话 |
+| `/cancel` | 取消当前运行任务 |
+
+补充说明：
+- `/provider` 依赖本机 cc-switch（`~/.cc-switch/cc-switch.db`），且通常用于 Claude 供应商切换。
+- `/resume` 会扫描桌面会话：Claude 为 `~/.claude/projects`，Codex 为 `~/.codex/sessions`（仅展示 `APPROVED_DIRECTORY` 下项目）。
+
+## 引擎差异说明
+
+- Claude 引擎
+  - 支持 `/model` 按钮切换（sonnet/opus/haiku/default）
+  - `/context` 是主状态命令（`/status` 为兼容别名）
+- Codex 引擎
+  - 支持 `/model <name>` 透传为 `--model`
+  - `/status` 是主状态命令（`/context` 为兼容别名）
+  - 支持 `/codexdiag`
+  - 默认通过 `-c mcp_servers={}` 禁用 MCP（除非 `CODEX_ENABLE_MCP=true`）
+
+## 文件与图片处理
+
+- 文件上传
+  - 默认上限约 10MB（Telegram 文档处理路径）
+  - 支持文本/代码文件，压缩包支持基础提取与安全检查
+- 图片上传
+  - 支持单图与同组多图聚合处理
+  - 当后端不支持图片输入时会返回明确提示
+  - 临时图片文件存放在项目目录 `.claude-images/`（建议保持在 `.gitignore`）
 
 ## 安全模型
 
-5 层防御体系:
+- 身份认证：白名单或令牌认证
+- 目录隔离：所有操作受 `APPROVED_DIRECTORY` 限制
+- 输入校验：路径与命令注入关键模式拦截
+- 限流：Token Bucket
+- 审计与追踪：SQLite 持久化（含安全事件与审批记录）
+- Git 安全：仅允许白名单只读命令子集（如 `status/log/diff/show`）
 
-| 层级 | 机制 | 说明 |
-|------|------|------|
-| 身份认证 | Telegram User ID 白名单 | `ALLOWED_USERS` 配置 |
-| 目录隔离 | `APPROVED_DIRECTORY` + 路径穿越防护 | 只允许访问指定目录及子目录 |
-| 输入验证 | 屏蔽 `..`、`;`、`&&`、`$()` 等 | 阻止命令注入 |
-| 限流 | Token Bucket 算法 | 可配置请求数/窗口/突发容量 |
-| 审计日志 | 全操作记录 | 安全事件自动告警 |
-
-> Telegram Bot 消息非端到端加密，经过 Telegram 服务器中转。不要通过 Bot 传递密码、API Key 等敏感信息。
-
-## 故障排查
-
-| 问题 | 原因 | 解决 |
-|------|------|------|
-| `ModuleNotFoundError` | 依赖未安装 | `poetry install` |
-| `No such file: claude` | CLI 路径错误 | 检查 `.env` 中 `CLAUDE_CLI_PATH` |
-| `Can't parse entities` | 消息格式解析失败 | 检查响应中的特殊字符转义 |
-| `Authentication failed` | User ID 不在白名单 | 检查 `ALLOWED_USERS` |
-| `Rate limit exceeded` | 请求过于频繁 | 调整 `RATE_LIMIT_*` 配置 |
-| Bot 无响应 | Token 错误或进程未启动 | 检查 `TELEGRAM_BOT_TOKEN` 和进程状态 |
-| `Claude process error: exit code 1` | 常见于引擎/模型不匹配 | 先 `/engine claude`，再 `/model` 选 Claude 模型或执行 `/model default` |
-| `invalid claude code request` | SDK 显式 setting sources 与网关不兼容 | 保持 `CLAUDE_SETTING_SOURCES` 为空；若需要强制来源再设为 `user,project,local` |
+> Telegram Bot 消息会经过 Telegram 服务器中转，不适合传递高敏感密钥。
 
 ## 开发命令
 
 ```bash
-make dev          # 安装所有依赖 (含开发依赖)
-make install      # 仅安装生产依赖
-make run          # 启动 Bot
-make run-debug    # Debug 日志启动
-make test         # 运行测试 + 覆盖率
-make lint         # Black + isort + flake8 + mypy
-make format       # 自动格式化代码
+make dev          # 安装开发依赖并尝试安装 pre-commit
+make install      # 安装生产依赖
+make run          # 启动 bot
+make run-debug    # debug 启动
+make test         # 运行 pytest + 覆盖率
+make lint         # black/isort/flake8/mypy
+make format       # 自动格式化
+make clean        # 清理缓存与产物
 ```
 
-## 参考链接
+## macOS 重启建议（tmux）
 
-- [python-telegram-bot 文档](https://docs.python-telegram-bot.org/)
-- [claude-agent-sdk](https://pypi.org/project/claude-agent-sdk/)
-- [Telegram Bot API](https://core.telegram.org/bots/api)
-- [Poetry 文档](https://python-poetry.org/docs/)
+项目在 macOS 下推荐使用 `tmux` 守护进程重启：
+
+```bash
+tmux kill-session -t cli_tg_bot
+tmux new-session -d -s cli_tg_bot -c /Users/suqi3/PycharmProjects/cli-tg './scripts/restart-bot.sh'
+```
+
+检查运行状态：
+
+```bash
+ps -Ao pid,ppid,command | rg -i 'cli-tg-bot|claude-telegram-bot|src.main' | rg -v 'rg -i'
+tmux capture-pane -t cli_tg_bot -p | tail -n 80
+```
+
+## 常见问题
+
+| 问题 | 常见原因 | 建议处理 |
+|---|---|---|
+| `Configuration loading failed` | 必填环境变量缺失或目录不存在 | 检查 `.env` 与 `APPROVED_DIRECTORY` |
+| `No authentication providers configured` | 未配置白名单且未启用 token auth（且非 dev 放行） | 配置 `ALLOWED_USERS` 或启用 token auth |
+| `ENABLE_CODEX_CLI is true but codex binary not found` | 未安装 Codex CLI 或路径错误 | 安装 Codex CLI / 设置 `CODEX_CLI_PATH` |
+| 图片提示当前引擎不支持 | 当前引擎/模式不具备图片能力 | 切到 `claude` + SDK，或使用支持 `--image` 的 Codex CLI |
+| `invalid claude code request` | 部分网关与显式 setting sources 不兼容 | 先保持 `CLAUDE_SETTING_SOURCES=` 为空 |
+| `/codexdiag` 无输出或超时 | 当前非 codex、无脚本、或会话日志不可用 | 先 `/engine codex`，再检查 `scripts/cc_codex_diagnose.py` |
+
+## 参考文档
+
+- `docs/` 目录下的开发与配置文档
+- `SECURITY.md`
+- `SYSTEMD_SETUP.md`
+- [python-telegram-bot](https://docs.python-telegram-bot.org/)
+- [Poetry](https://python-poetry.org/docs/)
