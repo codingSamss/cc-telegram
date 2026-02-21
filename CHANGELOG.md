@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### 修复
+- **Telegram 轮询无响应故障修复（2026-02-21）**：
+  - 现象：Bot 进程存活且持续打印 `getUpdates 200 OK`，但私聊消息（如 `/engine`）无回包。
+  - 定位：消息已到达 Telegram（存在 pending update），问题发生在轮询网络链路，而非白名单或命令路由逻辑。
+  - 修复：更新 `scripts/restart-bot.sh`，在启动时显式统一代理环境变量（`http_proxy/https_proxy` 与 `HTTP_PROXY/HTTPS_PROXY`），避免会话环境差异导致轮询连接异常。
+  - 验证：重启后 `pending_update_count=0`，审计日志出现最新 `auth_attempt` 与 `command success` 记录，消息处理恢复正常。
+
 ### 新增
 - **会话自动恢复**：现在会按用户+目录自动恢复会话
   - SDK 集成现向 Claude Code 传递 `resume` 参数以实现真正的会话连续性
