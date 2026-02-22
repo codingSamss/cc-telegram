@@ -359,34 +359,6 @@ class TestClaudeSDKManager:
         assert len(stream_updates) > 0
         assert any(update.type == "assistant" for update in stream_updates)
 
-    async def test_execute_command_emits_init_stream_update(
-        self, sdk_manager, tmp_path, monkeypatch
-    ):
-        """SDK mode should emit an init update for thinking UI parity."""
-        monkeypatch.setenv("HOME", str(tmp_path))
-        stream_updates = []
-
-        async def stream_callback(update: StreamUpdate):
-            stream_updates.append(update)
-
-        async def mock_query(prompt, options):
-            yield _make_assistant_message("Test response")
-            yield _make_result_message()
-
-        with patch("src.claude.sdk_integration.query", side_effect=mock_query):
-            await sdk_manager.execute_command(
-                prompt="Test prompt",
-                working_directory=Path("/test"),
-                stream_callback=stream_callback,
-            )
-
-        assert len(stream_updates) >= 1
-        init_update = stream_updates[0]
-        assert init_update.type == "system"
-        assert init_update.metadata is not None
-        assert init_update.metadata.get("subtype") == "init"
-        assert init_update.metadata.get("model") == "auto (Claude CLI default)"
-
     async def test_execute_command_emits_resolved_model_update(self, sdk_manager):
         """SDK mode should emit resolved model once first assistant message arrives."""
         stream_updates = []
@@ -478,10 +450,10 @@ class TestClaudeSDKManager:
         assert updates[0].metadata.get("supports_adaptive_thinking") is False
         assert updates[0].metadata.get("permission_mode") == "default"
 
-    async def test_handle_stream_message_skips_plain_init_without_capabilities(
+    async def test_handle_stream_message_passes_through_sdk_init(
         self, sdk_manager
     ):
-        """SDK generic init should be skipped to avoid duplicate synthetic init updates."""
+        """SDK init event should pass through with real tools/capabilities."""
         updates = []
 
         async def stream_callback(update: StreamUpdate):
@@ -498,7 +470,9 @@ class TestClaudeSDKManager:
 
         await sdk_manager._handle_stream_message(message, stream_callback)
 
-        assert updates == []
+        assert len(updates) == 1
+        assert updates[0].metadata["subtype"] == "init"
+        assert updates[0].metadata["tools"] == ["Read"]
 
     async def test_execute_command_timeout(self, sdk_manager):
         """Test command execution timeout."""

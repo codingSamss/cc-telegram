@@ -39,3 +39,8 @@
 
 ## 安全与配置提示
 从 `.env.example` 复制生成 `.env`，严禁提交令牌、密钥或真实凭据。重点检查 `ALLOWED_USERS` 与 `APPROVED_DIRECTORY`，避免越权访问。涉及 Claude 命令执行路径时，优先使用本地 `claude-wrapper.sh` 并在提交前确认未泄露敏感配置。
+
+### 提交前隐私安全检查（必须执行）
+- 提交任何代码前，必须检查本次改动中是否包含敏感信息（token、key、cookie、密码、个人隐私数据、内部链接与账号标识）。
+- 至少执行一次基于 diff 的敏感词扫描（例如：`git diff --cached | rg -i 'token|secret|password|apikey|api_key|cookie|authorization|private key'`）。
+- 若发现疑似敏感信息，必须先清理或脱敏，再提交；禁止以“后续再改”方式带入仓库历史。

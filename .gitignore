@@ -154,3 +154,6 @@ claude-wrapper.sh
 
 # Claude Code
 .claude/
+
+# Serena local overrides
+.serena/project.yml

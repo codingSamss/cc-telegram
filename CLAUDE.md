@@ -189,6 +189,12 @@ Pydantic Settings v2 从环境变量加载（`src/config/settings.py`）。必�
 - pytest-asyncio，`asyncio_mode = "auto"`，测试中用 `AsyncMock` 模拟异步方法
 - structlog 结构化日志（生产 JSON，开发控制台），`SensitiveLogFilter` 脱敏 bot token
 
+## 提交前隐私安全检查（强制）
+
+- 提交前必须检查本次变更是否包含敏感信息：`token`、`secret`、`password`、`api key`、`cookie`、`authorization`、私钥、个人隐私数据。
+- 推荐先检查暂存区差异：`git diff --cached | rg -i 'token|secret|password|apikey|api_key|cookie|authorization|private key'`。
+- 一旦发现敏感信息，先完成清理/脱敏再提交；禁止将敏感内容写入 Git 历史后再修补。
+
 ## 添加新 Bot 命令
 
 1. 在 `src/bot/handlers/command.py` 中添加处理函数

@@ -625,27 +625,8 @@ class ClaudeSDKManager:
         stream_callback: Optional[Callable[[StreamUpdate], None]],
         options: ClaudeAgentOptions,
     ) -> None:
-        """Emit a synthetic init update for UI parity with CLI stream-json."""
-        if not stream_callback:
-            return
-
-        try:
-            await stream_callback(
-                StreamUpdate(
-                    type="system",
-                    metadata={
-                        "subtype": "init",
-                        "tools": self.config.claude_allowed_tools or [],
-                        # If user did not explicitly override model, SDK/CLI will
-                        # resolve its own default model. Do not display stale
-                        # config defaults here.
-                        "model": options.model or "auto (Claude CLI default)",
-                        "cwd": options.cwd,
-                    },
-                )
-            )
-        except Exception as e:
-            logger.warning("Failed to emit SDK init update", error=str(e))
+        """No-op: real SDK init event carries accurate tools/capabilities."""
+        return
 
     async def _emit_model_resolved_update(
         self,
@@ -802,20 +783,6 @@ class ClaudeSDKManager:
                 raw_data = getattr(message, "data", {})
                 subtype = str(getattr(message, "subtype", "") or "").strip()
                 metadata = self._build_sdk_system_metadata(raw_data, subtype=subtype)
-
-                # Avoid duplicate generic init updates: we already emit a synthetic
-                # init event. Only emit SDK init when it carries extra capability info.
-                if subtype == "init":
-                    has_extra_capabilities = any(
-                        (
-                            metadata.get("supports_effort") is not None,
-                            bool(metadata.get("supported_effort_levels")),
-                            metadata.get("supports_adaptive_thinking") is not None,
-                            bool(str(metadata.get("permission_mode") or "").strip()),
-                        )
-                    )
-                    if not has_extra_capabilities:
-                        return
 
                 content: Optional[str] = None
                 if isinstance(raw_data, dict):
