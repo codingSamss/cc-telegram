@@ -16,7 +16,7 @@ from asyncio.subprocess import Process
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import structlog
 
@@ -52,14 +52,14 @@ class StreamUpdate:
 
     type: str  # 'assistant', 'user', 'system', 'result', 'tool_result', 'error', 'progress'
     content: Optional[str] = None
-    tool_calls: Optional[List[Dict]] = None
-    metadata: Optional[Dict] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     # Enhanced fields for better tracking
     timestamp: Optional[str] = None
-    session_context: Optional[Dict] = None
-    progress: Optional[Dict] = None
-    error_info: Optional[Dict] = None
+    session_context: Optional[Dict[str, Any]] = None
+    progress: Optional[Dict[str, Any]] = None
+    error_info: Optional[Dict[str, Any]] = None
 
     # Execution tracking
     execution_id: Optional[str] = None
@@ -67,29 +67,42 @@ class StreamUpdate:
 
     def is_error(self) -> bool:
         """Check if this update represents an error."""
-        return self.type == "error" or (
-            self.metadata and self.metadata.get("is_error", False)
-        )
+        if self.type == "error":
+            return True
+        if not self.metadata:
+            return False
+        return bool(self.metadata.get("is_error", False))
 
     def get_tool_names(self) -> List[str]:
         """Extract tool names from tool calls."""
         if not self.tool_calls:
             return []
-        return [call.get("name") for call in self.tool_calls if call.get("name")]
+        names: List[str] = []
+        for call in self.tool_calls:
+            name = call.get("name")
+            if name:
+                names.append(str(name))
+        return names
 
     def get_progress_percentage(self) -> Optional[int]:
         """Get progress percentage if available."""
         if self.progress:
-            return self.progress.get("percentage")
+            percentage = self.progress.get("percentage")
+            if isinstance(percentage, (int, float)):
+                return int(percentage)
         return None
 
     def get_error_message(self) -> Optional[str]:
         """Get error message if this is an error update."""
         if self.error_info:
-            return self.error_info.get("message")
+            message = self.error_info.get("message")
+            return str(message) if message else None
         elif self.is_error() and self.content:
             return self.content
         return None
+
+
+StreamCallback = Callable[[StreamUpdate], Awaitable[None]]
 
 
 class ClaudeProcessManager:
@@ -112,7 +125,7 @@ class ClaudeProcessManager:
         working_directory: Path,
         session_id: Optional[str] = None,
         continue_session: bool = False,
-        stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        stream_callback: Optional[StreamCallback] = None,
         model: Optional[str] = None,
         images: Optional[List[Dict[str, str]]] = None,
     ) -> ClaudeResponse:
@@ -201,7 +214,7 @@ class ClaudeProcessManager:
 
     async def _emit_codex_init_updates(
         self,
-        stream_callback: Optional[Callable[[StreamUpdate], None]],
+        stream_callback: Optional[StreamCallback],
         working_directory: Path,
         model: Optional[str],
     ) -> None:
@@ -417,18 +430,22 @@ class ClaudeProcessManager:
     async def _handle_process_output(
         self,
         process: Process,
-        stream_callback: Optional[Callable],
+        stream_callback: Optional[StreamCallback],
         *,
         cli_kind: str = "claude",
     ) -> ClaudeResponse:
         """Memory-optimized output handling with bounded buffers."""
-        message_buffer = deque(maxlen=self.max_message_buffer)
+        message_buffer: deque[Dict[str, Any]] = deque(maxlen=self.max_message_buffer)
         result = None
         parsing_errors = []
         codex_thread_id = ""
         codex_emitted_model = ""
 
-        async for line in self._read_stream_bounded(process.stdout):
+        stdout_reader = process.stdout
+        if stdout_reader is None:
+            raise ClaudeProcessError("Claude subprocess stdout pipe is unavailable")
+
+        async for line in self._read_stream_bounded(stdout_reader):
             if not line:
                 continue
             if not line.lstrip().startswith("{"):
@@ -509,8 +526,12 @@ class ClaudeProcessManager:
         return_code = await process.wait()
 
         if return_code != 0:
-            stderr = await process.stderr.read()
-            error_msg = stderr.decode("utf-8", errors="replace")
+            stderr_reader = process.stderr
+            if stderr_reader is None:
+                error_msg = ""
+            else:
+                stderr = await stderr_reader.read()
+                error_msg = stderr.decode("utf-8", errors="replace")
             cli_display_name = "Codex CLI" if cli_kind == "codex" else "Claude Code"
             provider_name = "Codex" if cli_kind == "codex" else "Claude AI"
             logger.error(
@@ -584,7 +605,7 @@ class ClaudeProcessManager:
     async def _maybe_emit_codex_model_from_snapshot(
         self,
         *,
-        stream_callback: Optional[Callable[[StreamUpdate], None]],
+        stream_callback: Optional[StreamCallback],
         thread_id: str,
         emitted_model: str,
     ) -> str:
@@ -680,7 +701,7 @@ class ClaudeProcessManager:
                 return model
         return None
 
-    async def _read_stream(self, stream) -> AsyncIterator[str]:
+    async def _read_stream(self, stream: asyncio.StreamReader) -> AsyncIterator[str]:
         """Read lines from stream."""
         while True:
             line = await stream.readline()
@@ -688,7 +709,9 @@ class ClaudeProcessManager:
                 break
             yield line.decode("utf-8", errors="replace").strip()
 
-    async def _read_stream_bounded(self, stream) -> AsyncIterator[str]:
+    async def _read_stream_bounded(
+        self, stream: asyncio.StreamReader
+    ) -> AsyncIterator[str]:
         """Read stream with memory bounds to prevent excessive memory usage."""
         buffer = b""
 

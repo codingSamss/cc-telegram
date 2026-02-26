@@ -38,7 +38,7 @@ class ActiveTask:
 class TaskRegistry:
     """Manage active Claude tasks per user. Thread-safe via asyncio.Lock."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._tasks: Dict[str, ActiveTask] = {}
         self._lock = asyncio.Lock()
 

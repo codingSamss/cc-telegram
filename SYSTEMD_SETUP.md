@@ -1,6 +1,6 @@
 # Systemd 用户服务配置指南
 
-本指南介绍如何将 Claude Code Telegram Bot 作为持久化的 systemd 用户服务运行。
+本指南介绍如何将 CLITG（Claude/Codex 双引擎 Telegram Bot）作为持久化的 systemd 用户服务运行。
 
 **安全提示：** 配置服务前，请确保 `.env` 文件中已设置 `DEVELOPMENT_MODE=false` 和 `ENVIRONMENT=production` 以保证安全运行。
 
@@ -17,13 +17,13 @@ nano ~/.config/systemd/user/cli-tg.service
 
 ```ini
 [Unit]
-Description=Claude Code Telegram Bot
+Description=CLITG Telegram Bot
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ubuntu/Code/oss/claude-code-telegram
-ExecStart=/home/ubuntu/.local/bin/poetry run cli-tg
+WorkingDirectory=/home/ubuntu/Code/oss/cli-tg
+ExecStart=/home/ubuntu/.local/bin/poetry run cli-tg-bot
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -74,10 +74,9 @@ journalctl --user -u cli-tg -n 50 | grep -i "auth"
 
 # 应该显示：
 # "allowed_users": 1（如果配置了多个用户则更多）
-# "allow_all_dev": false
 ```
 
-如果看到 `allow_all_dev: true` 或 `environment: development`，请**立即停止服务**并修复 `.env` 文件。
+如果 `allowed_users` 为 0，应用会拒绝启动（fail-closed）。
 
 ## 常用命令
 
@@ -130,8 +129,8 @@ systemctl --user cat cli-tg
 poetry --version
 
 # 先手动测试 bot
-cd /home/ubuntu/Code/oss/claude-code-telegram
-poetry run cli-tg
+cd /home/ubuntu/Code/oss/cli-tg
+poetry run cli-tg-bot
 ```
 
 **注销后服务停止：**
@@ -145,4 +144,4 @@ loginctl enable-linger $USER
 
 - 服务文件：`~/.config/systemd/user/cli-tg.service`
 - 日志：使用 `journalctl --user -u cli-tg` 查看
-- 项目目录：`/home/ubuntu/Code/oss/claude-code-telegram`
+- 项目目录：`/home/ubuntu/Code/oss/cli-tg`

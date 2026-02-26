@@ -14,7 +14,6 @@ Claude Code Telegram Bot 实现了纵深防御的安全模型，包含多个层�
 
 ### 1. 认证与授权（TODO-3）
 - **用户白名单**：仅预先批准的 Telegram 用户 ID 可以访问 bot
-- **基于令牌的认证**：可选的令牌认证作为额外安全层
 - **会话管理**：安全的会话处理，带超时和清理
 
 ### 2. 目录边界（TODO-3）
@@ -27,10 +26,10 @@ Claude Code Telegram Bot 实现了纵深防御的安全模型，包含多个层�
 - **文件类型验证**：仅允许的文件类型可以上传
 - **路径清理**：移除危险字符和模式
 
-### 4. 限流（TODO-3）
-- **请求限流**：可配置的请求限制防止滥用
-- **基于费用的限制**：跟踪和限制每用户的 Claude 使用费用
-- **突发保护**：令牌桶算法防止突发攻击
+### 4. 运行时保护（TODO-3）
+- **Fail-closed 鉴权**：鉴权组件不可用时拒绝继续执行
+- **Callback 鉴权守卫**：按钮回调与消息入口统一执行鉴权
+- **异常隔离**：错误统一收敛并记录审计事件
 
 ### 5. 审计日志（TODO-3）
 - **认证事件**：记录所有登录尝试和认证失败
@@ -76,14 +75,6 @@ class SecurityValidator:
     def validate_filename(self, filename: str) -> Tuple[bool, Optional[str]]
 ```
 
-#### 限流
-```python
-# 已规划的实现
-class RateLimiter:
-    async def check_rate_limit(self, user_id: int, cost: float) -> Tuple[bool, Optional[str]]
-    async def track_usage(self, user_id: int, cost: float) -> None
-```
-
 ## 安全配置
 
 ### 必需的安全设置
@@ -94,23 +85,11 @@ APPROVED_DIRECTORY=/path/to/approved/projects
 
 # 用户访问控制
 ALLOWED_USERS=123456789,987654321  # Telegram 用户 ID
-
-# 可选：基于令牌的认证
-ENABLE_TOKEN_AUTH=true
-AUTH_TOKEN_SECRET=your-secret-here  # 生成方法: openssl rand -hex 32
 ```
 
 ### 推荐的安全设置
 
 ```bash
-# 生产环境严格限流
-RATE_LIMIT_REQUESTS=5
-RATE_LIMIT_WINDOW=60
-RATE_LIMIT_BURST=10
-
-# 费用控制
-CLAUDE_MAX_COST_PER_USER=5.0
-
 # 安全功能
 ENABLE_TELEMETRY=true  # 用于安全监控
 LOG_LEVEL=INFO         # 捕获安全事件
@@ -133,13 +112,11 @@ ENVIRONMENT=production  # 启用严格安全默认值
    # 应该使用: /home/user/projects, /opt/bot-projects
    ```
 
-2. **令牌管理**
+2. **白名单管理**
    ```bash
-   # 生成安全密钥
-   openssl rand -hex 32
-
-   # 存储在环境变量中，永远不要放在代码里
-   export AUTH_TOKEN_SECRET="generated-secret"
+   # 获取 Telegram 用户 ID：给 @userinfobot 发消息
+   # 仅加入可信用户
+   export ALLOWED_USERS="123456789,987654321"
    ```
 
 3. **用户管理**
@@ -211,12 +188,11 @@ ENVIRONMENT=production  # 启用严格安全默认值
 
 3. **未授权访问**（中优先级）
    - 非白名单用户的访问
-   - 令牌窃取和重放攻击
+   - 会话伪造和复用攻击
    - 会话劫持
 
 4. **资源滥用**（中优先级）
-   - 限流绕过尝试
-   - 费用限制违规
+   - 重复请求与滥用调用
    - 拒绝服务攻击
 
 5. **信息泄露**（低优先级）
@@ -272,9 +248,8 @@ ENVIRONMENT=production  # 启用严格安全默认值
 
 - [ ] APPROVED_DIRECTORY 已正确配置和限制
 - [ ] ALLOWED_USERS 白名单已配置
-- [ ] 限流已启用和配置
+- [ ] Callback 鉴权与审计已验证
 - [ ] 日志已启用和监控
-- [ ] 认证令牌已妥善保管
 - [ ] 环境变量已正确配置
 - [ ] 文件权限已正确设置
 - [ ] 网络访问已正确限制

@@ -14,6 +14,7 @@ import structlog
 
 from src import __version__
 from src.bot.core import ClaudeCodeBot
+from src.bot.utils.cc_switch import CCSwitchManager
 from src.claude import (
     ClaudeIntegration,
     ClaudeProcessManager,
@@ -29,11 +30,9 @@ from src.exceptions import ConfigurationError
 from src.security.audit import AuditLogger, SQLiteAuditStorage
 from src.security.auth import (
     AuthenticationManager,
-    InMemoryTokenStorage,
-    TokenAuthProvider,
+    AuthProvider,
     WhitelistAuthProvider,
 )
-from src.security.rate_limiter import RateLimiter
 from src.security.validators import SecurityValidator
 from src.services import (
     ApprovalService,
@@ -44,8 +43,6 @@ from src.services import (
 )
 from src.storage.facade import Storage
 from src.storage.session_storage import SQLiteSessionStorage
-
-from src.bot.utils.cc_switch import CCSwitchManager
 
 _TELEGRAM_BOT_TOKEN_IN_URL_RE = re.compile(
     r"(https?://api\.telegram\.org/bot)([^/\s]+)"
@@ -139,29 +136,19 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     await storage.initialize()
 
     # Create security components
-    providers = []
+    providers: list[AuthProvider] = []
 
     # Add whitelist provider if users are configured
     if config.allowed_users:
         providers.append(WhitelistAuthProvider(config.allowed_users))
 
-    # Add token provider if enabled
-    if config.enable_token_auth:
-        token_storage = InMemoryTokenStorage()  # TODO: Use database storage
-        providers.append(TokenAuthProvider(config.auth_token_secret, token_storage))
-
-    # Fall back to allowing all users in development mode
-    if not providers and config.development_mode:
-        logger.warning(
-            "No auth providers configured - creating development-only allow-all provider"
+    if not providers:
+        raise ConfigurationError(
+            "No authentication providers configured. " "Set ALLOWED_USERS."
         )
-        providers.append(WhitelistAuthProvider([], allow_all_dev=True))
-    elif not providers:
-        raise ConfigurationError("No authentication providers configured")
 
     auth_manager = AuthenticationManager(providers)
     security_validator = SecurityValidator(config.approved_directory)
-    rate_limiter = RateLimiter(config)
 
     # Create audit storage and logger
     audit_storage = SQLiteAuditStorage(storage.audit)
@@ -228,7 +215,8 @@ async def create_application(config: Settings) -> Dict[str, Any]:
             logger.info("Codex CLI adapter enabled", codex_cli_path=codex_cli_path)
         else:
             logger.warning(
-                "ENABLE_CODEX_CLI is true but codex binary not found; skip codex adapter"
+                "ENABLE_CODEX_CLI is true but codex binary not found; "
+                "skip codex adapter"
             )
 
     # Initialize cc-switch provider manager
@@ -243,7 +231,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     dependencies = {
         "auth_manager": auth_manager,
         "security_validator": security_validator,
-        "rate_limiter": rate_limiter,
         "audit_logger": audit_logger,
         "claude_integration": claude_integration,
         "storage": storage,
@@ -283,7 +270,7 @@ async def run_application(app: Dict[str, Any]) -> None:
     # Set up signal handlers for graceful shutdown
     shutdown_event = asyncio.Event()
 
-    def signal_handler(signum, frame):
+    def signal_handler(signum: int, frame: Any) -> None:
         logger.info("Shutdown signal received", signal=signum)
         shutdown_event.set()
 
@@ -355,8 +342,6 @@ async def main() -> None:
 
     try:
         # Load configuration
-        from src.config import FeatureFlags, load_config
-
         config = load_config(config_file=args.config_file)
         features = FeatureFlags(config)
 

@@ -70,7 +70,7 @@ def _decode_project_dir_name(dir_name: str) -> Optional[Path]:
 
 
 def _get_project_last_modified(project_dir: Path) -> tuple[float, int]:
-    """Get the latest modification timestamp and session count from sessions-index.json."""
+    """Get latest modified timestamp and session count from sessions-index.json."""
     index_file = project_dir / "sessions-index.json"
     if not index_file.exists():
         return project_dir.stat().st_mtime, 0
@@ -98,7 +98,9 @@ def _get_project_last_modified(project_dir: Path) -> tuple[float, int]:
 
         return latest_ts, len(entries)
     except (json.JSONDecodeError, OSError) as e:
-        logger.debug("Failed to parse sessions-index.json", path=str(index_file), error=str(e))
+        logger.debug(
+            "Failed to parse sessions-index.json", path=str(index_file), error=str(e)
+        )
         return project_dir.stat().st_mtime, 0
 
 
@@ -106,7 +108,7 @@ def scan_recent_projects(
     approved_directory: Path,
     limit: int = RECENT_PROJECT_LIMIT,
 ) -> list[RecentProject]:
-    """Scan ~/.claude/projects/ for recently active projects under approved_directory."""
+    """Scan ~/.claude/projects for recent projects under approved_directory."""
     if not CLAUDE_PROJECTS_DIR.exists():
         return []
 
@@ -168,7 +170,9 @@ def build_recent_projects_message(
 
         marker = " (current)" if is_current else ""
         sessions_info = f", {proj.session_count} sessions" if proj.session_count else ""
-        lines.append(f"{'> ' if is_current else ''}  `{rel_text}`{marker}{sessions_info}")
+        lines.append(
+            f"{'> ' if is_current else ''}  `{rel_text}`{marker}{sessions_info}"
+        )
 
         button_label = f"{'> ' if is_current else ''}{proj.name}"
         if len(button_label) > 30:

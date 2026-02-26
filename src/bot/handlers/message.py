@@ -19,7 +19,6 @@ from ...claude.exceptions import ClaudeToolValidationError
 from ...claude.task_registry import TaskRegistry
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
-from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
 from ...services.session_service import SessionService
 from ...utils.codex_rate_limits import format_rate_limit_summary
@@ -931,8 +930,8 @@ async def _collect_text_fragments(
         raw_map = context.bot_data.get(_TEXT_FRAGMENT_BUFFER_KEY)
         if not isinstance(raw_map, dict):
             return False, "", None, 0
-        buffer_map: MutableMapping[str, Any] = raw_map
-        current_state = buffer_map.get(aggregation_key)
+        second_pass_buffer_map: MutableMapping[str, Any] = raw_map
+        current_state = second_pass_buffer_map.get(aggregation_key)
         if not isinstance(current_state, dict):
             return False, "", None, 0
         if current_state.get("latest_message_id") != candidate_message_id:
@@ -941,7 +940,7 @@ async def _collect_text_fragments(
         parts = current_state.get("parts")
         if not isinstance(parts, list):
             parts = []
-        buffer_map.pop(aggregation_key, None)
+        second_pass_buffer_map.pop(aggregation_key, None)
 
     normalized_parts: list[dict[str, Any]] = []
     for item in parts:
@@ -1053,9 +1052,9 @@ async def _collect_media_group_photos(
         raw_map = context.bot_data.get(_MEDIA_GROUP_BUFFER_KEY)
         if not isinstance(raw_map, dict):
             return False, [], None, None
-        buffer_map: MutableMapping[str, Any] = raw_map
+        second_pass_buffer_map: MutableMapping[str, Any] = raw_map
 
-        current_state = buffer_map.get(aggregation_key)
+        current_state = second_pass_buffer_map.get(aggregation_key)
         if not isinstance(current_state, dict):
             return False, [], None, None
         if current_state.get("latest_message_id") != message_id:
@@ -1064,7 +1063,7 @@ async def _collect_media_group_photos(
         items = current_state.get("items")
         if not isinstance(items, list):
             items = []
-        buffer_map.pop(aggregation_key, None)
+        second_pass_buffer_map.pop(aggregation_key, None)
 
     normalized_items: list[dict[str, Any]] = []
     for item in items:
@@ -1106,7 +1105,7 @@ async def _collect_media_group_photos(
     return True, merged_photos, merged_caption, source_message_id
 
 
-async def _format_progress_update(update_obj) -> Optional[str]:
+async def _format_progress_update(update_obj: Any) -> Optional[str]:
     """Format progress updates with enhanced context and visual indicators."""
     if update_obj.type == "tool_result":
         # Show tool completion status
@@ -1253,12 +1252,12 @@ def _format_error_message(error_str: str, *, engine: str = ENGINE_CLAUDE) -> str
         )
     elif "timeout" in error_str.lower():
         return (
-            f"⏰ **Request Timeout**\n\n"
-            f"Your request took too long to process and timed out.\n\n"
-            f"**What you can do:**\n"
-            f"• Try breaking down your request into smaller parts\n"
-            f"• Use simpler commands\n"
-            f"• Try again in a moment"
+            "⏰ **Request Timeout**\n\n"
+            "Your request took too long to process and timed out.\n\n"
+            "**What you can do:**\n"
+            "• Try breaking down your request into smaller parts\n"
+            "• Use simpler commands\n"
+            "• Try again in a moment"
         )
     else:
         # Generic error handling
@@ -1384,10 +1383,12 @@ def _build_session_context_summary(snapshot: Optional[dict[str, Any]]) -> Option
         return None
 
     used_percent: Optional[float] = None
-    try:
-        used_percent = float(snapshot.get("used_percent"))
-    except (TypeError, ValueError):
-        used_percent = None
+    used_percent_raw = snapshot.get("used_percent")
+    if used_percent_raw is not None:
+        try:
+            used_percent = float(used_percent_raw)
+        except (TypeError, ValueError):
+            used_percent = None
 
     total_tokens_raw = snapshot.get("total_tokens")
     remaining_tokens_raw = snapshot.get("remaining_tokens")
@@ -1557,20 +1558,24 @@ def _cache_thinking_data(
     max_cache: int = 5,
 ) -> None:
     """Cache thinking process into context.user_data, keep latest max_cache entries."""
+    user_data = context.user_data
+    if user_data is None:
+        return
+
     cache_key = f"thinking:{message_id}"
-    context.user_data[cache_key] = {
+    user_data[cache_key] = {
         "lines": list(lines),
         "summary": summary,
     }
 
     # Clean old cache: only keep latest max_cache entries
     thinking_keys = sorted(
-        [k for k in context.user_data if k.startswith("thinking:")],
+        [k for k in user_data if isinstance(k, str) and k.startswith("thinking:")],
         key=lambda k: int(k.split(":")[1]),
     )
     while len(thinking_keys) > max_cache:
         oldest = thinking_keys.pop(0)
-        context.user_data.pop(oldest, None)
+        user_data.pop(oldest, None)
 
 
 def _format_elapsed_time(total_seconds: int) -> str:
@@ -1624,7 +1629,7 @@ async def _run_with_image_analysis_heartbeat(
     engine_label: str = "当前引擎",
 ) -> Any:
     """Run image analysis while sending adaptive heartbeat updates."""
-    task = asyncio.create_task(run_coro)
+    task: asyncio.Future[Any] = asyncio.ensure_future(run_coro)
     loop = asyncio.get_event_loop()
     start_time = loop.time()
     last_heartbeat_at = 0
@@ -1721,6 +1726,9 @@ def _get_pending_reaction_feedback(
         return None
 
     timestamp_raw = payload.get("timestamp")
+    if timestamp_raw is None:
+        scope_state.pop(_REACTION_FEEDBACK_STATE_KEY, None)
+        return None
     try:
         timestamp = float(timestamp_raw)
     except (TypeError, ValueError):
@@ -1800,10 +1808,18 @@ async def handle_text_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Handle regular text messages as Claude prompts."""
-    user_id = update.effective_user.id
-    message_text = str(update.message.text or "")
-    input_chat_id = getattr(update.effective_chat, "id", None)
-    input_message_id = getattr(update.message, "message_id", None)
+    effective_user = update.effective_user
+    telegram_message = update.message
+    effective_chat = update.effective_chat
+    if effective_user is None or telegram_message is None or effective_chat is None:
+        return
+
+    user_id = effective_user.id
+    message_text = str(telegram_message.text or "")
+    input_chat_id = effective_chat.id
+    if not isinstance(input_chat_id, int):
+        return
+    input_message_id = getattr(telegram_message, "message_id", None)
     settings: Settings = context.bot_data["settings"]
     scope_key, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -1812,7 +1828,6 @@ async def handle_text_message(
     )
 
     # Get services
-    rate_limiter: Optional[RateLimiter] = context.bot_data.get("rate_limiter")
     audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
 
     aggregated_ready, aggregated_text, aggregated_source_message_id, fragment_count = (
@@ -1841,33 +1856,22 @@ async def handle_text_message(
     typing_heartbeat_task: Optional[asyncio.Task] = None
 
     try:
-        # Check rate limit with estimated cost for text processing
-        estimated_cost = _estimate_text_processing_cost(message_text)
-
-        if rate_limiter:
-            allowed, limit_message = await rate_limiter.check_rate_limit(
-                user_id, estimated_cost
-            )
-            if not allowed:
-                await _reply_text_resilient(update.message, f"⏱️ {limit_message}")
-                return
-
         # Check if user already has an active task
         task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
         if task_registry and await task_registry.is_busy(user_id, scope_key=scope_key):
             await _reply_text_resilient(
-                update.message, "A task is already running. Use /cancel to cancel it."
+                telegram_message, "A task is already running. Use /cancel to cancel it."
             )
             return
 
         # Keep typing indicator alive while the thinking/progress flow is running.
         typing_heartbeat_task = asyncio.create_task(
             _send_chat_action_heartbeat(
-                message=update.message,
+                message=telegram_message,
                 action="typing",
                 stop_event=typing_stop_event,
-                message_thread_id=getattr(update.message, "message_thread_id", None),
-                chat_type=getattr(update.effective_chat, "type", None),
+                message_thread_id=getattr(telegram_message, "message_thread_id", None),
+                chat_type=getattr(effective_chat, "type", None),
             )
         )
 
@@ -1880,7 +1884,7 @@ async def handle_text_message(
 
         if not cli_integration:
             await _reply_text_resilient(
-                update.message,
+                telegram_message,
                 _with_engine_badge(
                     "❌ **CLI 引擎不可用**\n\n"
                     "当前 CLI 引擎未正确配置。"
@@ -1897,7 +1901,7 @@ async def handle_text_message(
             [[InlineKeyboardButton("Cancel", callback_data="cancel:task")]]
         )
         progress_msg = await _reply_text_resilient(
-            update.message,
+            telegram_message,
             _with_engine_badge("🤔 正在处理你的请求...", active_engine),
             parse_mode="Markdown",
             reply_to_message_id=input_message_id,
@@ -1934,13 +1938,9 @@ async def handle_text_message(
             max(settings.stream_render_min_edit_interval_ms, 0) / 1000
         )
         last_progress_edit_ts = stream_loop.time()
-        progress_edit_attempts = 0
-        PROGRESS_EDIT_RETRY_LIMIT = 3
-        progress_edit_attempts = 0
-        PROGRESS_EDIT_RETRY_LIMIT = 3
 
         async def _flush_pending_progress(force: bool = False) -> None:
-            nonlocal progress_msg, last_progress_text, pending_progress_text, last_progress_edit_ts
+            nonlocal last_progress_text, last_progress_edit_ts
 
             async with progress_flush_lock:
                 if not pending_progress_text:
@@ -2020,7 +2020,7 @@ async def handle_text_message(
             if progress_flush_task and not progress_flush_task.done():
                 return
 
-            async def _runner():
+            async def _runner() -> None:
                 try:
                     if debounce_seconds > 0:
                         await asyncio.sleep(debounce_seconds)
@@ -2040,7 +2040,7 @@ async def handle_text_message(
                     pass
             progress_flush_task = None
 
-        async def stream_handler(update_obj):
+        async def stream_handler(update_obj: Any) -> None:
             nonlocal progress_msg, last_progress_text, pending_progress_text
             nonlocal last_progress_edit_ts
             try:
@@ -2112,9 +2112,9 @@ async def handle_text_message(
         settings_obj: Settings = context.bot_data["settings"]
         permission_handler = build_permission_handler(
             bot=context.bot,
-            chat_id=update.effective_chat.id,
+            chat_id=input_chat_id,
             settings=settings_obj,
-            chat_type=getattr(update.effective_chat, "type", None),
+            chat_type=getattr(effective_chat, "type", None),
             message_thread_id=getattr(
                 update.effective_message, "message_thread_id", None
             ),
@@ -2132,7 +2132,7 @@ async def handle_text_message(
             _resolve_pending_reaction_feedback(
                 context=context,
                 user_id=user_id,
-                chat_id=update.effective_chat.id,
+                chat_id=input_chat_id,
                 thread_id=current_thread_id,
                 scope_state=scope_state,
             )
@@ -2152,7 +2152,7 @@ async def handle_text_message(
 
         # Run Claude command as cancellable task
 
-        async def _run_claude():
+        async def _run_claude() -> Any:
             return await cli_integration.run_command(
                 prompt=model_prompt,
                 working_directory=current_dir,
@@ -2175,7 +2175,7 @@ async def handle_text_message(
                 task,
                 prompt_summary=message_text,
                 progress_message_id=progress_msg.message_id,
-                chat_id=update.effective_chat.id,
+                chat_id=input_chat_id,
                 scope_key=scope_key,
             )
 
@@ -2418,23 +2418,23 @@ async def handle_text_message(
                         msg_text = context_prefix + msg_text
                     else:
                         await _reply_text_resilient(
-                            update.message,
+                            telegram_message,
                             context_tag,
                             parse_mode="Markdown",
                             reply_to_message_id=reply_to_id,
                             bot=context.bot,
-                            chat_type=getattr(update.effective_chat, "type", None),
+                            chat_type=getattr(effective_chat, "type", None),
                         )
                         reply_to_id = None
 
                 await _reply_text_resilient(
-                    update.message,
+                    telegram_message,
                     msg_text,
                     parse_mode=message.parse_mode,
                     reply_markup=message.reply_markup,
                     reply_to_message_id=reply_to_id,
                     bot=context.bot,
-                    chat_type=getattr(update.effective_chat, "type", None),
+                    chat_type=getattr(effective_chat, "type", None),
                 )
 
                 # Small delay between messages to avoid rate limits
@@ -2447,14 +2447,14 @@ async def handle_text_message(
                 )
                 # Try to send error message
                 await _reply_text_resilient(
-                    update.message,
+                    telegram_message,
                     _with_engine_badge(
                         f"❌ {_engine_label(active_engine)} 响应发送失败，请重试。",
                         active_engine,
                     ),
                     reply_to_message_id=input_message_id if i == 0 else None,
                     bot=context.bot,
-                    chat_type=getattr(update.effective_chat, "type", None),
+                    chat_type=getattr(effective_chat, "type", None),
                 )
 
         if not blocked_local_image_fallback:
@@ -2528,14 +2528,14 @@ async def handle_text_message(
                 )
             else:
                 await progress_msg.delete()
-        except:
+        except Exception:
             pass
 
         # Clean up frozen messages
         for frozen_msg in frozen_messages:
             try:
                 await frozen_msg.delete()
-            except:
+            except Exception:
                 pass
 
         error_msg = _format_error_message(
@@ -2543,7 +2543,7 @@ async def handle_text_message(
             engine=locals().get("active_engine", ENGINE_CLAUDE),
         )
         await _reply_text_resilient(
-            update.message,
+            telegram_message,
             _with_engine_badge(error_msg, locals().get("active_engine", ENGINE_CLAUDE)),
             parse_mode="Markdown",
         )
@@ -2576,8 +2576,28 @@ async def handle_text_message(
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle file uploads."""
-    user_id = update.effective_user.id
-    document = update.message.document
+    effective_user = update.effective_user
+    telegram_message = update.message
+    effective_chat = update.effective_chat
+    if effective_user is None or telegram_message is None or effective_chat is None:
+        return
+
+    document = telegram_message.document
+    if document is None:
+        return
+
+    chat_id = effective_chat.id
+    if not isinstance(chat_id, int):
+        return
+
+    user_id = effective_user.id
+    document_name = str(document.file_name or "uploaded_file")
+    raw_file_size = document.file_size
+    document_size = (
+        int(raw_file_size)
+        if isinstance(raw_file_size, (int, float)) and raw_file_size >= 0
+        else 0
+    )
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -2594,22 +2614,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "security_validator"
     )
     audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
-    rate_limiter: Optional[RateLimiter] = context.bot_data.get("rate_limiter")
 
     logger.info(
         "Processing document upload",
         user_id=user_id,
-        filename=document.file_name,
-        file_size=document.file_size,
+        filename=document_name,
+        file_size=document_size,
     )
 
     try:
         # Validate filename using security validator
         if security_validator:
-            valid, error = security_validator.validate_filename(document.file_name)
+            valid, error = security_validator.validate_filename(document_name)
             if not valid:
                 await _reply_text_resilient(
-                    update.message, f"❌ **File Upload Rejected**\n\n{error}"
+                    telegram_message, f"❌ **File Upload Rejected**\n\n{error}"
                 )
 
                 # Log security violation
@@ -2617,39 +2636,29 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     await audit_logger.log_security_violation(
                         user_id=user_id,
                         violation_type="invalid_file_upload",
-                        details=f"Filename: {document.file_name}, Error: {error}",
+                        details=f"Filename: {document_name}, Error: {error}",
                         severity="medium",
                     )
                 return
 
         # Check file size limits
         max_size = 10 * 1024 * 1024  # 10MB
-        if document.file_size > max_size:
+        if document_size > max_size:
             await _reply_text_resilient(
-                update.message,
+                telegram_message,
                 f"❌ **File Too Large**\n\n"
                 f"Maximum file size: {max_size // 1024 // 1024}MB\n"
-                f"Your file: {document.file_size / 1024 / 1024:.1f}MB",
+                f"Your file: {document_size / 1024 / 1024:.1f}MB",
             )
             return
 
-        # Check rate limit for file processing
-        file_cost = _estimate_file_processing_cost(document.file_size)
-        if rate_limiter:
-            allowed, limit_message = await rate_limiter.check_rate_limit(
-                user_id, file_cost
-            )
-            if not allowed:
-                await _reply_text_resilient(update.message, f"⏱️ {limit_message}")
-                return
-
         # Send processing indicator
-        await update.message.chat.send_action("upload_document")
+        await telegram_message.chat.send_action("upload_document")
 
         progress_msg = await _reply_text_resilient(
-            update.message,
+            telegram_message,
             _with_engine_badge(
-                f"📄 Processing file: `{document.file_name}`...",
+                f"📄 Processing file: `{document_name}`...",
                 active_engine,
             ),
             parse_mode="Markdown",
@@ -2665,14 +2674,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 processed_file = await file_handler.handle_document_upload(
                     document,
                     user_id,
-                    update.message.caption or "Please review this file:",
+                    telegram_message.caption or "Please review this file:",
                 )
                 prompt = processed_file.prompt
 
                 # Update progress message with file type info
                 await progress_msg.edit_text(
                     _with_engine_badge(
-                        f"📄 Processing {processed_file.type} file: `{document.file_name}`...",
+                        f"📄 Processing {processed_file.type} file: `{document_name}`...",
                         active_engine,
                     ),
                     parse_mode="Markdown",
@@ -2703,8 +2712,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     )
 
                 # Create prompt with file content
-                caption = update.message.caption or "Please review this file:"
-                prompt = f"{caption}\n\n**File:** `{document.file_name}`\n\n```\n{content}\n```"
+                caption = telegram_message.caption or "Please review this file:"
+                prompt = (
+                    f"{caption}\n\n**File:** `{document_name}`\n\n```\n{content}\n```"
+                )
 
             except UnicodeDecodeError:
                 await progress_msg.edit_text(
@@ -2726,7 +2737,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Create a new progress message for CLI processing
         claude_progress_msg = await _reply_text_resilient(
-            update.message,
+            telegram_message,
             _with_engine_badge("🤖 正在处理文件...", active_engine),
             parse_mode="Markdown",
         )
@@ -2747,9 +2758,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         force_new_session = scope_state.get("force_new_session", False)
         permission_handler = build_permission_handler(
             bot=context.bot,
-            chat_id=update.effective_chat.id,
+            chat_id=chat_id,
             settings=settings,
-            chat_type=getattr(update.effective_chat, "type", None),
+            chat_type=getattr(effective_chat, "type", None),
             message_thread_id=getattr(
                 update.effective_message, "message_thread_id", None
             ),
@@ -2810,30 +2821,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Send responses
             for i, message in enumerate(formatted_messages):
                 msg_text = message.text
-                reply_to_id = update.message.message_id if i == 0 else None
+                reply_to_id = telegram_message.message_id if i == 0 else None
                 if i == 0 and cli_context_tag:
                     context_prefix = cli_context_tag + "\n\n"
                     if len(context_prefix) + len(msg_text) <= _TELEGRAM_MESSAGE_LIMIT:
                         msg_text = context_prefix + msg_text
                     else:
                         await _reply_text_resilient(
-                            update.message,
+                            telegram_message,
                             cli_context_tag,
                             parse_mode="Markdown",
                             reply_to_message_id=reply_to_id,
                             bot=context.bot,
-                            chat_type=getattr(update.effective_chat, "type", None),
+                            chat_type=getattr(effective_chat, "type", None),
                         )
                         reply_to_id = None
 
                 await _reply_text_resilient(
-                    update.message,
+                    telegram_message,
                     msg_text,
                     parse_mode=message.parse_mode,
                     reply_markup=message.reply_markup,
                     reply_to_message_id=reply_to_id,
                     bot=context.bot,
-                    chat_type=getattr(update.effective_chat, "type", None),
+                    chat_type=getattr(effective_chat, "type", None),
                 )
 
                 if i < len(formatted_messages) - 1:
@@ -2845,7 +2856,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     context=context,
                     claude_response=claude_response,
                     scope_state=scope_state,
-                    reply_to_message_id=update.message.message_id,
+                    reply_to_message_id=telegram_message.message_id,
                 )
 
         except Exception as e:
@@ -2867,32 +2878,32 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if audit_logger:
             await audit_logger.log_file_access(
                 user_id=user_id,
-                file_path=document.file_name,
+                file_path=document_name,
                 action="upload_processed",
                 success=True,
-                file_size=document.file_size,
+                file_size=document_size,
             )
 
     except Exception as e:
         try:
             await progress_msg.delete()
-        except:
+        except Exception:
             pass
 
         error_msg = _with_engine_badge(
             _format_error_message(str(e), engine=active_engine),
             active_engine,
         )
-        await _reply_text_resilient(update.message, error_msg, parse_mode="Markdown")
+        await _reply_text_resilient(telegram_message, error_msg, parse_mode="Markdown")
 
         # Log failed file processing
         if audit_logger:
             await audit_logger.log_file_access(
                 user_id=user_id,
-                file_path=document.file_name,
+                file_path=document_name,
                 action="upload_failed",
                 success=False,
-                file_size=document.file_size,
+                file_size=document_size,
             )
 
         logger.error("Error processing document", error=str(e), user_id=user_id)
@@ -2900,7 +2911,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle photo uploads."""
-    user_id = update.effective_user.id
+    effective_user = update.effective_user
+    telegram_message = update.message
+    effective_chat = update.effective_chat
+    if effective_user is None or telegram_message is None or effective_chat is None:
+        return
+
+    chat_id = effective_chat.id
+    if not isinstance(chat_id, int):
+        return
+
+    user_id = effective_user.id
     (
         media_group_ready,
         grouped_photos,
@@ -2913,14 +2934,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     reply_target_message_id = (
         source_message_id
         if isinstance(source_message_id, int) and source_message_id > 0
-        else getattr(update.message, "message_id", None)
+        else getattr(telegram_message, "message_id", None)
     )
     photo_count = len(grouped_photos)
     if photo_count > 1:
         logger.info(
             "Merged inbound photo media_group",
             user_id=user_id,
-            media_group_id=getattr(update.message, "media_group_id", None),
+            media_group_id=getattr(telegram_message, "media_group_id", None),
             photo_count=photo_count,
             source_message_id=reply_target_message_id,
         )
@@ -2940,13 +2961,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
         if task_registry and await task_registry.is_busy(user_id, scope_key=scope_key):
             await _reply_text_resilient(
-                update.message, "A task is already running. Use /cancel to cancel it."
+                telegram_message, "A task is already running. Use /cancel to cancel it."
             )
             return
 
         try:
             last_status_text = ""
             thinking_lines: list[str] = []
+            progress_msg: Any = None
             cancel_keyboard = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("Cancel", callback_data="cancel:task")]]
             )
@@ -3029,7 +3051,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     )
                     try:
                         progress_msg = await _reply_text_resilient(
-                            update.message,
+                            telegram_message,
                             rendered_text,
                             parse_mode="Markdown",
                             reply_to_message_id=reply_target_message_id,
@@ -3100,7 +3122,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         pass
                 stream_flush_task = None
 
-            async def _image_stream_handler(update_obj) -> None:
+            async def _image_stream_handler(update_obj: Any) -> None:
                 nonlocal stream_mode, pending_stream_text
                 try:
                     progress_text = await _format_progress_update(update_obj)
@@ -3161,7 +3183,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 active_engine,
             )
             progress_msg = await _reply_text_resilient(
-                update.message,
+                telegram_message,
                 initial_status,
                 parse_mode="Markdown",
                 reply_to_message_id=reply_target_message_id,
@@ -3246,9 +3268,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             force_new_session = scope_state.get("force_new_session", False)
             permission_handler = build_permission_handler(
                 bot=context.bot,
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 settings=settings,
-                chat_type=getattr(update.effective_chat, "type", None),
+                chat_type=getattr(effective_chat, "type", None),
                 message_thread_id=getattr(
                     update.effective_message, "message_thread_id", None
                 ),
@@ -3298,7 +3320,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     _build_image_analyzing_status(0, engine_label=engine_label)
                 )
 
-                async def _run_image_claude():
+                async def _run_image_claude() -> Any:
                     return await _run_with_image_analysis_heartbeat(
                         run_coro=cli_integration.run_command(
                             prompt=model_prompt,
@@ -3324,7 +3346,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         image_task,
                         prompt_summary=model_prompt,
                         progress_message_id=progress_msg.message_id,
-                        chat_id=update.effective_chat.id,
+                        chat_id=chat_id,
                         scope_key=scope_key,
                     )
 
@@ -3505,23 +3527,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             msg_text = context_prefix + msg_text
                         else:
                             await _reply_text_resilient(
-                                update.message,
+                                telegram_message,
                                 img_context_tag,
                                 parse_mode="Markdown",
                                 reply_to_message_id=reply_to_id,
                                 bot=context.bot,
-                                chat_type=getattr(update.effective_chat, "type", None),
+                                chat_type=getattr(effective_chat, "type", None),
                             )
                             reply_to_id = None
 
                     await _reply_text_resilient(
-                        update.message,
+                        telegram_message,
                         msg_text,
                         parse_mode=message.parse_mode,
                         reply_markup=message.reply_markup,
                         reply_to_message_id=reply_to_id,
                         bot=context.bot,
-                        chat_type=getattr(update.effective_chat, "type", None),
+                        chat_type=getattr(effective_chat, "type", None),
                     )
 
                     if i < len(formatted_messages) - 1:
@@ -3566,7 +3588,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             summary_text,
                         )
                         await _reply_text_resilient(
-                            update.message,
+                            telegram_message,
                             error_bubble,
                             parse_mode="Markdown",
                             reply_to_message_id=reply_target_message_id,
@@ -3585,7 +3607,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         user_id=user_id,
                     )
                     await _reply_text_resilient(
-                        update.message,
+                        telegram_message,
                         error_bubble,
                         parse_mode="Markdown",
                         reply_to_message_id=reply_target_message_id,
@@ -3603,7 +3625,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as e:
             logger.error("Image processing failed", error=str(e), user_id=user_id)
             await _reply_text_resilient(
-                update.message,
+                telegram_message,
                 _with_engine_badge(
                     _format_error_message(
                         str(e),
@@ -3616,7 +3638,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         # Fall back to unsupported message
         await _reply_text_resilient(
-            update.message,
+            telegram_message,
             "📸 **Photo Upload**\n\n"
             "Photo processing is not yet supported.\n\n"
             "**Currently supported:**\n"
@@ -4088,12 +4110,14 @@ def _estimate_file_processing_cost(file_size: int) -> float:
 
 async def _generate_placeholder_response(
     message_text: str, context: ContextTypes.DEFAULT_TYPE
-) -> dict:
+) -> dict[str, str]:
     """Generate placeholder response until Claude integration is implemented."""
     settings: Settings = context.bot_data["settings"]
-    current_dir = getattr(
-        context.user_data, "current_directory", settings.approved_directory
-    )
+    current_dir = get_scope_state(
+        user_data=context.user_data,
+        scope_key="placeholder",
+        default_directory=settings.approved_directory,
+    ).get("current_directory", settings.approved_directory)
     relative_path = current_dir.relative_to(settings.approved_directory)
 
     # Analyze the message for intent
@@ -4128,17 +4152,17 @@ async def _generate_placeholder_response(
 
     elif any(word in message_lower for word in ["help", "how", "what", "explain"]):
         response_text = (
-            f"🤖 **Claude Code Response** _(Placeholder)_\n\n"
-            f"I'm here to help! Try using `/help` for available commands.\n\n"
-            f"**What I can do now:**\n"
-            f"• Navigate directories (`/cd`, `/ls`, `/pwd`)\n"
-            f"• Show projects (`/projects`)\n"
-            f"• Manage sessions (`/new`, `/context`)\n\n"
-            f"**Coming soon:**\n"
-            f"• Full Claude Code integration\n"
-            f"• Code generation and editing\n"
-            f"• File operations\n"
-            f"• Advanced programming assistance"
+            "🤖 **Claude Code Response** _(Placeholder)_\n\n"
+            "I'm here to help! Try using `/help` for available commands.\n\n"
+            "**What I can do now:**\n"
+            "• Navigate directories (`/cd`, `/ls`, `/pwd`)\n"
+            "• Show projects (`/projects`)\n"
+            "• Manage sessions (`/new`, `/context`)\n\n"
+            "**Coming soon:**\n"
+            "• Full Claude Code integration\n"
+            "• Code generation and editing\n"
+            "• File operations\n"
+            "• Advanced programming assistance"
         )
 
     else:
@@ -4158,11 +4182,11 @@ async def _generate_placeholder_response(
 
 
 def _update_working_directory_from_claude_response(
-    claude_response,
+    claude_response: Any,
     scope_state: dict[str, Any],
-    settings,
-    user_id,
-):
+    settings: Settings,
+    user_id: int,
+) -> None:
     """Update the working directory based on Claude's response content."""
     import re
     from pathlib import Path

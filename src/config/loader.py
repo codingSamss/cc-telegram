@@ -116,9 +116,6 @@ def _validate_config(settings: Settings) -> None:
     if settings.enable_mcp and not settings.mcp_config_path:
         raise InvalidConfigError("MCP enabled but no config path provided")
 
-    if settings.enable_token_auth and not settings.auth_token_secret:
-        raise InvalidConfigError("Token auth enabled but no secret provided")
-
     # Validate database path for SQLite
     if settings.database_url.startswith("sqlite:///"):
         db_path = settings.database_path
@@ -126,19 +123,8 @@ def _validate_config(settings: Settings) -> None:
             # Ensure parent directory exists
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Validate rate limiting settings
-    if settings.rate_limit_requests <= 0:
-        raise InvalidConfigError("rate_limit_requests must be positive")
-
-    if settings.rate_limit_window <= 0:
-        raise InvalidConfigError("rate_limit_window must be positive")
-
     if settings.claude_timeout_seconds <= 0:
         raise InvalidConfigError("claude_timeout_seconds must be positive")
-
-    # Validate cost limits
-    if settings.claude_max_cost_per_user <= 0:
-        raise InvalidConfigError("claude_max_cost_per_user must be positive")
 
 
 def _get_enabled_features_summary(settings: Settings) -> list[str]:
@@ -152,8 +138,6 @@ def _get_enabled_features_summary(settings: Settings) -> list[str]:
         features.append("file_uploads")
     if settings.enable_quick_actions:
         features.append("quick_actions")
-    if settings.enable_token_auth:
-        features.append("token_auth")
     if settings.webhook_url:
         features.append("webhook")
     return features

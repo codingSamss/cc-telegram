@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Tuple, TypedDict
 
 ButtonSpec = Tuple[str, str]
 KeyboardSpec = List[List[ButtonSpec]]
@@ -37,6 +37,21 @@ class ContextRenderResult:
     primary_text: str
     parse_mode: Optional[str]
     extra_texts: Tuple[str, ...] = ()
+
+
+class _CategorySummaryEntry(TypedDict):
+    name: str
+    tokens_raw: str
+    tokens: int | None
+    percent_raw: str
+    percent: float | None
+
+
+class _McpSummaryEntry(TypedDict):
+    tool: str
+    server: str
+    tokens_raw: str
+    tokens: int | None
 
 
 def _parse_token_count(value: str | None) -> int | None:
@@ -162,7 +177,7 @@ def _build_context_table_summary_lines(raw_text: str) -> list[str]:
 
     category_rows = _find_section_rows(sections, "Estimated usage by category")
     if category_rows:
-        entries: list[dict[str, object]] = []
+        entries: list[_CategorySummaryEntry] = []
         for row in category_rows:
             entries.append(
                 {
@@ -176,7 +191,7 @@ def _build_context_table_summary_lines(raw_text: str) -> list[str]:
 
         entries = sorted(
             entries,
-            key=lambda item: int(item.get("tokens") or 0),
+            key=lambda item: item["tokens"] if item["tokens"] is not None else 0,
             reverse=True,
         )
         top_entries = entries[:8]
@@ -200,14 +215,14 @@ def _build_context_table_summary_lines(raw_text: str) -> list[str]:
 
     mcp_rows = _find_section_rows(sections, "MCP Tools")
     if mcp_rows:
-        entries: list[dict[str, object]] = []
+        mcp_entries: list[_McpSummaryEntry] = []
         server_totals: dict[str, dict[str, int]] = {}
         for row in mcp_rows:
             tool = (row.get("Tool") or "unknown").strip()
             server = (row.get("Server") or "unknown").strip()
             token_raw = (row.get("Tokens") or "").strip()
             token_value = _parse_token_count(token_raw)
-            entries.append(
+            mcp_entries.append(
                 {
                     "tool": tool,
                     "server": server,
@@ -220,12 +235,12 @@ def _build_context_table_summary_lines(raw_text: str) -> list[str]:
             if isinstance(token_value, int):
                 stats["tokens"] += token_value
 
-        entries = sorted(
-            entries,
-            key=lambda item: int(item.get("tokens") or 0),
+        mcp_entries = sorted(
+            mcp_entries,
+            key=lambda item: item["tokens"] if item["tokens"] is not None else 0,
             reverse=True,
         )
-        top_tools = entries[:10]
+        top_tools = mcp_entries[:10]
         top_servers = sorted(
             server_totals.items(),
             key=lambda item: (item[1]["tokens"], item[1]["count"]),
@@ -235,7 +250,7 @@ def _build_context_table_summary_lines(raw_text: str) -> list[str]:
         if lines:
             lines.append("")
         lines.append("[MCP Tools Summary]")
-        lines.append(f"tool_count: {len(entries)}")
+        lines.append(f"tool_count: {len(mcp_entries)}")
         lines.append(f"server_count: {len(server_totals)}")
         lines.append("top_servers:")
         for server, stats in top_servers:
@@ -244,15 +259,15 @@ def _build_context_table_summary_lines(raw_text: str) -> list[str]:
             )
         lines.append("top_tools:")
         for item in top_tools:
-            token_value = item.get("tokens")
+            token_value = item["tokens"]
             token_display = (
                 f"{int(token_value):,}"
                 if isinstance(token_value, int)
                 else item["tokens_raw"] or "n/a"
             )
             lines.append(f"- {item['tool']} ({item['server']}): {token_display}")
-        if len(entries) > len(top_tools):
-            lines.append(f"... and {len(entries) - len(top_tools)} more tools")
+        if len(mcp_entries) > len(top_tools):
+            lines.append(f"... and {len(mcp_entries) - len(top_tools)} more tools")
 
     excluded_sections = {"Estimated usage by category", "MCP Tools"}
     extra_sections: list[tuple[str, int, int]] = []
@@ -473,18 +488,17 @@ class SessionInteractionService:
     @staticmethod
     def render_context_full_text(payload: dict) -> str:
         """Render readable full context payload text."""
-        session = (
-            payload.get("session") if isinstance(payload.get("session"), dict) else {}
+        session_payload = payload.get("session")
+        session: dict[str, Any] = (
+            session_payload if isinstance(session_payload, dict) else {}
         )
-        context_payload = (
-            payload.get("context_payload")
-            if isinstance(payload.get("context_payload"), dict)
-            else None
+        context_raw = payload.get("context_payload")
+        context_payload: dict[str, Any] | None = (
+            context_raw if isinstance(context_raw, dict) else None
         )
-        session_info = (
-            payload.get("session_info")
-            if isinstance(payload.get("session_info"), dict)
-            else None
+        session_info_raw = payload.get("session_info")
+        session_info: dict[str, Any] | None = (
+            session_info_raw if isinstance(session_info_raw, dict) else None
         )
 
         lines = [

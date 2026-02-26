@@ -34,7 +34,7 @@ class ClaudeSessionError(ClaudeError):
 class ClaudeMCPError(ClaudeError):
     """MCP server connection or configuration error."""
 
-    def __init__(self, message: str, server_name: str = None):
+    def __init__(self, message: str, server_name: str | None = None):
         super().__init__(message)
         self.server_name = server_name
 
@@ -43,7 +43,10 @@ class ClaudeToolValidationError(ClaudeError):
     """Tool validation failed during Claude execution."""
 
     def __init__(
-        self, message: str, blocked_tools: list = None, allowed_tools: list = None
+        self,
+        message: str,
+        blocked_tools: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
     ):
         super().__init__(message)
         self.blocked_tools = blocked_tools or []

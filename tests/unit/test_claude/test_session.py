@@ -245,12 +245,12 @@ class TestSessionManager:
         session1 = await session_manager.get_or_create_session(
             user_id=123, project_path=Path("/test/project1")
         )
-        session2 = await session_manager.get_or_create_session(
+        await session_manager.get_or_create_session(
             user_id=123, project_path=Path("/test/project2")
         )
 
         # Creating third session should remove oldest
-        session3 = await session_manager.get_or_create_session(
+        await session_manager.get_or_create_session(
             user_id=123, project_path=Path("/test/project3")
         )
 

@@ -6,7 +6,9 @@ prompts for Claude's multimodal input.
 """
 
 import base64
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Awaitable, Callable, Dict, Optional
 
 from telegram import PhotoSize
@@ -87,3 +89,36 @@ class ImageHandler:
         if len(image_bytes) < 100:
             return False, "Invalid image data"
         return True, None
+
+    @staticmethod
+    def cleanup_old_images(base_directory: Path, max_age_hours: int) -> int:
+        """Delete stale files under `.claude-images` and return deleted count."""
+        images_dir = base_directory / ".claude-images"
+        if not images_dir.exists() or not images_dir.is_dir():
+            return 0
+
+        max_age_seconds = max(1, int(max_age_hours)) * 3600
+        cutoff = time.time() - max_age_seconds
+        deleted = 0
+
+        for file_path in images_dir.rglob("*"):
+            if not file_path.is_file():
+                continue
+            try:
+                if file_path.stat().st_mtime < cutoff:
+                    file_path.unlink()
+                    deleted += 1
+            except OSError:
+                continue
+
+        # Best effort: prune empty directories after file cleanup.
+        for directory in sorted(
+            [path for path in images_dir.rglob("*") if path.is_dir()],
+            reverse=True,
+        ):
+            try:
+                directory.rmdir()
+            except OSError:
+                continue
+
+        return deleted

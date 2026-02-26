@@ -157,7 +157,6 @@ def build_precise_context_status_lines(context_usage: Dict[str, Any]) -> List[st
             probe_command = f"/{probe_command}"
         if not probe_command:
             probe_command = "/context"
-        estimated = bool(context_usage.get("estimated", False))
 
         header = f"\n*Context ({probe_command})*"
         if cached:
@@ -187,9 +186,13 @@ def _build_rate_limit_lines(rate_limits: Any) -> List[str]:
         entry = rate_limits.get(key)
         if not isinstance(entry, dict):
             continue
+        used_percent_raw = entry.get("used_percent")
+        window_minutes_raw = entry.get("window_minutes")
+        if used_percent_raw is None or window_minutes_raw is None:
+            continue
         try:
-            used_percent = float(entry.get("used_percent"))
-            window_minutes = int(entry.get("window_minutes"))
+            used_percent = float(used_percent_raw)
+            window_minutes = int(window_minutes_raw)
         except (TypeError, ValueError):
             continue
         if window_minutes <= 0:
@@ -199,12 +202,14 @@ def _build_rate_limit_lines(rate_limits: Any) -> List[str]:
             "used_percent": used_percent,
             "window_minutes": window_minutes,
         }
-        try:
-            resets_at = int(entry.get("resets_at"))
-            if resets_at > 0:
-                normalized["resets_at"] = resets_at
-        except (TypeError, ValueError):
-            pass
+        resets_at_raw = entry.get("resets_at")
+        if resets_at_raw is not None:
+            try:
+                resets_at = int(resets_at_raw)
+                if resets_at > 0:
+                    normalized["resets_at"] = resets_at
+            except (TypeError, ValueError):
+                pass
         entries.append(normalized)
 
     if not entries:

@@ -38,8 +38,8 @@ clean:
 	rm -rf .coverage htmlcov/ .pytest_cache/ dist/ build/
 
 run:
-	poetry run claude-telegram-bot
+	poetry run cli-tg-bot
 
 # For debugging
 run-debug:
-	poetry run claude-telegram-bot --debug
+	poetry run cli-tg-bot --debug

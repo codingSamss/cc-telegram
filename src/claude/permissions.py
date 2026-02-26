@@ -118,7 +118,7 @@ class PermissionManager:
 
         request_id = str(uuid.uuid4())[:8]
         loop = asyncio.get_running_loop()
-        future: asyncio.Future = loop.create_future()
+        future: asyncio.Future[bool] = loop.create_future()
 
         pending = PendingPermission(
             request_id=request_id,
@@ -159,7 +159,7 @@ class PermissionManager:
 
             # Wait for user response with timeout
             result = await asyncio.wait_for(future, timeout=self.timeout_seconds)
-            return result
+            return bool(result)
 
         except asyncio.TimeoutError:
             logger.warning(

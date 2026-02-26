@@ -3,12 +3,11 @@
 import os
 from collections.abc import AsyncIterable
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from claude_agent_sdk import (
     AssistantMessage,
-    ClaudeAgentOptions,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -174,7 +173,7 @@ class TestClaudeSDKManager:
     async def test_execute_command_falls_back_to_local_command_stdout(
         self, sdk_manager
     ):
-        """Local command stdout in UserMessage should be extracted when result is empty."""
+        """Extract stdout from UserMessage when ResultMessage.result is empty."""
 
         async def mock_query(prompt, options):
             yield UserMessage(
@@ -349,7 +348,7 @@ class TestClaudeSDKManager:
             yield _make_result_message()
 
         with patch("src.claude.sdk_integration.query", side_effect=mock_query):
-            response = await sdk_manager.execute_command(
+            await sdk_manager.execute_command(
                 prompt="Test prompt",
                 working_directory=Path("/test"),
                 stream_callback=stream_callback,
@@ -419,7 +418,7 @@ class TestClaudeSDKManager:
     async def test_handle_stream_message_emits_init_when_capabilities_present(
         self, sdk_manager
     ):
-        """SDK SystemMessage init should be forwarded when capability metadata exists."""
+        """Forward SDK SystemMessage init when capability metadata exists."""
         updates = []
 
         async def stream_callback(update: StreamUpdate):
@@ -450,9 +449,7 @@ class TestClaudeSDKManager:
         assert updates[0].metadata.get("supports_adaptive_thinking") is False
         assert updates[0].metadata.get("permission_mode") == "default"
 
-    async def test_handle_stream_message_passes_through_sdk_init(
-        self, sdk_manager
-    ):
+    async def test_handle_stream_message_passes_through_sdk_init(self, sdk_manager):
         """SDK init event should pass through with real tools/capabilities."""
         updates = []
 

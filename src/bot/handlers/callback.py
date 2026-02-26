@@ -1,9 +1,11 @@
 """Handle inline keyboard callbacks."""
 
+# mypy: disable-error-code=no-untyped-def
+
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -48,20 +50,20 @@ _CHAT_ACTION_HEARTBEAT_INTERVAL_SECONDS = 4.0
 
 
 async def _reply_query_message_resilient(
-    query,
+    query: Any,
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
     *,
     parse_mode: str | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
     reply_to_message_id: int | None = None,
-):
+) -> Any:
     """Reply to callback message with fallback to resilient send helper."""
     message = getattr(query, "message", None)
     if message is None:
         return None
 
-    send_kwargs = {}
+    send_kwargs: dict[str, Any] = {}
     if parse_mode is not None:
         send_kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
@@ -98,14 +100,14 @@ def _is_noop_edit_error(error: Exception) -> bool:
 
 
 async def _edit_query_message_resilient(
-    query,
+    query: Any,
     text: str,
     *,
     parse_mode: str | None | object = _PARSE_MODE_UNSET,
     reply_markup: InlineKeyboardMarkup | None = None,
-):
+) -> Any:
     """Edit callback message with markdown/no-op fallback."""
-    edit_kwargs = {}
+    edit_kwargs: dict[str, Any] = {}
     if parse_mode is not _PARSE_MODE_UNSET:
         edit_kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
@@ -189,6 +191,65 @@ async def _cancel_task_with_fallback(
             return True, True
 
     return False, False
+
+
+async def _authorize_callback_user(
+    *, user_id: int, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[bool, str]:
+    """Authorize callback actor before processing privileged actions."""
+    auth_manager = context.bot_data.get("auth_manager")
+    audit_logger: AuditLogger | None = context.bot_data.get("audit_logger")
+
+    if not auth_manager:
+        logger.error(
+            "Authentication manager unavailable for callback processing",
+            user_id=user_id,
+        )
+        return False, "🔒 Authentication system unavailable. Please try again later."
+
+    try:
+        if auth_manager.is_authenticated(user_id):
+            refresh_session = getattr(auth_manager, "refresh_session", None)
+            if callable(refresh_session):
+                refresh_session(user_id)
+            return True, ""
+    except Exception as exc:
+        logger.warning(
+            "Callback authentication pre-check failed",
+            user_id=user_id,
+            error=str(exc),
+        )
+
+    authenticated = False
+    try:
+        authenticated = await auth_manager.authenticate_user(user_id)
+    except Exception as exc:
+        logger.error(
+            "Callback authentication failed",
+            user_id=user_id,
+            error=str(exc),
+        )
+
+    if audit_logger:
+        try:
+            await audit_logger.log_auth_attempt(
+                user_id=user_id,
+                success=authenticated,
+                method="callback",
+                reason="callback_query",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to audit callback authentication attempt",
+                user_id=user_id,
+                error=str(exc),
+            )
+
+    if not authenticated:
+        logger.warning("Unauthorized callback blocked", user_id=user_id)
+        return False, "🔒 Authentication required. Please contact the administrator."
+
+    return True, ""
 
 
 def _resume_engine_label(engine: str) -> str:
@@ -478,11 +539,40 @@ async def handle_callback_query(
 ) -> None:
     """Route callback queries to appropriate handlers."""
     query = update.callback_query
+    if query is None:
+        logger.warning("Callback handler called without callback_query payload")
+        return
 
-    user_id = query.from_user.id
-    data = query.data
+    user_id = getattr(getattr(query, "from_user", None), "id", None)
+    if not isinstance(user_id, int):
+        logger.warning("Callback query missing user id")
+        await query.answer("🔒 Authentication required.", show_alert=True)
+        return
+
+    callback_data = getattr(query, "data", None)
+    if not isinstance(callback_data, str):
+        logger.warning(
+            "Callback query payload has invalid data type",
+            user_id=user_id,
+            data_type=type(callback_data).__name__,
+        )
+        await query.answer("❌ Invalid action payload. Please retry.", show_alert=True)
+        return
+
+    data = callback_data.strip()
+    if not data:
+        logger.warning("Callback query payload is empty", user_id=user_id)
+        await query.answer("❌ Invalid action payload. Please retry.", show_alert=True)
+        return
 
     logger.info("Processing callback query", user_id=user_id, callback_data=data)
+
+    authorized, auth_message = await _authorize_callback_user(
+        user_id=user_id, context=context
+    )
+    if not authorized:
+        await query.answer(auth_message, show_alert=True)
+        return
 
     try:
         # Parse callback data
@@ -494,7 +584,9 @@ async def handle_callback_query(
         # Handle cancel callback before the generic answer() call,
         # because cancel needs its own answer text.
         if action == "cancel" and param == "task":
-            task_registry: TaskRegistry = context.bot_data.get("task_registry")
+            task_registry: Optional[TaskRegistry] = context.bot_data.get(
+                "task_registry"
+            )
             if not task_registry:
                 await query.answer("Task registry not available.", show_alert=True)
                 return
@@ -526,7 +618,7 @@ async def handle_callback_query(
                     await query.edit_message_reply_markup(reply_markup=None)
                 except Exception:
                     pass
-            audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+            audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
             if audit_logger:
                 await audit_logger.log_command(
                     user_id=user_id, command="cancel_button", args=[], success=cancelled
@@ -556,7 +648,7 @@ async def handle_callback_query(
 
         handler = handlers.get(action)
         if handler:
-            await handler(query, param, context)
+            await handler(query, param or "", context)
         else:
             await _edit_query_message_resilient(
                 query,
@@ -596,8 +688,10 @@ async def handle_cd_callback(
     """Handle directory change from inline keyboard."""
     user_id = query.from_user.id
     settings: Settings = context.bot_data["settings"]
-    security_validator: SecurityValidator = context.bot_data.get("security_validator")
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    security_validator: Optional[SecurityValidator] = context.bot_data.get(
+        "security_validator"
+    )
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
     _, scope_state = _get_scope_state_for_query(query, context)
 
     try:
@@ -623,6 +717,11 @@ async def handle_cd_callback(
             if not valid:
                 await _edit_query_message_resilient(
                     query, f"❌ **Access Denied**\n\n{error}"
+                )
+                return
+            if resolved_path is None:
+                await _edit_query_message_resilient(
+                    query, "❌ **Access Denied**\n\nUnable to resolve directory."
                 )
                 return
             # Use the validated path
@@ -1063,7 +1162,7 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
         or SessionInteractionService()
     )
     view_spec = session_interaction.build_context_view_spec(for_callback=True)
-    loading_kwargs = {}
+    loading_kwargs: dict[str, Any] = {}
     if view_spec.loading_parse_mode:
         loading_kwargs["parse_mode"] = view_spec.loading_parse_mode
     await _edit_query_message_resilient(
@@ -1335,7 +1434,7 @@ async def handle_engine_callback(
             parse_mode="Markdown",
         )
 
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
     if audit_logger:
         await audit_logger.log_command(
             user_id=query.from_user.id,
@@ -1422,7 +1521,7 @@ async def handle_provider_callback(
             parse_mode="Markdown",
         )
 
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
     if audit_logger:
         await audit_logger.log_command(
             user_id=user_id,
@@ -2169,7 +2268,8 @@ async def handle_thinking_callback(
 
     action, message_id = param.split(":", 1)
     cache_key = f"thinking:{message_id}"
-    cached = context.user_data.get(cache_key)
+    user_data = context.user_data if isinstance(context.user_data, dict) else {}
+    cached = user_data.get(cache_key)
 
     if not cached:
         await _edit_query_message_resilient(
@@ -2283,7 +2383,7 @@ async def handle_thinking_callback(
 
 def _truncate_thinking(lines: list[str], max_chars: int = 3800) -> str:
     """Keep recent progress lines from the end, total length under max_chars."""
-    result = []
+    result: list[str] = []
     total = 0
     for line in reversed(lines):
         if total + len(line) + 1 > max_chars - 50:
@@ -2300,39 +2400,12 @@ def _truncate_thinking(lines: list[str], max_chars: int = 3800) -> str:
 
 def _format_file_size(size: int) -> str:
     """Format file size in human-readable format."""
+    size_value = float(size)
     for unit in ["B", "KB", "MB", "GB"]:
-        if size < 1024:
-            return f"{size:.1f}{unit}" if unit != "B" else f"{size}B"
-        size /= 1024
-    return f"{size:.1f}TB"
-
-
-def _escape_markdown(text: str) -> str:
-    """Escape special markdown characters in text for Telegram."""
-    # Escape characters that have special meaning in Telegram Markdown
-    special_chars = [
-        "_",
-        "*",
-        "[",
-        "]",
-        "(",
-        ")",
-        "~",
-        "`",
-        ">",
-        "#",
-        "+",
-        "-",
-        "=",
-        "|",
-        "{",
-        "}",
-        ".",
-        "!",
-    ]
-    for char in special_chars:
-        text = text.replace(char, f"\\{char}")
-    return text
+        if size_value < 1024:
+            return f"{size_value:.1f}{unit}" if unit != "B" else f"{int(size_value)}B"
+        size_value /= 1024
+    return f"{size_value:.1f}TB"
 
 
 async def handle_resume_callback(query, param, context):
@@ -2545,7 +2618,7 @@ async def _resume_select_project(
     )
 
     if not candidates:
-        keyboard = InlineKeyboardMarkup(
+        empty_markup = InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
@@ -2562,12 +2635,12 @@ async def _resume_select_project(
             f"`{project_cwd.name}`\n\n"
             f"Start a fresh session in this directory or run /resume again.",
             parse_mode="Markdown",
-            reply_markup=keyboard,
+            reply_markup=empty_markup,
         )
         return
 
     # Build session selection buttons + preview lines
-    keyboard = []
+    keyboard_rows: list[list[InlineKeyboardButton]] = []
     session_preview_lines: list[str] = []
     for c in candidates[:10]:  # limit to 10 sessions
         label = _build_resume_session_button_label(c)
@@ -2583,7 +2656,7 @@ async def _resume_select_project(
                 "engine": payload_engine,
             },
         )
-        keyboard.append(
+        keyboard_rows.append(
             [
                 InlineKeyboardButton(
                     label,
@@ -2592,7 +2665,7 @@ async def _resume_select_project(
             ]
         )
 
-    keyboard.append(
+    keyboard_rows.append(
         [
             InlineKeyboardButton(
                 "🆕 Start New Session Here",
@@ -2600,7 +2673,7 @@ async def _resume_select_project(
             )
         ]
     )
-    keyboard.append(
+    keyboard_rows.append(
         [
             InlineKeyboardButton(
                 "❌ Cancel",
@@ -2610,19 +2683,19 @@ async def _resume_select_project(
     )
 
     try:
-        rel = project_cwd.relative_to(settings.approved_directory)
+        rel_text = str(project_cwd.relative_to(settings.approved_directory))
     except ValueError:
-        rel = project_cwd.name
+        rel_text = project_cwd.name
 
     session_preview_text = "\n".join(session_preview_lines)
     await _edit_query_message_resilient(
         query,
-        f"**Sessions in** `{rel}`\n\n"
+        f"**Sessions in** `{rel_text}`\n\n"
         f"Session previews:\n"
         f"{session_preview_text}\n\n"
         f"Select a session to resume, or tap *Start New Session Here*:",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(keyboard_rows),
     )
 
 
@@ -2814,9 +2887,9 @@ async def _resume_start_new_session(
     )
 
     try:
-        rel = project_cwd.relative_to(settings.approved_directory)
+        rel_text = str(project_cwd.relative_to(settings.approved_directory))
     except ValueError:
-        rel = project_cwd.name
+        rel_text = project_cwd.name
 
     keyboard = [
         [
@@ -2835,19 +2908,19 @@ async def _resume_start_new_session(
         query,
         f"**New Session Ready**\n\n"
         f"Engine: `{payload_engine}`\n"
-        f"Directory: `{rel}/`\n\n"
+        f"Directory: `{rel_text}/`\n\n"
         f"Old session binding was cleared.\n"
         f"Send a message to start a fresh session now.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
     if audit_logger:
         await audit_logger.log_command(
             user_id=user_id,
             command="resume_new",
-            args=[str(rel)],
+            args=[rel_text],
             success=True,
         )
 
@@ -2879,9 +2952,9 @@ async def _do_adopt_session(
         return
 
     integrations = context.bot_data.get("cli_integrations") or {}
-    cli_integration: ClaudeIntegration = integrations.get(engine) or integrations.get(
-        ENGINE_CLAUDE
-    )
+    cli_integration: ClaudeIntegration | None = integrations.get(
+        engine
+    ) or integrations.get(ENGINE_CLAUDE)
     if cli_integration is None:
         cli_integration = context.bot_data.get("claude_integration")
 
@@ -2990,7 +3063,7 @@ async def _do_adopt_session(
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
-        audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+        audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
         if audit_logger:
             await audit_logger.log_command(
                 user_id=user_id,

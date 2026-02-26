@@ -25,7 +25,10 @@ class OutputParser:
     def parse_json_output(output: str) -> Dict[str, Any]:
         """Parse single JSON output."""
         try:
-            return json.loads(output)
+            parsed = json.loads(output)
+            if not isinstance(parsed, dict):
+                raise ClaudeParsingError("JSON output must be an object")
+            return parsed
         except json.JSONDecodeError as e:
             logger.error(
                 "Failed to parse JSON output", output=output[:200], error=str(e)

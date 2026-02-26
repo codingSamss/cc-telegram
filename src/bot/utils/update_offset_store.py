@@ -94,6 +94,8 @@ class UpdateOffsetStore:
 
         if isinstance(payload, dict):
             raw_update_id = payload.get("last_update_id")
+            if raw_update_id is None:
+                return None
             try:
                 parsed = int(raw_update_id)
             except (TypeError, ValueError):

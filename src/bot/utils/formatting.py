@@ -3,7 +3,7 @@
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import List, Optional, TypedDict
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -21,6 +21,12 @@ class FormattedMessage:
     def __len__(self) -> int:
         """Return length of message text."""
         return len(self.text)
+
+
+class _ContentSection(TypedDict):
+    type: str
+    content: str
+    start_line: int
 
 
 class ResponseFormatter:
@@ -184,7 +190,9 @@ class ResponseFormatter:
 
         return FormattedMessage(text, parse_mode="Markdown")
 
-    def _semantic_chunk(self, text: str, context: Optional[dict]) -> List[dict]:
+    def _semantic_chunk(
+        self, text: str, context: Optional[dict]
+    ) -> List[dict[str, str]]:
         """Split text into semantic chunks based on content type."""
         chunks = []
 
@@ -206,14 +214,16 @@ class ResponseFormatter:
 
         return chunks
 
-    def _identify_sections(self, text: str) -> List[dict]:
+    def _identify_sections(self, text: str) -> List[_ContentSection]:
         """Identify different content types in the text."""
-        sections = []
+        sections: List[_ContentSection] = []
         lines = text.split("\n")
-        current_section = {"type": "text", "content": "", "start_line": 0}
+        current_section: _ContentSection = {
+            "type": "text",
+            "content": "",
+            "start_line": 0,
+        }
         in_code_block = False
-        code_start = 0
-
         for i, line in enumerate(lines):
             # Check for code block markers
             if line.strip().startswith("```"):
@@ -222,7 +232,6 @@ class ResponseFormatter:
                     if current_section["content"].strip():
                         sections.append(current_section)
                     in_code_block = True
-                    code_start = i
                     current_section = {
                         "type": "code_block",
                         "content": line + "\n",
@@ -286,7 +295,7 @@ class ResponseFormatter:
         ]
         return any(indicator in line for indicator in file_indicators)
 
-    def _chunk_code_block(self, section: dict) -> List[dict]:
+    def _chunk_code_block(self, section: _ContentSection) -> List[dict[str, str]]:
         """Handle code block chunking."""
         content = section["content"]
         if len(content) <= self.max_code_block_length:
@@ -314,7 +323,7 @@ class ResponseFormatter:
 
         return chunks
 
-    def _chunk_explanation(self, section: dict) -> List[dict]:
+    def _chunk_explanation(self, section: _ContentSection) -> List[dict[str, str]]:
         """Handle explanation text chunking."""
         content = section["content"]
         if len(content) <= self.max_message_length:
@@ -340,12 +349,12 @@ class ResponseFormatter:
 
         return chunks
 
-    def _chunk_mixed_content(self, section: dict) -> List[dict]:
+    def _chunk_mixed_content(self, section: _ContentSection) -> List[dict[str, str]]:
         """Handle mixed content sections."""
         # For now, treat as regular text
         return self._chunk_text(section)
 
-    def _chunk_text(self, section: dict) -> List[dict]:
+    def _chunk_text(self, section: _ContentSection) -> List[dict[str, str]]:
         """Handle regular text chunking."""
         content = section["content"]
         if len(content) <= self.max_message_length:
@@ -370,11 +379,13 @@ class ResponseFormatter:
 
         return chunks
 
-    def _format_file_operations_section(self, section: dict) -> dict:
+    def _format_file_operations_section(
+        self, section: _ContentSection
+    ) -> dict[str, str]:
         """Format file operations section."""
         return {"type": "file_operations", "content": section["content"]}
 
-    def _format_chunk(self, chunk: dict) -> List[FormattedMessage]:
+    def _format_chunk(self, chunk: dict[str, str]) -> List[FormattedMessage]:
         """Format individual chunks into FormattedMessage objects."""
         chunk_type = chunk["type"]
         content = chunk["content"]
@@ -545,10 +556,10 @@ class ResponseFormatter:
 
         out_lines = [top]
         for ri, row in enumerate(rows):
-            cells = " \u2502 ".join(
+            row_cells = " \u2502 ".join(
                 _pad(row[ci], col_widths[ci]) for ci in range(num_cols)
             )
-            out_lines.append(f"\u2502 {cells} \u2502")
+            out_lines.append(f"\u2502 {row_cells} \u2502")
             if ri == 0 and len(rows) > 1:
                 out_lines.append(mid)
         out_lines.append(bot)
@@ -705,7 +716,7 @@ class ResponseFormatter:
         # Handle triple backticks with language specification
         pattern = r"```(\w+)?\n(.*?)```"
 
-        def replace_code_block(match):
+        def replace_code_block(match: re.Match[str]) -> str:
             lang = match.group(1) or ""
             code = match.group(2)
 
@@ -728,7 +739,7 @@ class ResponseFormatter:
             return [FormattedMessage(text)]
 
         messages = []
-        current_lines = []
+        current_lines: List[str] = []
         current_length = 0
         in_code_block = False
 

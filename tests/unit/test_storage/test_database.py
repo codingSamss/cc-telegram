@@ -53,7 +53,6 @@ class TestDatabaseManager:
                 "audit_log",
                 "session_events",
                 "approval_requests",
-                "user_tokens",
                 "cost_tracking",
                 "schema_version",
             ]

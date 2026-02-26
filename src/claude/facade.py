@@ -6,17 +6,20 @@ Provides simple interface for bot handlers.
 import asyncio
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
 
 from ..config.settings import Settings
 from .exceptions import ClaudeProcessError, ClaudeToolValidationError
-from .integration import ClaudeProcessManager, ClaudeResponse, StreamUpdate
+from .integration import ClaudeProcessManager, ClaudeResponse
 from .monitor import ToolMonitor
 from .permissions import PermissionManager, PermissionRequestCallback
 from .sdk_integration import ClaudeSDKManager, strip_thinking_blocks_from_session
 from .session import SessionManager
+
+if TYPE_CHECKING:
+    from .session import ClaudeSession
 
 logger = structlog.get_logger()
 
@@ -35,6 +38,10 @@ class ClaudeIntegration:
     ):
         """Initialize Claude integration facade."""
         self.config = config
+        if session_manager is None:
+            raise ValueError("session_manager is required")
+        if tool_monitor is None:
+            raise ValueError("tool_monitor is required")
         self.permission_manager = permission_manager or PermissionManager()
 
         # Initialize both managers for fallback capability
@@ -44,13 +51,14 @@ class ClaudeIntegration:
         self.process_manager = process_manager or ClaudeProcessManager(config)
 
         # Use SDK by default if configured
-        if config.use_sdk:
-            self.manager = self.sdk_manager
-        else:
-            self.manager = self.process_manager
+        self.manager: ClaudeSDKManager | ClaudeProcessManager = (
+            self.sdk_manager
+            if config.use_sdk and self.sdk_manager is not None
+            else self.process_manager
+        )
 
-        self.session_manager = session_manager
-        self.tool_monitor = tool_monitor
+        self.session_manager: SessionManager = session_manager
+        self.tool_monitor: ToolMonitor = tool_monitor
         self._sdk_failed_count = 0  # Track SDK failures for adaptive fallback
         self._context_usage_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
 
@@ -97,7 +105,7 @@ class ClaudeIntegration:
         working_directory: Path,
         user_id: int,
         session_id: Optional[str] = None,
-        on_stream: Optional[Callable[[StreamUpdate], None]] = None,
+        on_stream: Optional[Callable[[Any], Awaitable[None]]] = None,
         force_new_session: bool = False,
         permission_handler: Optional[PermissionRequestCallback] = None,
         model: Optional[str] = None,
@@ -134,35 +142,42 @@ class ClaudeIntegration:
 
         # Track streaming updates and validate tool calls
         tools_validated = True
-        validation_errors = []
-        blocked_tools = set()
+        validation_errors: list[str] = []
+        blocked_tools: set[str] = set()
 
-        async def stream_handler(update: StreamUpdate):
+        async def stream_handler(update: Any) -> None:
             nonlocal tools_validated
 
             # Validate tool calls
-            if update.tool_calls:
-                for tool_call in update.tool_calls:
-                    tool_name = tool_call["name"]
+            tool_calls = getattr(update, "tool_calls", None)
+            if isinstance(tool_calls, list):
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    tool_name = str(tool_call.get("name") or "").strip()
+                    if not tool_name:
+                        continue
                     valid, error = await self.tool_monitor.validate_tool_call(
                         tool_name,
                         tool_call.get("input", {}),
                         working_directory,
                         user_id,
                     )
+                    error_text = str(error or "").strip()
 
                     if not valid:
                         tools_validated = False
-                        validation_errors.append(error)
+                        if error_text:
+                            validation_errors.append(error_text)
 
                         # Track blocked tools
-                        if "Tool not allowed:" in error:
+                        if "Tool not allowed:" in error_text:
                             blocked_tools.add(tool_name)
 
                         logger.error(
                             "Tool validation failed",
                             tool_name=tool_name,
-                            error=error,
+                            error=error_text,
                             user_id=user_id,
                         )
 
@@ -235,7 +250,7 @@ class ClaudeIntegration:
                 if is_signature_failure and claude_session_id:
                     # Try stripping thinking blocks and retrying same session
                     stripped = strip_thinking_blocks_from_session(
-                        claude_session_id, working_directory
+                        claude_session_id, str(working_directory)
                     )
                     if stripped:
                         try:
@@ -323,10 +338,10 @@ class ClaudeIntegration:
                     "Command completed but tool validation failed",
                     validation_errors=validation_errors,
                 )
-                blocked_tools = self._extract_blocked_tools(validation_errors)
+                blocked_tool_list = self._extract_blocked_tools(validation_errors)
                 has_primary_result = bool((response.content or "").strip())
                 validation_notice = self._build_tool_validation_notice(
-                    blocked_tools=blocked_tools,
+                    blocked_tools=blocked_tool_list,
                     validation_errors=validation_errors,
                     has_primary_result=has_primary_result,
                 )
@@ -400,7 +415,7 @@ class ClaudeIntegration:
         working_directory: Path,
         session_id: Optional[str] = None,
         continue_session: bool = False,
-        stream_callback: Optional[Callable] = None,
+        stream_callback: Optional[Callable[[Any], Awaitable[None]]] = None,
         permission_callback: Optional[Callable] = None,
         model: Optional[str] = None,
         images: Optional[List[Dict[str, str]]] = None,
@@ -467,7 +482,7 @@ class ClaudeIntegration:
                 if use_client_mode:
                     # Client mode: supports can_use_tool permission callbacks
                     logger.debug("Attempting Claude SDK Client execution")
-                    response = await self.sdk_manager.execute_with_client(
+                    sdk_response = await self.sdk_manager.execute_with_client(
                         prompt=prompt,
                         working_directory=working_directory,
                         session_id=session_id,
@@ -481,7 +496,7 @@ class ClaudeIntegration:
                     # query() mode: simpler and more robust when permission
                     # callbacks are not required.
                     logger.debug("Attempting Claude SDK query execution")
-                    response = await self.sdk_manager.execute_command(
+                    sdk_response = await self.sdk_manager.execute_command(
                         prompt=prompt,
                         working_directory=working_directory,
                         session_id=session_id,
@@ -491,6 +506,7 @@ class ClaudeIntegration:
                         model=model,
                         images=images,
                     )
+                response = self._coerce_response(sdk_response)
                 # Reset failure count on success
                 self._sdk_failed_count = 0
                 return response
@@ -552,7 +568,7 @@ class ClaudeIntegration:
 
                     try:
                         logger.info("Executing with subprocess fallback")
-                        response = await self.process_manager.execute_command(
+                        fallback_response = await self.process_manager.execute_command(
                             prompt=prompt,
                             working_directory=working_directory,
                             session_id=None,
@@ -561,6 +577,7 @@ class ClaudeIntegration:
                             model=model,
                             images=images,
                         )
+                        response = self._coerce_response(fallback_response)
                         logger.info("Subprocess fallback succeeded")
                         return response
 
@@ -582,7 +599,7 @@ class ClaudeIntegration:
         else:
             # Use subprocess directly if SDK not configured
             logger.debug("Using subprocess execution (SDK disabled)")
-            return await self.process_manager.execute_command(
+            fallback_response = await self.process_manager.execute_command(
                 prompt=prompt,
                 working_directory=working_directory,
                 session_id=session_id,
@@ -591,6 +608,7 @@ class ClaudeIntegration:
                 model=model,
                 images=images,
             )
+            return self._coerce_response(fallback_response)
 
     async def _find_resumable_session(
         self,
@@ -602,8 +620,6 @@ class ClaudeIntegration:
         Returns the session if one exists that is non-expired and has a real
         (non-temporary) session ID from Claude. Returns None otherwise.
         """
-        from .session import ClaudeSession
-
         sessions = await self.session_manager._get_user_sessions(user_id)
 
         matching_sessions = [
@@ -624,7 +640,7 @@ class ClaudeIntegration:
         user_id: int,
         working_directory: Path,
         prompt: Optional[str] = None,
-        on_stream: Optional[Callable[[StreamUpdate], None]] = None,
+        on_stream: Optional[Callable[[Any], Awaitable[None]]] = None,
         permission_handler: Optional[PermissionRequestCallback] = None,
     ) -> Optional[ClaudeResponse]:
         """Continue the most recent session."""
@@ -715,11 +731,12 @@ class ClaudeIntegration:
             1, min(self.config.claude_timeout_seconds, probe_timeout_cfg)
         )
         probe_runners: List[tuple[str, Callable[[], Any]]] = []
-        if self.process_manager:
+        process_manager = self.process_manager
+        if process_manager:
             probe_runners.append(
                 (
                     "subprocess",
-                    lambda: self.process_manager.execute_command(
+                    lambda: process_manager.execute_command(
                         prompt=probe_prompt,
                         working_directory=working_directory,
                         session_id=session_id,
@@ -728,11 +745,12 @@ class ClaudeIntegration:
                     ),
                 )
             )
-        if self.config.use_sdk and self.sdk_manager:
+        sdk_manager = self.sdk_manager
+        if self.config.use_sdk and sdk_manager:
             probe_runners.append(
                 (
                     "sdk",
-                    lambda: self.sdk_manager.execute_command(
+                    lambda: sdk_manager.execute_command(
                         prompt=probe_prompt,
                         working_directory=working_directory,
                         session_id=session_id,
@@ -1044,6 +1062,31 @@ class ClaudeIntegration:
 
         logger.info("Claude integration shutdown complete")
 
+    @staticmethod
+    def _coerce_response(response: Any) -> ClaudeResponse:
+        """Normalize SDK/subprocess responses to facade ClaudeResponse type."""
+        if isinstance(response, ClaudeResponse):
+            return response
+
+        tools_used_raw = getattr(response, "tools_used", None)
+        tools_used = tools_used_raw if isinstance(tools_used_raw, list) else []
+        model_usage_raw = getattr(response, "model_usage", None)
+        model_usage = model_usage_raw if isinstance(model_usage_raw, dict) else None
+        error_type_raw = getattr(response, "error_type", None)
+        error_type = str(error_type_raw).strip() if error_type_raw else None
+
+        return ClaudeResponse(
+            content=str(getattr(response, "content", "") or ""),
+            session_id=str(getattr(response, "session_id", "") or ""),
+            cost=float(getattr(response, "cost", 0.0) or 0.0),
+            duration_ms=int(getattr(response, "duration_ms", 0) or 0),
+            num_turns=int(getattr(response, "num_turns", 0) or 0),
+            is_error=bool(getattr(response, "is_error", False)),
+            error_type=error_type,
+            tools_used=tools_used,
+            model_usage=model_usage,
+        )
+
     def _build_permission_callback(
         self,
         user_id: int,
@@ -1169,7 +1212,7 @@ class ClaudeIntegration:
         message = [
             "🚫 **Tool Access Blocked**",
             "",
-            f"Claude tried to use tools that are not currently allowed:",
+            "Claude tried to use tools that are not currently allowed:",
             f"{tool_list}",
             "",
             "**Why this happened:**",

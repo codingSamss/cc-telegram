@@ -28,6 +28,8 @@ from telegram.ext import (
 from ..claude.task_registry import TaskRegistry
 from ..config.settings import Settings
 from ..exceptions import ClaudeCodeTelegramError
+from ..security.validators import SecurityValidator
+from ..storage.facade import Storage
 from .features.registry import FeatureRegistry
 from .utils.cli_engine import ENGINE_CLAUDE
 from .utils.command_menu import build_bot_commands_for_engine
@@ -63,6 +65,12 @@ class ClaudeCodeBot:
         self._update_offset_store: Optional[UpdateOffsetStore] = None
         self._startup_min_update_id: Optional[int] = None
 
+    def _require_app(self) -> Application:
+        """Return initialized Telegram application or raise."""
+        if self.app is None:
+            raise ClaudeCodeTelegramError("Telegram application is not initialized")
+        return self.app
+
     async def initialize(self) -> None:
         """Initialize bot application."""
         logger.info("Initializing Telegram bot")
@@ -85,12 +93,19 @@ class ClaudeCodeBot:
         builder.concurrent_updates(True)
 
         self.app = builder.build()
+        app = self._require_app()
 
         # Initialize feature registry
+        storage = self.deps.get("storage")
+        security = self.deps.get("security_validator") or self.deps.get("security")
+        if not isinstance(storage, Storage):
+            raise ClaudeCodeTelegramError("Missing or invalid storage dependency")
+        if not isinstance(security, SecurityValidator):
+            raise ClaudeCodeTelegramError("Missing or invalid security dependency")
         self.feature_registry = FeatureRegistry(
             config=self.settings,
-            storage=self.deps.get("storage"),
-            security=self.deps.get("security"),
+            storage=storage,
+            security=security,
         )
 
         # Add feature registry to dependencies
@@ -110,7 +125,7 @@ class ClaudeCodeBot:
         self._add_middleware()
 
         # Set error handler
-        self.app.add_error_handler(self._error_handler)
+        app.add_error_handler(self._error_handler)
 
         # Schedule periodic image cleanup
         self._schedule_image_cleanup()
@@ -122,9 +137,10 @@ class ClaudeCodeBot:
 
     async def _set_bot_commands(self) -> None:
         """Set bot command menu (non-fatal on failure)."""
+        app = self._require_app()
         try:
             commands = build_bot_commands_for_engine(ENGINE_CLAUDE)
-            await self.app.bot.set_my_commands(commands)
+            await app.bot.set_my_commands(commands)
             logger.info("Bot commands set", commands=[cmd.command for cmd in commands])
         except Exception as e:
             logger.warning(
@@ -137,28 +153,25 @@ class ClaudeCodeBot:
         """Register all command and message handlers."""
         from .handlers import callback, command, message
 
+        app = self._require_app()
+
         # Global update guard (dedupe + stale offset filtering)
-        self.app.add_handler(
+        app.add_handler(
             TypeHandler(Update, self._handle_update_guard),
             group=-10,
         )
 
         # Command handlers
         handlers = [
-            ("start", command.start_command),
             ("help", command.help_command),
             ("new", command.new_session),
-            ("continue", command.continue_session),
-            ("end", command.end_session),
             ("ls", command.list_files),
             ("cd", command.change_directory),
-            ("pwd", command.print_working_directory),
             ("projects", command.show_projects),
             ("context", command.session_status),
             ("status", command.status_command),
             ("engine", command.switch_engine),
             ("export", command.export_session),
-            ("actions", command.quick_actions),
             ("git", command.git_command),
             ("cancel", command.cancel_task),
             ("resume", command.resume_command),
@@ -168,10 +181,10 @@ class ClaudeCodeBot:
         ]
 
         for cmd, handler in handlers:
-            self.app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
+            app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
 
         # Message handlers with priority groups
-        self.app.add_handler(
+        app.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
                 self._inject_deps(message.handle_text_message),
@@ -179,20 +192,20 @@ class ClaudeCodeBot:
             group=10,
         )
 
-        self.app.add_handler(
+        app.add_handler(
             MessageHandler(
                 filters.Document.ALL, self._inject_deps(message.handle_document)
             ),
             group=10,
         )
 
-        self.app.add_handler(
+        app.add_handler(
             MessageHandler(filters.PHOTO, self._inject_deps(message.handle_photo)),
             group=10,
         )
 
         # Message reaction handler (emoji reactions on messages)
-        self.app.add_handler(
+        app.add_handler(
             MessageReactionHandler(
                 self._inject_deps(message.handle_message_reaction),
                 message_reaction_types=(
@@ -203,7 +216,7 @@ class ClaudeCodeBot:
             group=10,
         )
         # Generic fallback for reaction updates in case specialized handler misses.
-        self.app.add_handler(
+        app.add_handler(
             TypeHandler(
                 Update,
                 self._inject_deps(message.handle_reaction_update_fallback),
@@ -212,7 +225,7 @@ class ClaudeCodeBot:
         )
 
         # Callback query handler
-        self.app.add_handler(
+        app.add_handler(
             CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
         )
 
@@ -296,7 +309,7 @@ class ClaudeCodeBot:
     def _inject_deps(self, handler: Callable) -> Callable:
         """Inject dependencies into handlers."""
 
-        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Any:
             # Add dependencies to context
             for key, value in self.deps.items():
                 context.bot_data[key] = value
@@ -311,12 +324,13 @@ class ClaudeCodeBot:
     def _add_middleware(self) -> None:
         """Add middleware to application."""
         from .middleware.auth import auth_middleware
-        from .middleware.rate_limit import rate_limit_middleware
         from .middleware.security import security_middleware
+
+        app = self._require_app()
 
         # Middleware runs in order of group numbers (lower = earlier)
         # Security middleware first (validate inputs)
-        self.app.add_handler(
+        app.add_handler(
             MessageHandler(
                 filters.ALL, self._create_middleware_handler(security_middleware)
             ),
@@ -324,19 +338,11 @@ class ClaudeCodeBot:
         )
 
         # Authentication second
-        self.app.add_handler(
+        app.add_handler(
             MessageHandler(
                 filters.ALL, self._create_middleware_handler(auth_middleware)
             ),
             group=-2,
-        )
-
-        # Rate limiting third
-        self.app.add_handler(
-            MessageHandler(
-                filters.ALL, self._create_middleware_handler(rate_limit_middleware)
-            ),
-            group=-1,
         )
 
         logger.info("Middleware added to bot")
@@ -346,14 +352,14 @@ class ClaudeCodeBot:
 
         async def middleware_wrapper(
             update: Update, context: ContextTypes.DEFAULT_TYPE
-        ):
+        ) -> Any:
             # Inject dependencies into context
             for key, value in self.deps.items():
                 context.bot_data[key] = value
             context.bot_data["settings"] = self.settings
 
             # Create a dummy handler that does nothing (middleware will handle everything)
-            async def dummy_handler(event, data):
+            async def dummy_handler(event: Any, data: Any) -> None:
                 return None
 
             # Call middleware with Telegram-style parameters
@@ -363,7 +369,8 @@ class ClaudeCodeBot:
 
     def _schedule_image_cleanup(self) -> None:
         """Register periodic image cleanup job."""
-        if not self.app.job_queue:
+        app = self._require_app()
+        if not app.job_queue:
             logger.warning("Job queue not available, skipping image cleanup scheduling")
             return
 
@@ -377,7 +384,7 @@ class ClaudeCodeBot:
             if deleted:
                 logger.info("Image cleanup completed", deleted=deleted)
 
-        self.app.job_queue.run_repeating(
+        app.job_queue.run_repeating(
             _cleanup_job, interval=3600, first=60, name="image_cleanup"
         )
         logger.info("Image cleanup job scheduled", interval_hours=1)
@@ -463,10 +470,8 @@ class ClaudeCodeBot:
 
     async def _start_polling(self) -> None:
         """Start Telegram polling with shared options."""
-        if not self.app:
-            raise ClaudeCodeTelegramError("Telegram application is not initialized")
-
-        updater = getattr(self.app, "updater", None)
+        app = self._require_app()
+        updater = getattr(app, "updater", None)
         if updater is None:
             raise ClaudeCodeTelegramError("Telegram updater is not available")
 
@@ -479,12 +484,12 @@ class ClaudeCodeBot:
 
     async def _restart_polling(self, *, reason: str) -> bool:
         """Restart polling loop after network/proxy disruptions."""
-        if not self.app:
-            return False
-
-        updater = getattr(self.app, "updater", None)
+        app = self._require_app()
+        updater = getattr(app, "updater", None)
         if updater is None:
-            logger.error("Cannot restart polling: updater is unavailable", reason=reason)
+            logger.error(
+                "Cannot restart polling: updater is unavailable", reason=reason
+            )
             return False
 
         now = asyncio.get_running_loop().time()
@@ -522,7 +527,7 @@ class ClaudeCodeBot:
 
     async def _polling_watchdog_tick(self) -> None:
         """Watch polling status and trigger self-recovery when needed."""
-        if getattr(self.settings, "webhook_url", None) or not self.app:
+        if getattr(self.settings, "webhook_url", None) or self.app is None:
             return
 
         updater = getattr(self.app, "updater", None)
@@ -550,10 +555,11 @@ class ClaudeCodeBot:
 
         try:
             self.is_running = True
+            app = self._require_app()
 
             if self.settings.webhook_url:
                 # Webhook mode
-                await self.app.run_webhook(
+                app.run_webhook(
                     listen="0.0.0.0",
                     port=self.settings.webhook_port,
                     url_path=self.settings.webhook_path,
@@ -563,8 +569,8 @@ class ClaudeCodeBot:
                 )
             else:
                 # Polling mode - initialize and start polling manually
-                await self.app.initialize()
-                await self.app.start()
+                await app.initialize()
+                await app.start()
                 await self._start_polling()
                 self._reset_polling_recovery_state()
 
@@ -607,13 +613,15 @@ class ClaudeCodeBot:
                     )
 
             if self.app:
+                app = self._require_app()
                 # Stop the updater if it's running
-                if self.app.updater.running:
-                    await self.app.updater.stop()
+                updater = getattr(app, "updater", None)
+                if updater and updater.running:
+                    await updater.stop()
 
                 # Stop the application
-                await self.app.stop()
-                await self.app.shutdown()
+                await app.stop()
+                await app.shutdown()
 
             logger.info("Bot stopped successfully")
         except Exception as e:
@@ -687,16 +695,19 @@ class ClaudeCodeBot:
             )
 
     async def _error_handler(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self, update: object, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle errors globally."""
         error = context.error
+        update_obj = update if isinstance(update, Update) else None
         logger.error(
             "Global error handler triggered",
             error=str(error),
-            update_type=type(update).__name__ if update else None,
+            update_type=type(update_obj).__name__ if update_obj else None,
             user_id=(
-                update.effective_user.id if update and update.effective_user else None
+                update_obj.effective_user.id
+                if update_obj and update_obj.effective_user
+                else None
             ),
         )
 
@@ -716,16 +727,20 @@ class ClaudeCodeBot:
             asyncio.TimeoutError: "⏰ Operation timed out. Please try again with a simpler request.",
         }
 
-        error_type = type(error)
+        error_type: type[Exception]
+        if isinstance(error, Exception):
+            error_type = type(error)
+        else:
+            error_type = Exception
         user_message = error_messages.get(
             error_type, "❌ An unexpected error occurred. Please try again."
         )
 
         # Try to notify user
-        if update and update.effective_message:
+        if update_obj and update_obj.effective_message:
             try:
                 await self._reply_update_message_resilient(
-                    update, context, user_message
+                    update_obj, context, user_message
                 )
             except Exception:
                 logger.exception("Failed to send error message to user")
@@ -734,10 +749,10 @@ class ClaudeCodeBot:
         from ..security.audit import AuditLogger
 
         audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
-        if audit_logger and update and update.effective_user:
+        if audit_logger and update_obj and update_obj.effective_user:
             try:
                 await audit_logger.log_security_violation(
-                    user_id=update.effective_user.id,
+                    user_id=update_obj.effective_user.id,
                     violation_type="system_error",
                     details=f"Error type: {error_type.__name__}, Message: {str(error)}",
                     severity="medium",

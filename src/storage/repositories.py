@@ -26,6 +26,13 @@ from .models import (
 logger = structlog.get_logger()
 
 
+def _require_lastrowid(lastrowid: Optional[int]) -> int:
+    """Return SQLite lastrowid as int or raise when missing."""
+    if lastrowid is None:
+        raise RuntimeError("insert operation did not return lastrowid")
+    return int(lastrowid)
+
+
 class UserRepository:
     """User data access."""
 
@@ -65,13 +72,13 @@ class UserRepository:
             )
             return user
 
-    async def update_user(self, user: UserModel):
+    async def update_user(self, user: UserModel) -> None:
         """Update user data."""
         async with self.db.get_connection() as conn:
             await conn.execute(
                 """
-                UPDATE users 
-                SET telegram_username = ?, last_active = ?, 
+                UPDATE users
+                SET telegram_username = ?, last_active = ?,
                     total_cost = ?, message_count = ?, session_count = ?
                 WHERE user_id = ?
             """,
@@ -95,7 +102,7 @@ class UserRepository:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
-    async def set_user_allowed(self, user_id: int, allowed: bool):
+    async def set_user_allowed(self, user_id: int, allowed: bool) -> None:
         """Set user allowed status."""
         async with self.db.get_connection() as conn:
             await conn.execute(
@@ -134,7 +141,7 @@ class SessionRepository:
         async with self.db.get_connection() as conn:
             await conn.execute(
                 """
-                INSERT INTO sessions 
+                INSERT INTO sessions
                 (session_id, user_id, project_path, created_at, last_used)
                 VALUES (?, ?, ?, ?, ?)
             """,
@@ -155,13 +162,13 @@ class SessionRepository:
             )
             return session
 
-    async def update_session(self, session: SessionModel):
+    async def update_session(self, session: SessionModel) -> None:
         """Update session data."""
         async with self.db.get_connection() as conn:
             await conn.execute(
                 """
-                UPDATE sessions 
-                SET last_used = ?, total_cost = ?, total_turns = ?, 
+                UPDATE sessions
+                SET last_used = ?, total_cost = ?, total_turns = ?,
                     message_count = ?, is_active = ?
                 WHERE session_id = ?
             """,
@@ -198,8 +205,8 @@ class SessionRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                UPDATE sessions 
-                SET is_active = FALSE 
+                UPDATE sessions
+                SET is_active = FALSE
                 WHERE last_used < datetime('now', '-' || ? || ' days')
                   AND is_active = TRUE
             """,
@@ -216,7 +223,7 @@ class SessionRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM sessions 
+                SELECT * FROM sessions
                 WHERE project_path = ? AND is_active = TRUE
                 ORDER BY last_used DESC
             """,
@@ -238,7 +245,7 @@ class MessageRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                INSERT INTO messages 
+                INSERT INTO messages
                 (session_id, user_id, timestamp, prompt, response, cost, duration_ms, error)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -254,7 +261,7 @@ class MessageRepository:
                 ),
             )
             await conn.commit()
-            return cursor.lastrowid
+            return _require_lastrowid(cursor.lastrowid)
 
     async def get_session_messages(
         self, session_id: str, limit: int = 50
@@ -263,9 +270,9 @@ class MessageRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM messages 
-                WHERE session_id = ? 
-                ORDER BY timestamp DESC 
+                SELECT * FROM messages
+                WHERE session_id = ?
+                ORDER BY timestamp DESC
                 LIMIT ?
             """,
                 (session_id, limit),
@@ -280,9 +287,9 @@ class MessageRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM messages 
-                WHERE user_id = ? 
-                ORDER BY timestamp DESC 
+                SELECT * FROM messages
+                WHERE user_id = ?
+                ORDER BY timestamp DESC
                 LIMIT ?
             """,
                 (user_id, limit),
@@ -295,7 +302,7 @@ class MessageRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM messages 
+                SELECT * FROM messages
                 WHERE timestamp > datetime('now', '-' || ? || ' hours')
                 ORDER BY timestamp DESC
             """,
@@ -321,7 +328,7 @@ class ToolUsageRepository:
 
             cursor = await conn.execute(
                 """
-                INSERT INTO tool_usage 
+                INSERT INTO tool_usage
                 (session_id, message_id, tool_name, tool_input, timestamp, success, error_message)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
@@ -336,15 +343,15 @@ class ToolUsageRepository:
                 ),
             )
             await conn.commit()
-            return cursor.lastrowid
+            return _require_lastrowid(cursor.lastrowid)
 
     async def get_session_tool_usage(self, session_id: str) -> List[ToolUsageModel]:
         """Get tool usage for session."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM tool_usage 
-                WHERE session_id = ? 
+                SELECT * FROM tool_usage
+                WHERE session_id = ?
                 ORDER BY timestamp DESC
             """,
                 (session_id,),
@@ -367,12 +374,12 @@ class ToolUsageRepository:
             rows = await cursor.fetchall()
             return [ToolUsageModel.from_row(row) for row in rows]
 
-    async def get_tool_stats(self) -> List[Dict[str, any]]:
+    async def get_tool_stats(self) -> List[Dict[str, Any]]:
         """Get tool usage statistics."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     tool_name,
                     COUNT(*) as usage_count,
                     COUNT(DISTINCT session_id) as sessions_used,
@@ -403,7 +410,7 @@ class AuditLogRepository:
 
             cursor = await conn.execute(
                 """
-                INSERT INTO audit_log 
+                INSERT INTO audit_log
                 (user_id, event_type, event_data, success, timestamp, ip_address)
                 VALUES (?, ?, ?, ?, ?, ?)
             """,
@@ -417,7 +424,7 @@ class AuditLogRepository:
                 ),
             )
             await conn.commit()
-            return cursor.lastrowid
+            return _require_lastrowid(cursor.lastrowid)
 
     async def get_user_audit_log(
         self, user_id: int, limit: int = 100
@@ -426,9 +433,9 @@ class AuditLogRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM audit_log 
-                WHERE user_id = ? 
-                ORDER BY timestamp DESC 
+                SELECT * FROM audit_log
+                WHERE user_id = ?
+                ORDER BY timestamp DESC
                 LIMIT ?
             """,
                 (user_id, limit),
@@ -441,7 +448,7 @@ class AuditLogRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM audit_log 
+                SELECT * FROM audit_log
                 WHERE timestamp > datetime('now', '-' || ? || ' hours')
                 ORDER BY timestamp DESC
             """,
@@ -527,7 +534,7 @@ class SessionEventRepository:
                 ),
             )
             await conn.commit()
-            return cursor.lastrowid
+            return _require_lastrowid(cursor.lastrowid)
 
     async def save_events(self, events: List[SessionEventModel]) -> int:
         """Save multiple session events and return persisted count."""
@@ -664,7 +671,9 @@ class CostTrackingRepository:
         """Initialize repository."""
         self.db = db_manager
 
-    async def update_daily_cost(self, user_id: int, cost: float, date: str = None):
+    async def update_daily_cost(
+        self, user_id: int, cost: float, date: Optional[str] = None
+    ) -> None:
         """Update daily cost for user."""
         if not date:
             date = datetime.utcnow().strftime("%Y-%m-%d")
@@ -674,8 +683,8 @@ class CostTrackingRepository:
                 """
                 INSERT INTO cost_tracking (user_id, date, daily_cost, request_count)
                 VALUES (?, ?, ?, 1)
-                ON CONFLICT(user_id, date) 
-                DO UPDATE SET 
+                ON CONFLICT(user_id, date)
+                DO UPDATE SET
                     daily_cost = daily_cost + ?,
                     request_count = request_count + 1
             """,
@@ -690,7 +699,7 @@ class CostTrackingRepository:
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM cost_tracking 
+                SELECT * FROM cost_tracking
                 WHERE user_id = ? AND date >= date('now', '-' || ? || ' days')
                 ORDER BY date DESC
             """,
@@ -699,17 +708,17 @@ class CostTrackingRepository:
             rows = await cursor.fetchall()
             return [CostTrackingModel.from_row(row) for row in rows]
 
-    async def get_total_costs(self, days: int = 30) -> List[Dict[str, any]]:
+    async def get_total_costs(self, days: int = 30) -> List[Dict[str, Any]]:
         """Get total costs by day."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     date,
                     SUM(daily_cost) as total_cost,
                     SUM(request_count) as total_requests,
                     COUNT(DISTINCT user_id) as active_users
-                FROM cost_tracking 
+                FROM cost_tracking
                 WHERE date >= date('now', '-' || ? || ' days')
                 GROUP BY date
                 ORDER BY date DESC
@@ -727,13 +736,13 @@ class AnalyticsRepository:
         """Initialize repository."""
         self.db = db_manager
 
-    async def get_user_stats(self, user_id: int) -> Dict[str, any]:
+    async def get_user_stats(self, user_id: int) -> Dict[str, Any]:
         """Get user statistics."""
         async with self.db.get_connection() as conn:
             # User summary
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     COUNT(DISTINCT session_id) as total_sessions,
                     COUNT(*) as total_messages,
                     SUM(cost) as total_cost,
@@ -746,12 +755,13 @@ class AnalyticsRepository:
                 (user_id,),
             )
 
-            summary = dict(await cursor.fetchone())
+            summary_row = await cursor.fetchone()
+            summary = dict(summary_row) if summary_row is not None else {}
 
             # Daily usage (last 30 days)
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     date(timestamp) as date,
                     COUNT(*) as messages,
                     SUM(cost) as cost,
@@ -769,7 +779,7 @@ class AnalyticsRepository:
             # Most used tools
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     tu.tool_name,
                     COUNT(*) as usage_count
                 FROM tool_usage tu
@@ -790,13 +800,13 @@ class AnalyticsRepository:
                 "top_tools": top_tools,
             }
 
-    async def get_system_stats(self) -> Dict[str, any]:
+    async def get_system_stats(self) -> Dict[str, Any]:
         """Get system-wide statistics."""
         async with self.db.get_connection() as conn:
             # Overall stats
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     COUNT(DISTINCT user_id) as total_users,
                     COUNT(DISTINCT session_id) as total_sessions,
                     COUNT(*) as total_messages,
@@ -806,7 +816,8 @@ class AnalyticsRepository:
             """
             )
 
-            overall = dict(await cursor.fetchone())
+            overall_row = await cursor.fetchone()
+            overall = dict(overall_row) if overall_row is not None else {}
 
             # Active users (last 7 days)
             cursor = await conn.execute(
@@ -817,13 +828,16 @@ class AnalyticsRepository:
             """
             )
 
-            active_users = (await cursor.fetchone())[0]
+            active_users_row = await cursor.fetchone()
+            active_users = (
+                int(active_users_row[0]) if active_users_row is not None else 0
+            )
             overall["active_users_7d"] = active_users
 
             # Top users by cost
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     u.user_id,
                     u.telegram_username,
                     SUM(m.cost) as total_cost,
@@ -841,7 +855,7 @@ class AnalyticsRepository:
             # Tool usage stats
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     tool_name,
                     COUNT(*) as usage_count,
                     COUNT(DISTINCT session_id) as sessions_used
@@ -857,7 +871,7 @@ class AnalyticsRepository:
             # Daily activity (last 30 days)
             cursor = await conn.execute(
                 """
-                SELECT 
+                SELECT
                     date(timestamp) as date,
                     COUNT(DISTINCT user_id) as active_users,
                     COUNT(*) as total_messages,

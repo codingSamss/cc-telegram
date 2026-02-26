@@ -69,13 +69,10 @@ class _ProviderSwitchLock:
     async def acquire(self) -> None:
         await self._async_lock.acquire()
         PROVIDER_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-        self._lock_fd = os.open(
-            str(PROVIDER_LOCK_PATH), os.O_CREAT | os.O_RDWR
-        )
+        lock_fd = os.open(str(PROVIDER_LOCK_PATH), os.O_CREAT | os.O_RDWR)
+        self._lock_fd = lock_fd
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, lambda: fcntl.flock(self._lock_fd, fcntl.LOCK_EX)
-        )
+        await loop.run_in_executor(None, lambda: fcntl.flock(lock_fd, fcntl.LOCK_EX))
 
     def release(self) -> None:
         if self._lock_fd is not None:
@@ -145,13 +142,12 @@ class CCSwitchManager:
         """Extract ANTHROPIC_BASE_URL from a provider's settings_config JSON."""
         try:
             config = json.loads(settings_config_raw)
-            return config.get("env", {}).get("ANTHROPIC_BASE_URL")
+            value = config.get("env", {}).get("ANTHROPIC_BASE_URL")
+            return str(value) if isinstance(value, str) else None
         except (json.JSONDecodeError, AttributeError):
             return None
 
-    async def list_providers(
-        self, app_type: str = "claude"
-    ) -> List[ProviderInfo]:
+    async def list_providers(self, app_type: str = "claude") -> List[ProviderInfo]:
         """List all providers for the given app_type."""
         import aiosqlite
 
@@ -464,9 +460,7 @@ class CCSwitchManager:
                         _atomic_write_json(CLAUDE_SETTINGS_PATH, expected_config)
                         logger.info("startup_consistency_a_repaired")
                 except Exception as e:
-                    logger.warning(
-                        "startup_consistency_check_a_failed", error=str(e)
-                    )
+                    logger.warning("startup_consistency_check_a_failed", error=str(e))
 
             # Check C
             key = _CURRENT_PROVIDER_KEYS.get("claude")
@@ -485,9 +479,7 @@ class CCSwitchManager:
                         _atomic_write_json(CC_SWITCH_SETTINGS_PATH, c_data)
                         logger.info("startup_consistency_c_repaired")
                 except Exception as e:
-                    logger.warning(
-                        "startup_consistency_check_c_failed", error=str(e)
-                    )
+                    logger.warning("startup_consistency_check_c_failed", error=str(e))
 
         except Exception as e:
             logger.error("startup_consistency_check_failed", error=str(e))

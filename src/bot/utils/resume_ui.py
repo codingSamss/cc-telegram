@@ -1,9 +1,12 @@
 """UI helpers for /resume project selection."""
 
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+if TYPE_CHECKING:
+    from src.bot.resume_tokens import ResumeTokenManager
 
 RECENT_PROJECT_LIMIT = 5
 
@@ -68,7 +71,7 @@ def build_resume_project_selector(
     *,
     projects: Iterable[Path],
     approved_root: Path,
-    token_mgr,
+    token_mgr: "ResumeTokenManager",
     user_id: int,
     current_directory: Optional[Path] = None,
     show_all: bool = False,

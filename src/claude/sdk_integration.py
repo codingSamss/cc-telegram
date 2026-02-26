@@ -14,7 +14,16 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterable, AsyncIterator, Callable, Dict, List, Optional
+from typing import (
+    Any,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+)
 
 import structlog
 from claude_agent_sdk import (
@@ -29,8 +38,6 @@ from claude_agent_sdk import (
     ProcessError,
     ResultMessage,
     SystemMessage,
-    TextBlock,
-    ToolResultBlock,
     ToolUseBlock,
     UserMessage,
     query,
@@ -191,43 +198,56 @@ class StreamUpdate:
 
     type: str  # 'assistant', 'user', 'system', 'result', 'tool_result', 'error', 'progress'
     content: Optional[str] = None
-    tool_calls: Optional[List[Dict]] = None
-    metadata: Optional[Dict] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     # Keep these fields aligned with integration.StreamUpdate so bot handlers
     # can consume SDK and subprocess updates with the same logic.
     timestamp: Optional[str] = None
-    session_context: Optional[Dict] = None
-    progress: Optional[Dict] = None
-    error_info: Optional[Dict] = None
+    session_context: Optional[Dict[str, Any]] = None
+    progress: Optional[Dict[str, Any]] = None
+    error_info: Optional[Dict[str, Any]] = None
     execution_id: Optional[str] = None
     parent_message_id: Optional[str] = None
 
     def is_error(self) -> bool:
         """Check if this update represents an error."""
-        return self.type == "error" or (
-            self.metadata and self.metadata.get("is_error", False)
-        )
+        if self.type == "error":
+            return True
+        if not self.metadata:
+            return False
+        return bool(self.metadata.get("is_error", False))
 
     def get_tool_names(self) -> List[str]:
         """Extract tool names from tool calls."""
         if not self.tool_calls:
             return []
-        return [call.get("name") for call in self.tool_calls if call.get("name")]
+        names: List[str] = []
+        for call in self.tool_calls:
+            name = call.get("name")
+            if name:
+                names.append(str(name))
+        return names
 
     def get_progress_percentage(self) -> Optional[int]:
         """Get progress percentage if available."""
         if self.progress:
-            return self.progress.get("percentage")
+            percentage = self.progress.get("percentage")
+            if isinstance(percentage, (int, float)):
+                return int(percentage)
         return None
 
     def get_error_message(self) -> Optional[str]:
         """Get error message if this is an error update."""
         if self.error_info:
-            return self.error_info.get("message")
+            message = self.error_info.get("message")
+            return str(message) if message else None
         elif self.is_error() and self.content:
             return self.content
         return None
+
+
+StreamCallback = Callable[[StreamUpdate], Awaitable[None]]
 
 
 class ClaudeSDKManager:
@@ -347,7 +367,7 @@ class ClaudeSDKManager:
         working_directory: Path,
         session_id: Optional[str] = None,
         continue_session: bool = False,
-        stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        stream_callback: Optional[StreamCallback] = None,
         permission_callback: Optional[Callable] = None,
         model: Optional[str] = None,
         images: Optional[List[Dict[str, str]]] = None,
@@ -405,9 +425,9 @@ class ClaudeSDKManager:
             await self._emit_init_update(stream_callback, options)
 
             # Collect messages
-            messages = []
+            messages: List[Message] = []
             cost = 0.0
-            tools_used = []
+            tools_used: List[Dict[str, Any]] = []
 
             # Build multimodal prompt if images are provided
             query_prompt: str | AsyncIterable[Dict[str, Any]] = prompt
@@ -571,8 +591,8 @@ class ClaudeSDKManager:
         self,
         prompt: "str | AsyncIterable[Dict[str, Any]]",
         options: ClaudeAgentOptions,
-        messages: List,
-        stream_callback: Optional[Callable],
+        messages: List[Message],
+        stream_callback: Optional[StreamCallback],
     ) -> None:
         """Execute query with streaming and collect messages."""
         model_resolved_emitted = False
@@ -622,7 +642,7 @@ class ClaudeSDKManager:
 
     async def _emit_init_update(
         self,
-        stream_callback: Optional[Callable[[StreamUpdate], None]],
+        stream_callback: Optional[StreamCallback],
         options: ClaudeAgentOptions,
     ) -> None:
         """No-op: real SDK init event carries accurate tools/capabilities."""
@@ -630,7 +650,7 @@ class ClaudeSDKManager:
 
     async def _emit_model_resolved_update(
         self,
-        stream_callback: Optional[Callable[[StreamUpdate], None]],
+        stream_callback: Optional[StreamCallback],
         model_name: str,
     ) -> bool:
         """Emit resolved model update from real SDK response."""
@@ -691,19 +711,19 @@ class ClaudeSDKManager:
         return _generate_messages()
 
     async def _handle_stream_message(
-        self, message: Message, stream_callback: Callable[[StreamUpdate], None]
+        self, message: Message, stream_callback: StreamCallback
     ) -> None:
         """Handle streaming message from claude-agent-sdk."""
         try:
             if isinstance(message, AssistantMessage):
                 # Extract content from assistant message
-                content = getattr(message, "content", [])
-                if content and isinstance(content, list):
+                assistant_content = getattr(message, "content", [])
+                if assistant_content and isinstance(assistant_content, list):
                     # Extract text from TextBlock objects
                     text_parts = []
                     tool_calls = []
                     tool_results = []
-                    for block in content:
+                    for block in assistant_content:
                         if hasattr(block, "text"):
                             text_parts.append(block.text)
                         elif hasattr(block, "name") and hasattr(block, "input"):
@@ -762,21 +782,22 @@ class ClaudeSDKManager:
                         )
                         await stream_callback(update)
 
-                elif content:
+                elif assistant_content:
                     # Fallback for non-list content
                     update = StreamUpdate(
                         type="assistant",
-                        content=str(content),
+                        content=str(assistant_content),
                         metadata={"source": "sdk"},
                     )
                     await stream_callback(update)
 
             elif isinstance(message, UserMessage):
-                content = getattr(message, "content", "")
-                if content:
+                raw_user_content = getattr(message, "content", "")
+                user_content = str(raw_user_content).strip()
+                if user_content:
                     update = StreamUpdate(
                         type="user",
-                        content=content,
+                        content=user_content,
                     )
                     await stream_callback(update)
             elif isinstance(message, SystemMessage):
@@ -784,13 +805,13 @@ class ClaudeSDKManager:
                 subtype = str(getattr(message, "subtype", "") or "").strip()
                 metadata = self._build_sdk_system_metadata(raw_data, subtype=subtype)
 
-                content: Optional[str] = None
+                system_content: Optional[str] = None
                 if isinstance(raw_data, dict):
-                    content = str(raw_data.get("message") or "").strip() or None
+                    system_content = str(raw_data.get("message") or "").strip() or None
 
                 update = StreamUpdate(
                     type="system",
-                    content=content,
+                    content=system_content,
                     metadata=metadata,
                 )
                 await stream_callback(update)
@@ -1050,7 +1071,8 @@ class ClaudeSDKManager:
         try:
             with open(config_path) as f:
                 config_data = json.load(f)
-            return config_data.get("mcpServers", {})
+            mcp_servers = config_data.get("mcpServers")
+            return mcp_servers if isinstance(mcp_servers, dict) else {}
         except (json.JSONDecodeError, OSError) as e:
             logger.error(
                 "Failed to load MCP config", path=str(config_path), error=str(e)
@@ -1084,7 +1106,7 @@ class ClaudeSDKManager:
         working_directory: Path,
         session_id: Optional[str] = None,
         continue_session: bool = False,
-        stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        stream_callback: Optional[StreamCallback] = None,
         permission_callback: Optional[Callable] = None,
         model: Optional[str] = None,
         images: Optional[List[Dict[str, str]]] = None,

@@ -295,16 +295,17 @@ class SessionService:
             if usage_payload is not None:
                 continue
 
-            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
-            total_usage = (
-                info.get("total_token_usage")
-                if isinstance(info.get("total_token_usage"), dict)
-                else {}
+            info_payload = payload.get("info")
+            info: Dict[str, Any] = (
+                info_payload if isinstance(info_payload, dict) else {}
             )
-            last_usage = (
-                info.get("last_token_usage")
-                if isinstance(info.get("last_token_usage"), dict)
-                else {}
+            total_usage_payload = info.get("total_token_usage")
+            total_usage: Dict[str, Any] = (
+                total_usage_payload if isinstance(total_usage_payload, dict) else {}
+            )
+            last_usage_payload = info.get("last_token_usage")
+            last_usage: Dict[str, Any] = (
+                last_usage_payload if isinstance(last_usage_payload, dict) else {}
             )
             context_window = int(info.get("model_context_window", 0) or 0)
             aggregate_tokens = int(
@@ -398,6 +399,10 @@ class SessionService:
             used_percent_raw = entry.get("used_percent")
             window_minutes_raw = entry.get("window_minutes")
             resets_at_raw = entry.get("resets_at")
+            if not isinstance(used_percent_raw, (int, float, str)):
+                return None
+            if not isinstance(window_minutes_raw, (int, float, str)):
+                return None
             try:
                 used_percent = float(used_percent_raw)
             except (TypeError, ValueError):
@@ -413,12 +418,13 @@ class SessionService:
                 "used_percent": used_percent,
                 "window_minutes": window_minutes,
             }
-            try:
-                resets_at = int(resets_at_raw)
-                if resets_at > 0:
-                    normalized["resets_at"] = resets_at
-            except (TypeError, ValueError):
-                pass
+            if isinstance(resets_at_raw, (int, float, str)):
+                try:
+                    resets_at = int(resets_at_raw)
+                    if resets_at > 0:
+                        normalized["resets_at"] = resets_at
+                except (TypeError, ValueError):
+                    pass
             return normalized
 
         primary = _normalize_entry(payload.get("primary"))

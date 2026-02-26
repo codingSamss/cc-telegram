@@ -4,7 +4,6 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Optional
 
 from src.storage.facade import Storage
 from src.utils.constants import MAX_SESSION_LENGTH
@@ -61,14 +60,40 @@ class SessionExporter:
             ValueError: If session not found or invalid format
         """
         # Get session data
-        session = await self.storage.get_session(user_id, session_id)
-        if not session:
+        session_model = await self.storage.sessions.get_session(session_id)
+        if not session_model or session_model.user_id != user_id:
             raise ValueError(f"Session {session_id} not found")
+        session = {
+            "id": session_model.session_id,
+            "user_id": session_model.user_id,
+            "created_at": session_model.created_at,
+            "updated_at": session_model.last_used,
+        }
 
         # Get session messages
-        messages = await self.storage.get_session_messages(
+        message_models = await self.storage.messages.get_session_messages(
             session_id, limit=MAX_SESSION_LENGTH
         )
+        messages = []
+        for item in reversed(message_models):
+            if item.prompt:
+                messages.append(
+                    {
+                        "id": item.message_id,
+                        "role": "user",
+                        "content": item.prompt,
+                        "created_at": item.timestamp,
+                    }
+                )
+            if item.response:
+                messages.append(
+                    {
+                        "id": item.message_id,
+                        "role": "assistant",
+                        "content": item.response,
+                        "created_at": item.timestamp,
+                    }
+                )
 
         # Export based on format
         if format == ExportFormat.MARKDOWN:
@@ -112,7 +137,7 @@ class SessionExporter:
         lines = []
 
         # Header
-        lines.append(f"# CLITG Session Export")
+        lines.append("# CLITG Session Export")
         lines.append(f"\n**Session ID:** `{session['id']}`")
         lines.append(f"**Created:** {session['created_at']}")
         if session.get("updated_at"):

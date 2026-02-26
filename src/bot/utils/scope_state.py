@@ -1,7 +1,7 @@
 """Per-topic/session scoped state helpers for Telegram handlers."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from telegram import Update
 
@@ -69,6 +69,11 @@ def _ensure_scope_map(user_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return scope_map
 
 
+def _coerce_user_data(user_data: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Return mutable mapping for scope state helpers."""
+    return user_data if isinstance(user_data, dict) else {}
+
+
 def _seed_state_from_legacy(
     user_data: dict[str, Any],
     state: dict[str, Any],
@@ -99,23 +104,28 @@ def _seed_state_from_legacy(
 
 def get_scope_state(
     *,
-    user_data: dict[str, Any],
+    user_data: Optional[dict[str, Any]],
     scope_key: str,
     default_directory: Path,
 ) -> dict[str, Any]:
     """Get or create scoped session state."""
-    scope_map = _ensure_scope_map(user_data)
+    resolved_user_data = _coerce_user_data(user_data)
+    scope_map = _ensure_scope_map(resolved_user_data)
     state = scope_map.get(scope_key)
     if not isinstance(state, dict):
         state = {}
         scope_map[scope_key] = state
-        _seed_state_from_legacy(user_data=user_data, state=state, default_directory=default_directory)
+        _seed_state_from_legacy(
+            user_data=resolved_user_data,
+            state=state,
+            default_directory=default_directory,
+        )
     return state
 
 
 def get_scope_state_from_update(
     *,
-    user_data: dict[str, Any],
+    user_data: Optional[dict[str, Any]],
     update: Update,
     default_directory: Path,
 ) -> tuple[str, dict[str, Any]]:
@@ -131,7 +141,7 @@ def get_scope_state_from_update(
 
 def get_scope_state_from_query(
     *,
-    user_data: dict[str, Any],
+    user_data: Optional[dict[str, Any]],
     query: Any,
     default_directory: Path,
 ) -> tuple[str, dict[str, Any]]:

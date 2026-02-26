@@ -16,8 +16,8 @@ from src.storage.models import (
     UserModel,
 )
 from src.storage.repositories import (
-    ApprovalRequestRepository,
     AnalyticsRepository,
+    ApprovalRequestRepository,
     AuditLogRepository,
     MessageRepository,
     SessionEventRepository,

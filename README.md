@@ -6,13 +6,13 @@
 
 ## 核心能力
 
-- 双引擎：`claude`（默认）+ 可选 `codex`
+- 双引擎：`claude`（默认）+ `codex`（`/engine` 切换）
 - 会话管理：按用户 + 聊天作用域 + 目录隔离
 - 目录安全：仅允许 `APPROVED_DIRECTORY` 及子目录
 - 文件处理：文本/代码/压缩包（含基础安全检查）
 - 图片处理：支持多图输入与进度流式反馈
 - 导出能力：会话可导出为 Markdown/HTML/JSON
-- 安全治理：认证、限流、审计、工具权限审批
+- 安全治理：认证、审计、工具权限审批
 
 ## 架构概览
 
@@ -25,7 +25,7 @@ flowchart LR
 
     subgraph C["Bot 编排层"]
         C1["CLITG Bot<br/>python-telegram-bot"]
-        C2["Session / Security / Rate Limit / Audit"]
+        C2["Session / Security / Audit"]
     end
 
     subgraph E["引擎层"]
@@ -58,6 +58,7 @@ TG Client -> Telegram Bot API -> CLITG Bot -> Engine Facade -> Claude/Codex
 - 默认走 `USE_SDK=true` 的 Claude SDK 路径。
 - SDK 遇到可重试错误时，会尝试 CLI 子进程兜底（见 `src/claude/facade.py`）。
 - Codex 通过 CLI 适配接入（`ENABLE_CODEX_CLI=true`）。
+- 启动命令推荐使用 `poetry run cli-tg-bot`，`poetry run claude-telegram-bot` 仅为兼容别名。
 
 ## 前置要求
 
@@ -124,8 +125,7 @@ CODEX_ENABLE_MCP=false
 
 说明：
 - `APPROVED_DIRECTORY` 必须是已存在的绝对目录，否则启动失败。
-- 生产环境必须至少启用一种认证来源：`ALLOWED_USERS` 或 `ENABLE_TOKEN_AUTH=true`。
-- 若 `ALLOWED_USERS` 为空且 `DEVELOPMENT_MODE=true`，会进入开发放行模式（仅建议本地调试）。
+- 必须配置 `ALLOWED_USERS`（当前认证仅支持白名单）。
 
 ### 5) 启动
 
@@ -135,6 +135,8 @@ make run
 make run-debug
 # 或
 poetry run cli-tg-bot --debug
+# 兼容旧别名（不推荐）
+poetry run claude-telegram-bot --debug
 ```
 
 ## 关键配置项
@@ -143,8 +145,6 @@ poetry run cli-tg-bot --debug
 
 - 认证与安全
   - `ALLOWED_USERS`：白名单用户 ID（逗号分隔）
-  - `ENABLE_TOKEN_AUTH` / `AUTH_TOKEN_SECRET`：令牌认证
-  - `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW` / `RATE_LIMIT_BURST`：限流参数
 - Claude 引擎
   - `USE_SDK`：是否走 SDK
   - `CLAUDE_CLI_PATH`：CLI 路径（CLI 模式或 SDK fallback 使用）
@@ -164,11 +164,8 @@ poetry run cli-tg-bot --debug
 
 | 命令 | 说明 |
 |---|---|
-| `/start` | 欢迎页与快捷入口 |
 | `/help` | 查看完整帮助 |
 | `/new` | 新建会话并清理当前上下文绑定 |
-| `/continue [message]` | 显式继续当前会话 |
-| `/end` | 结束当前会话 |
 | `/resume` | 从桌面会话恢复 |
 | `/engine [claude\|codex]` | 切换引擎 |
 | `/context [full]` | 会话状态/用量（Claude 主命令） |
@@ -178,10 +175,8 @@ poetry run cli-tg-bot --debug
 | `/provider` | 切换 cc-switch API 供应商（Claude 菜单显示） |
 | `/cd <path>` | 切换目录（带安全校验） |
 | `/ls` | 列目录 |
-| `/pwd` | 当前目录 |
 | `/projects` | 列出可用项目 |
 | `/git` | 安全 Git 信息与快捷操作 |
-| `/actions` | 快捷动作面板 |
 | `/export` | 导出当前会话 |
 | `/cancel` | 取消当前运行任务 |
 
@@ -212,10 +207,9 @@ poetry run cli-tg-bot --debug
 
 ## 安全模型
 
-- 身份认证：白名单或令牌认证
+- 身份认证：`ALLOWED_USERS` 白名单认证
 - 目录隔离：所有操作受 `APPROVED_DIRECTORY` 限制
 - 输入校验：路径与命令注入关键模式拦截
-- 限流：Token Bucket
 - 审计与追踪：SQLite 持久化（含安全事件与审批记录）
 - Git 安全：仅允许白名单只读命令子集（如 `status/log/diff/show`）
 
@@ -255,7 +249,7 @@ tmux capture-pane -t cli_tg_bot -p | tail -n 80
 | 问题 | 常见原因 | 建议处理 |
 |---|---|---|
 | `Configuration loading failed` | 必填环境变量缺失或目录不存在 | 检查 `.env` 与 `APPROVED_DIRECTORY` |
-| `No authentication providers configured` | 未配置白名单且未启用 token auth（且非 dev 放行） | 配置 `ALLOWED_USERS` 或启用 token auth |
+| `No authentication providers configured` | 未配置白名单用户 | 配置 `ALLOWED_USERS` |
 | `ENABLE_CODEX_CLI is true but codex binary not found` | 未安装 Codex CLI 或路径错误 | 安装 Codex CLI / 设置 `CODEX_CLI_PATH` |
 | 图片提示当前引擎不支持 | 当前引擎/模式不具备图片能力 | 切到 `claude` + SDK，或使用支持 `--image` 的 Codex CLI |
 | `invalid claude code request` | 部分网关与显式 setting sources 不兼容 | 先保持 `CLAUDE_SETTING_SOURCES=` 为空 |
@@ -263,7 +257,7 @@ tmux capture-pane -t cli_tg_bot -p | tail -n 80
 
 ## 参考文档
 
-- `docs/` 目录下的开发与配置文档
+- `docs/README.md`（文档索引与权威来源说明）
 - `SECURITY.md`
 - `SYSTEMD_SETUP.md`
 - [python-telegram-bot](https://docs.python-telegram-bot.org/)

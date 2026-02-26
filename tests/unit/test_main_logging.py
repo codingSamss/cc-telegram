@@ -10,7 +10,7 @@ def test_redact_sensitive_text_masks_telegram_token() -> None:
     text = (
         "HTTP Request: POST https://api.telegram.org/bot"
         "8078587979:AAHfMFrZvAr8PdiRPtztOaOTk3Fm1pWCEJ4/getUpdates "
-        '\"HTTP/1.1 200 OK\" raw=8078587979:AAHfMFrZvAr8PdiRPtztOaOTk3Fm1pWCEJ4'
+        '"HTTP/1.1 200 OK" raw=8078587979:AAHfMFrZvAr8PdiRPtztOaOTk3Fm1pWCEJ4'
     )
     redacted = redact_sensitive_text(text)
 

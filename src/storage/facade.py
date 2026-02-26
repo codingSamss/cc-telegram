@@ -19,8 +19,8 @@ from .models import (
     UserModel,
 )
 from .repositories import (
-    ApprovalRequestRepository,
     AnalyticsRepository,
+    ApprovalRequestRepository,
     AuditLogRepository,
     CostTrackingRepository,
     MessageRepository,
@@ -49,13 +49,13 @@ class Storage:
         self.costs = CostTrackingRepository(self.db_manager)
         self.analytics = AnalyticsRepository(self.db_manager)
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Initialize storage system."""
         logger.info("Initializing storage system")
         await self.db_manager.initialize()
         logger.info("Storage system initialized")
 
-    async def close(self):
+    async def close(self) -> None:
         """Close storage connections."""
         logger.info("Closing storage system")
         await self.db_manager.close()
@@ -73,7 +73,7 @@ class Storage:
         prompt: str,
         response: ClaudeResponse,
         ip_address: Optional[str] = None,
-    ):
+    ) -> None:
         """Save complete Claude interaction."""
         logger.info(
             "Saving Claude interaction",
@@ -221,7 +221,7 @@ class Storage:
         event_data: Dict[str, Any],
         success: bool = True,
         ip_address: Optional[str] = None,
-    ):
+    ) -> None:
         """Log security-related event."""
         audit_event = AuditLogModel(
             id=None,
@@ -240,7 +240,7 @@ class Storage:
         event_type: str,
         event_data: Dict[str, Any],
         success: bool = True,
-    ):
+    ) -> None:
         """Log bot-related event."""
         audit_event = AuditLogModel(
             id=None,
@@ -274,7 +274,7 @@ class Storage:
 
     async def get_session_history(
         self, session_id: str, limit: int = 50
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         """Get session history with messages and tools."""
         session = await self.sessions.get_session(session_id)
         if not session:
@@ -302,7 +302,7 @@ class Storage:
 
         return {"sessions_cleaned": sessions_cleaned}
 
-    async def get_user_dashboard(self, user_id: int) -> Dict[str, Any]:
+    async def get_user_dashboard(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Get comprehensive user dashboard data."""
         # Get user info
         user = await self.users.get_user(user_id)

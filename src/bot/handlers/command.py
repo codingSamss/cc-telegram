@@ -3,7 +3,7 @@
 import asyncio
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -44,6 +44,22 @@ _PARSE_MODE_UNSET = object()
 _CHAT_ACTION_HEARTBEAT_INTERVAL_SECONDS = 4.0
 
 
+def _require_effective_user(update: Update) -> Any:
+    """Return effective user or raise for unsupported updates."""
+    user = update.effective_user
+    if user is None:
+        raise ValueError("Missing effective_user in update")
+    return user
+
+
+def _require_effective_chat(update: Update) -> Any:
+    """Return effective chat or raise for unsupported updates."""
+    chat = update.effective_chat
+    if chat is None:
+        raise ValueError("Missing effective_chat in update")
+    return chat
+
+
 async def _reply_update_message_resilient(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -52,13 +68,13 @@ async def _reply_update_message_resilient(
     parse_mode: str | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
     reply_to_message_id: int | None = None,
-):
+) -> Any:
     """Reply to update message with fallback to resilient send helper."""
     message = getattr(update, "message", None)
     if message is None:
         return None
 
-    send_kwargs = {}
+    send_kwargs: dict[str, Any] = {}
     if parse_mode is not None:
         send_kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
@@ -95,14 +111,14 @@ def _is_noop_edit_error(error: Exception) -> bool:
 
 
 async def _edit_message_resilient(
-    message,
+    message: Any,
     text: str,
     *,
     parse_mode: str | None | object = _PARSE_MODE_UNSET,
     reply_markup: InlineKeyboardMarkup | None = None,
-):
+) -> Any:
     """Edit message with markdown/no-op fallback."""
-    edit_kwargs = {}
+    edit_kwargs: dict[str, Any] = {}
     if parse_mode is not _PARSE_MODE_UNSET:
         edit_kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
@@ -164,7 +180,7 @@ async def _send_chat_action_heartbeat(
             continue
 
 
-def _get_or_create_resume_token_manager(context: ContextTypes.DEFAULT_TYPE):
+def _get_or_create_resume_token_manager(context: ContextTypes.DEFAULT_TYPE) -> Any:
     """Get shared resume token manager from bot_data."""
     from ...bot.resume_tokens import ResumeTokenManager
 
@@ -177,7 +193,7 @@ def _get_or_create_resume_token_manager(context: ContextTypes.DEFAULT_TYPE):
 
 def _get_or_create_resume_scanner(
     *, context: ContextTypes.DEFAULT_TYPE, settings: Settings, engine: str
-):
+) -> Any:
     """Get engine-specific desktop session scanner."""
     from ...bot.utils.codex_resume_scanner import CodexSessionScanner
     from ...claude.desktop_scanner import DesktopSessionScanner
@@ -365,7 +381,7 @@ async def _sync_chat_menu_for_engine(
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
-    user = update.effective_user
+    user = _require_effective_user(update)
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -404,7 +420,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• `/projects` - Show available projects\n"
         f"{status_line}\n"
         f"• `/engine [claude|codex]` - Switch CLI engine\n"
-        f"• `/actions` - Show quick actions\n"
         f"• `/git` - Git repository commands\n"
         f"{diagnostics_line}\n"
         f"**Quick Start:**\n"
@@ -439,7 +454,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
     # Log command
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
     if audit_logger:
         await audit_logger.log_command(
             user_id=user.id, command="start", args=[], success=True
@@ -484,25 +499,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**Navigation Commands:**\n"
         "• `/ls` - List files and directories\n"
         "• `/cd <directory>` - Change to directory\n"
-        "• `/pwd` - Show current directory\n"
         "• `/projects` - Show available projects\n\n"
         "**Session Commands:**\n"
         "• `/new` - Clear context and start a fresh session\n"
-        "• `/continue [message]` - Explicitly continue last session\n"
-        "• `/end` - End current session and clear context\n"
         f"{status_line}\n"
         f"{status_alias_line}\n"
         "• `/engine [claude|codex]` - Switch active CLI engine\n"
         "• `/provider` - Switch API provider (cc-switch)\n"
         f"{model_line}"
         "• `/export` - Export session history\n"
-        "• `/actions` - Show context-aware quick actions\n"
         "• `/git` - Git repository information\n\n"
         f"{diagnostics_text}"
         "**Session Behavior:**\n"
         "• Sessions are automatically maintained per project directory\n"
         "• Switching directories with `/cd` resumes the session for that project\n"
-        "• Use `/new` or `/end` to explicitly clear session context\n"
+        "• Use `/new` to explicitly clear session context\n"
         "• Sessions persist across bot restarts\n\n"
         "**Usage Examples:**\n"
         "• `cd myproject` - Enter project directory\n"
@@ -521,7 +532,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**Tips:**\n"
         "• Use specific, clear requests for best results\n"
         f"{status_hint_line}\n"
-        "• Use quick action buttons when available\n"
         "• File uploads are automatically processed by active engine\n\n"
         "Need more help? Contact your administrator."
     )
@@ -533,14 +543,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /engine command to switch active CLI adapter."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
         update=update,
         default_directory=settings.approved_directory,
     )
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
 
     active_engine = get_active_cli_engine(scope_state)
     args = [
@@ -689,15 +699,13 @@ async def switch_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle /provider command to switch cc-switch API provider."""
     from ..utils.cc_switch import CCSwitchManager
 
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
 
     # Permission check: restrict to allowed users
     if settings.allowed_users and user_id not in settings.allowed_users:
-        await _reply_update_message_resilient(
-            update, context, "无权限执行供应商切换。"
-        )
+        await _reply_update_message_resilient(update, context, "无权限执行供应商切换。")
         return
 
     cc_switch: CCSwitchManager | None = context.bot_data.get("cc_switch_manager")
@@ -754,7 +762,7 @@ async def switch_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /new command - explicitly starts a fresh session, clearing previous context."""
+    """Handle /new command by starting a fresh session and clearing old context."""
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -796,7 +804,7 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /continue command with optional prompt."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -807,7 +815,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         bot_data=context.bot_data,
         scope_state=scope_state,
     )
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
     session_lifecycle = context.bot_data.get("session_lifecycle_service") or (
         SessionLifecycleService(
             permission_manager=context.bot_data.get("permission_manager")
@@ -851,11 +859,12 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         # Check if there's an existing session in user context
         claude_session_id = session_lifecycle.get_active_session_id(scope_state)
+        effective_chat = _require_effective_chat(update)
         permission_handler = build_permission_handler(
             bot=context.bot,
-            chat_id=update.effective_chat.id,
+            chat_id=effective_chat.id,
             settings=settings,
-            chat_type=getattr(update.effective_chat, "type", None),
+            chat_type=getattr(effective_chat, "type", None),
             message_thread_id=getattr(
                 update.effective_message, "message_thread_id", None
             ),
@@ -976,14 +985,14 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /ls command."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
         update=update,
         default_directory=settings.approved_directory,
     )
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
 
     # Get current directory
     current_dir = scope_state.get("current_directory", settings.approved_directory)
@@ -1075,15 +1084,17 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cd command."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
         update=update,
         default_directory=settings.approved_directory,
     )
-    security_validator: SecurityValidator = context.bot_data.get("security_validator")
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    security_validator: Optional[SecurityValidator] = context.bot_data.get(
+        "security_validator"
+    )
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
 
     # Parse arguments
     if not context.args:
@@ -1150,6 +1161,14 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                         severity="medium",
                     )
                 return
+            if resolved_path is None:
+                await _reply_update_message_resilient(
+                    update,
+                    context,
+                    "❌ **Access Denied**\n\nUnable to resolve target directory.",
+                    parse_mode="Markdown",
+                )
+                return
         else:
             # Fallback validation without security validator
             if target_path == "/":
@@ -1166,7 +1185,10 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     resolved_path.relative_to(settings.approved_directory)
                 except ValueError:
                     await _reply_update_message_resilient(
-                        update, context, "❌ **Access Denied**\n\nPath outside approved directory.", parse_mode="Markdown"
+                        update,
+                        context,
+                        "❌ **Access Denied**\n\nPath outside approved directory.",
+                        parse_mode="Markdown",
                     )
                     return
 
@@ -1334,7 +1356,7 @@ async def show_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /context command - show real CLI session data."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -1350,7 +1372,7 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for_callback=False,
         full_mode=full_mode,
     )
-    loading_kwargs = {}
+    loading_kwargs: dict[str, Any] = {}
     if view_spec.loading_parse_mode:
         loading_kwargs["parse_mode"] = view_spec.loading_parse_mode
     status_msg = await _reply_update_message_resilient(
@@ -1375,7 +1397,9 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             session_service=session_service,
             include_resumable=view_spec.include_resumable,
             include_event_summary=view_spec.include_event_summary,
-            allow_precise_context_probe=engine_capabilities.supports_precise_context_probe,
+            allow_precise_context_probe=(
+                engine_capabilities.supports_precise_context_probe
+            ),
         )
         render_result = session_interaction.build_context_render_result(
             snapshot=snapshot,
@@ -1410,7 +1434,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /export command."""
-    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -1464,7 +1487,7 @@ async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /end command to terminate the current session."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -1521,7 +1544,7 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /actions command to show quick actions."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -1595,7 +1618,7 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /git command to show git repository information."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
@@ -1630,11 +1653,12 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         # Check if current directory is a git repository
         if not (current_dir / ".git").exists():
+            relative_dir = current_dir.relative_to(settings.approved_directory)
             await _reply_update_message_resilient(
                 update,
                 context,
                 f"📂 **Not a Git Repository**\n\n"
-                f"Current directory `{current_dir.relative_to(settings.approved_directory)}/` is not a git repository.\n\n"
+                f"Current directory `{relative_dir}/` is not a git repository.\n\n"
                 f"**Options:**\n"
                 f"• Navigate to a git repository with `/cd`\n"
                 f"• Initialize a new repository (ask Claude to help)\n"
@@ -1647,7 +1671,7 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         # Format status message
         relative_path = current_dir.relative_to(settings.approved_directory)
-        status_message = f"🔗 **Git Repository Status**\n\n"
+        status_message = "🔗 **Git Repository Status**\n\n"
         status_message += f"📂 Directory: `{relative_path}/`\n"
         status_message += f"🌿 Branch: `{git_status.branch}`\n"
 
@@ -1658,7 +1682,7 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         # Show file changes
         if not git_status.is_clean:
-            status_message += f"\n**Changes:**\n"
+            status_message += "\n**Changes:**\n"
             if git_status.modified:
                 status_message += f"📝 Modified: {len(git_status.modified)} files\n"
             if git_status.added:
@@ -1701,14 +1725,14 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cancel command - cancel the active Claude task."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     scope_key, _ = get_scope_state_from_update(
         user_data=context.user_data,
         update=update,
         default_directory=context.bot_data["settings"].approved_directory,
     )
 
-    task_registry: TaskRegistry = context.bot_data.get("task_registry")
+    task_registry: Optional[TaskRegistry] = context.bot_data.get("task_registry")
     if not task_registry:
         await _reply_update_message_resilient(
             update, context, "Task registry not available."
@@ -1729,7 +1753,7 @@ async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             update, context, "No active task to cancel."
         )
 
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
     if audit_logger:
         await audit_logger.log_command(
             user_id=user_id, command="cancel", args=[], success=cancelled
@@ -1775,14 +1799,14 @@ async def codex_diag_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Handle /codexdiag command to diagnose codex MCP calls without manual shell."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,
         update=update,
         default_directory=settings.approved_directory,
     )
-    audit_logger: AuditLogger = context.bot_data.get("audit_logger")
+    audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
     active_engine = get_active_cli_engine(scope_state)
     capabilities = get_engine_capabilities(active_engine)
     if not capabilities.supports_codex_diag:
@@ -1800,7 +1824,7 @@ async def codex_diag_command(
     project_dir = current_dir
     explicit_session_id = None
 
-    args = [arg.strip() for arg in context.args if arg and arg.strip()]
+    args = [arg.strip() for arg in (context.args or []) if arg and arg.strip()]
     if args:
         if args[0].lower() in {"root", "/"}:
             project_dir = settings.approved_directory
@@ -1811,8 +1835,15 @@ async def codex_diag_command(
 
     if explicit_session_id:
         import re
-        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", explicit_session_id, re.IGNORECASE):
-            await _reply_update_message_resilient(update, context, "❌ 无效的 session ID 格式")
+
+        if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            explicit_session_id,
+            re.IGNORECASE,
+        ):
+            await _reply_update_message_resilient(
+                update, context, "❌ 无效的 session ID 格式"
+            )
             return
 
     script_path = (
@@ -1931,11 +1962,12 @@ async def codex_diag_command(
 
 def _format_file_size(size: int) -> str:
     """Format file size in human-readable format."""
+    size_value = float(size)
     for unit in ["B", "KB", "MB", "GB"]:
-        if size < 1024:
-            return f"{size:.1f}{unit}" if unit != "B" else f"{size}B"
-        size /= 1024
-    return f"{size:.1f}TB"
+        if size_value < 1024:
+            return f"{size_value:.1f}{unit}" if unit != "B" else f"{int(size_value)}B"
+        size_value /= 1024
+    return f"{size_value:.1f}TB"
 
 
 def _escape_markdown(text: str) -> str:
@@ -2089,7 +2121,7 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /resume command - resume a desktop session for active engine."""
-    user_id = update.effective_user.id
+    user_id = _require_effective_user(update).id
     settings: Settings = context.bot_data["settings"]
     _, scope_state = get_scope_state_from_update(
         user_data=context.user_data,

@@ -10,7 +10,7 @@ Features:
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, List, Tuple
+from typing import AsyncIterator, List, Optional, Tuple
 
 import aiosqlite
 import structlog
@@ -88,18 +88,6 @@ CREATE TABLE audit_log (
     FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 
--- User tokens table (for token auth)
-CREATE TABLE user_tokens (
-    token_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    token_hash TEXT NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP,
-    last_used TIMESTAMP,
-    is_active BOOLEAN DEFAULT TRUE,
-    FOREIGN KEY (user_id) REFERENCES users(user_id)
-);
-
 -- Cost tracking table
 CREATE TABLE cost_tracking (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,7 +116,7 @@ class DatabaseManager:
     def __init__(self, database_url: str):
         """Initialize database manager."""
         self.database_path = self._parse_database_url(database_url)
-        self._connection_pool = []
+        self._connection_pool: List[aiosqlite.Connection] = []
         self._pool_size = 5
         self._pool_lock = asyncio.Lock()
 
@@ -141,7 +129,7 @@ class DatabaseManager:
         else:
             return Path(database_url)
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Initialize database and run migrations."""
         logger.info("Initializing database", path=str(self.database_path))
 
@@ -156,7 +144,7 @@ class DatabaseManager:
 
         logger.info("Database initialization complete")
 
-    async def _run_migrations(self):
+    async def _run_migrations(self) -> None:
         """Run database migrations."""
         async with aiosqlite.connect(self.database_path) as conn:
             conn.row_factory = aiosqlite.Row
@@ -192,7 +180,9 @@ class DatabaseManager:
         row = await cursor.fetchone()
         return row[0] if row and row[0] else 0
 
-    async def _set_schema_version(self, conn: aiosqlite.Connection, version: int):
+    async def _set_schema_version(
+        self, conn: aiosqlite.Connection, version: int
+    ) -> None:
         """Set schema version."""
         await conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)", (version,)
@@ -207,7 +197,7 @@ class DatabaseManager:
                 """
                 -- Add analytics views
                 CREATE VIEW IF NOT EXISTS daily_stats AS
-                SELECT 
+                SELECT
                     date(timestamp) as date,
                     COUNT(DISTINCT user_id) as active_users,
                     COUNT(*) as total_messages,
@@ -217,7 +207,7 @@ class DatabaseManager:
                 GROUP BY date(timestamp);
 
                 CREATE VIEW IF NOT EXISTS user_stats AS
-                SELECT 
+                SELECT
                     u.user_id,
                     u.telegram_username,
                     COUNT(DISTINCT s.session_id) as total_sessions,
@@ -280,7 +270,7 @@ class DatabaseManager:
             ),
         ]
 
-    async def _init_pool(self):
+    async def _init_pool(self) -> None:
         """Initialize connection pool."""
         logger.info("Initializing connection pool", size=self._pool_size)
 
@@ -295,6 +285,7 @@ class DatabaseManager:
     async def get_connection(self) -> AsyncIterator[aiosqlite.Connection]:
         """Get database connection from pool."""
         async with self._pool_lock:
+            conn: Optional[aiosqlite.Connection]
             if self._connection_pool:
                 conn = self._connection_pool.pop()
             else:
@@ -311,7 +302,7 @@ class DatabaseManager:
                 else:
                     await conn.close()
 
-    async def close(self):
+    async def close(self) -> None:
         """Close all connections in pool."""
         logger.info("Closing database connections")
 

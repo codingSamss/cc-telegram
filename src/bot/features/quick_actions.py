@@ -170,10 +170,15 @@ class QuickActionManager:
         }
 
         # Analyze recent messages for context clues
-        if session.context:
-            recent_messages = session.context.get("recent_messages", [])
+        context_data = getattr(session, "context", None)
+        if isinstance(context_data, dict):
+            recent_messages = context_data.get("recent_messages", [])
+            if not isinstance(recent_messages, list):
+                recent_messages = []
             for msg in recent_messages:
-                content = msg.get("content", "").lower()
+                if not isinstance(msg, dict):
+                    continue
+                content = str(msg.get("content", "")).lower()
 
                 # Check for test indicators
                 if any(word in content for word in ["test", "pytest", "unittest"]):
@@ -264,7 +269,7 @@ class QuickActionManager:
             raise ValueError(f"Unknown action: {action_id}")
 
         self.logger.info(
-            f"Executing quick action: {action.name} for session {session.id}"
+            f"Executing quick action: {action.name} for session {session.session_id}"
         )
 
         # Return the command - actual execution is handled by the bot

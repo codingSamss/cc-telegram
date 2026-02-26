@@ -16,14 +16,10 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.utils.constants import (
-    DEFAULT_CLAUDE_MAX_COST_PER_USER,
     DEFAULT_CLAUDE_MAX_TURNS,
     DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     DEFAULT_DATABASE_URL,
     DEFAULT_MAX_SESSIONS_PER_USER,
-    DEFAULT_RATE_LIMIT_BURST,
-    DEFAULT_RATE_LIMIT_REQUESTS,
-    DEFAULT_RATE_LIMIT_WINDOW,
     DEFAULT_SESSION_TIMEOUT_HOURS,
 )
 
@@ -41,12 +37,6 @@ class Settings(BaseSettings):
     approved_directory: Path = Field(..., description="Base directory for projects")
     allowed_users: Optional[List[int]] = Field(
         None, description="Allowed Telegram user IDs"
-    )
-    enable_token_auth: bool = Field(
-        False, description="Enable token-based authentication"
-    )
-    auth_token_secret: Optional[SecretStr] = Field(
-        None, description="Secret for auth tokens"
     )
 
     # Claude settings
@@ -75,9 +65,6 @@ class Settings(BaseSettings):
     )
     claude_timeout_seconds: int = Field(
         DEFAULT_CLAUDE_TIMEOUT_SECONDS, description="Claude timeout"
-    )
-    claude_max_cost_per_user: float = Field(
-        DEFAULT_CLAUDE_MAX_COST_PER_USER, description="Max cost per user"
     )
     use_sdk: bool = Field(True, description="Use Python SDK instead of CLI subprocess")
     sdk_enable_tool_permission_gate: bool = Field(
@@ -124,17 +111,6 @@ class Settings(BaseSettings):
     claude_disallowed_tools: Optional[List[str]] = Field(
         default=["git commit", "git push"],
         description="List of explicitly disallowed Claude tools/commands",
-    )
-
-    # Rate limiting
-    rate_limit_requests: int = Field(
-        DEFAULT_RATE_LIMIT_REQUESTS, description="Requests per window"
-    )
-    rate_limit_window: int = Field(
-        DEFAULT_RATE_LIMIT_WINDOW, description="Rate limit window seconds"
-    )
-    rate_limit_burst: int = Field(
-        DEFAULT_RATE_LIMIT_BURST, description="Burst capacity"
     )
 
     # Storage
@@ -319,12 +295,6 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_cross_field_dependencies(self) -> "Settings":
         """Validate dependencies between fields."""
-        # Check auth token requirements
-        if self.enable_token_auth and not self.auth_token_secret:
-            raise ValueError(
-                "auth_token_secret required when enable_token_auth is True"
-            )
-
         # Check MCP requirements
         if self.enable_mcp and not self.mcp_config_path:
             raise ValueError("mcp_config_path required when enable_mcp is True")
@@ -348,13 +318,6 @@ class Settings(BaseSettings):
     def telegram_token_str(self) -> str:
         """Get Telegram token as string."""
         return self.telegram_bot_token.get_secret_value()
-
-    @property
-    def auth_secret_str(self) -> Optional[str]:
-        """Get auth token secret as string."""
-        if self.auth_token_secret:
-            return self.auth_token_secret.get_secret_value()
-        return None
 
     @property
     def anthropic_api_key_str(self) -> Optional[str]:

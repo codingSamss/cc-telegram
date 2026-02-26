@@ -1,7 +1,5 @@
 """Tests for /resume UI rendering."""
 
-from pathlib import Path
-
 from src.bot.resume_tokens import ResumeTokenManager
 from src.bot.utils.resume_ui import build_resume_project_selector
 
