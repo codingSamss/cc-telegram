@@ -42,7 +42,7 @@ async def test_restart_polling_stops_then_starts_updater() -> None:
     updater.stop.assert_awaited_once()
     updater.start_polling.assert_awaited_once()
     kwargs = updater.start_polling.await_args.kwargs
-    assert kwargs["drop_pending_updates"] is True
+    assert kwargs["drop_pending_updates"] is False
     assert kwargs["bootstrap_retries"] == 10
     assert kwargs["error_callback"] == bot._polling_error_callback
     assert bot._polling_restart_requested is False

@@ -468,7 +468,7 @@ class ClaudeCodeBot:
         self._last_polling_error_log = 0.0
         self._polling_restart_requested = False
 
-    async def _start_polling(self) -> None:
+    async def _start_polling(self, *, drop_pending_updates: bool) -> None:
         """Start Telegram polling with shared options."""
         app = self._require_app()
         updater = getattr(app, "updater", None)
@@ -477,7 +477,7 @@ class ClaudeCodeBot:
 
         await updater.start_polling(
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
+            drop_pending_updates=drop_pending_updates,
             bootstrap_retries=10,
             error_callback=self._polling_error_callback,
         )
@@ -510,7 +510,9 @@ class ClaudeCodeBot:
         try:
             if updater.running:
                 await updater.stop()
-            await self._start_polling()
+            # Keep pending Telegram updates during self-heal restart so
+            # transient network issues do not drop user messages.
+            await self._start_polling(drop_pending_updates=False)
         except Exception as exc:
             self._polling_restart_requested = True
             logger.error(
@@ -571,7 +573,9 @@ class ClaudeCodeBot:
                 # Polling mode - initialize and start polling manually
                 await app.initialize()
                 await app.start()
-                await self._start_polling()
+                # Cold process start keeps legacy behavior: discard backlog and
+                # only serve fresh updates after boot.
+                await self._start_polling(drop_pending_updates=True)
                 self._reset_polling_recovery_state()
 
                 # Keep running until manually stopped
