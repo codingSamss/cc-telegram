@@ -35,6 +35,12 @@ ALLOWED_USERS=<your telegram user id>
 USE_SDK=true
 ```
 
+推荐补充（与默认配置一致）：
+```bash
+CLAUDE_SETTING_SOURCES=user,project,local
+CLAUDE_ALLOWED_TOOLS=
+```
+
 ### Claude 认证方式
 
 1. Claude CLI 凭据（推荐）
@@ -62,6 +68,10 @@ ENABLE_CODEX_CLI=true
 CODEX_CLI_PATH=  # 可留空，默认走 PATH
 CODEX_ENABLE_MCP=false
 ```
+
+说明：
+- `ENABLE_MCP` 仅用于应用侧通过 `MCP_CONFIG_PATH` 显式注入 MCP。
+- 即使 `ENABLE_MCP=false`，Claude 仍可从 `user/project/local` 配置源读取其自身 MCP 设置。
 
 启动后在 Telegram 中执行：
 ```text

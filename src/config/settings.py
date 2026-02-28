@@ -47,10 +47,10 @@ class Settings(BaseSettings):
         None, description="Path to Claude CLI executable"
     )
     claude_setting_sources: Optional[List[str]] = Field(
-        None,
+        default=["user", "project", "local"],
         description=(
-            "Optional setting sources for Claude SDK "
-            "(example: user,project,local). Leave empty to use CLI defaults."
+            "Claude SDK setting sources (default: user,project,local). "
+            "Use empty value to let special gateways decide."
         ),
     )
     anthropic_api_key: Optional[SecretStr] = Field(
@@ -87,26 +87,11 @@ class Settings(BaseSettings):
         description="Path to Codex CLI executable",
     )
     claude_allowed_tools: Optional[List[str]] = Field(
-        default=[
-            "Read",
-            "Write",
-            "Edit",
-            "Bash",
-            "Glob",
-            "Grep",
-            "LS",
-            "Task",
-            "MultiEdit",
-            "NotebookRead",
-            "NotebookEdit",
-            "WebFetch",
-            "TodoRead",
-            "TodoWrite",
-            "WebSearch",
-            "Skill",
-            "AskUserQuestion",
-        ],
-        description="List of allowed Claude tools",
+        default=None,
+        description=(
+            "Optional allowlist for Claude tools. "
+            "Unset/empty means do not pass --allowedTools (inherit CLI/runtime defaults)."
+        ),
     )
     claude_disallowed_tools: Optional[List[str]] = Field(
         default=["git commit", "git push"],
@@ -219,9 +204,11 @@ class Settings(BaseSettings):
         if v is None:
             return None
         if isinstance(v, str):
-            return [tool.strip() for tool in v.split(",") if tool.strip()]
+            tools = [tool.strip() for tool in v.split(",") if tool.strip()]
+            return tools or None
         if isinstance(v, list):
-            return [str(tool) for tool in v]
+            tools = [str(tool).strip() for tool in v if str(tool).strip()]
+            return tools or None
         return v  # type: ignore[no-any-return]
 
     @field_validator("claude_setting_sources", mode="before")

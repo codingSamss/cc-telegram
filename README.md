@@ -116,6 +116,8 @@ ALLOWED_USERS=<your telegram user id>
 ```bash
 # Claude 主路径（默认）
 USE_SDK=true
+CLAUDE_SETTING_SOURCES=user,project,local
+CLAUDE_ALLOWED_TOOLS=
 
 # 可选：启用 Codex CLI 适配
 ENABLE_CODEX_CLI=false
@@ -149,13 +151,15 @@ poetry run claude-telegram-bot --debug
   - `USE_SDK`：是否走 SDK
   - `CLAUDE_CLI_PATH`：CLI 路径（CLI 模式或 SDK fallback 使用）
   - `CLAUDE_MODEL` / `CLAUDE_MAX_TURNS` / `CLAUDE_TIMEOUT_SECONDS`
-  - `CLAUDE_SETTING_SOURCES`：通常留空，特殊网关场景再配置
+  - `CLAUDE_SETTING_SOURCES`：推荐 `user,project,local`；网关不兼容时可临时留空
+  - `CLAUDE_ALLOWED_TOOLS`：推荐留空（不下发 `--allowedTools`，继承本机 Claude 配置）
 - Codex 引擎
   - `ENABLE_CODEX_CLI`：启用 Codex 适配
   - `CODEX_CLI_PATH`：Codex 二进制路径（留空时尝试 PATH）
   - `CODEX_ENABLE_MCP`：是否允许 Codex 读取 MCP 配置
 - 存储与功能
   - `DATABASE_URL`（默认 `sqlite:///data/bot.db`）
+  - `ENABLE_MCP` / `MCP_CONFIG_PATH`：仅用于应用侧显式注入 MCP
   - `ENABLE_GIT_INTEGRATION` / `ENABLE_FILE_UPLOADS` / `ENABLE_QUICK_ACTIONS`
 
 ## 命令清单（与代码同步）
@@ -252,7 +256,7 @@ tmux capture-pane -t cli_tg_bot -p | tail -n 80
 | `No authentication providers configured` | 未配置白名单用户 | 配置 `ALLOWED_USERS` |
 | `ENABLE_CODEX_CLI is true but codex binary not found` | 未安装 Codex CLI 或路径错误 | 安装 Codex CLI / 设置 `CODEX_CLI_PATH` |
 | 图片提示当前引擎不支持 | 当前引擎/模式不具备图片能力 | 切到 `claude` + SDK，或使用支持 `--image` 的 Codex CLI |
-| `invalid claude code request` | 部分网关与显式 setting sources 不兼容 | 先保持 `CLAUDE_SETTING_SOURCES=` 为空 |
+| `invalid claude code request` | 部分网关与显式 setting sources 不兼容 | 临时将 `CLAUDE_SETTING_SOURCES=` 置空排障（默认推荐 `user,project,local`） |
 | `/codexdiag` 无输出或超时 | 当前非 codex、无脚本、或会话日志不可用 | 先 `/engine codex`，再检查 `scripts/cc_codex_diagnose.py` |
 
 ## 参考文档
