@@ -566,7 +566,11 @@ async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             chat_id=getattr(update.effective_chat, "id", None),
             engine=active_engine,
         )
-        supported = ", ".join(SUPPORTED_CLI_ENGINES)
+        supported = ", ".join(
+            engine for engine in SUPPORTED_CLI_ENGINES if engine in available_engines
+        )
+        if not supported:
+            supported = "none"
         selector_keyboard = _build_engine_selector_keyboard(
             active_engine=active_engine,
             available_engines=available_engines,
@@ -574,7 +578,7 @@ async def switch_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         selector_text = (
             "🧭 **CLI 引擎设置**\n\n"
             f"当前引擎：`{active_engine}`\n"
-            f"支持引擎：`{supported}`\n\n"
+            f"可用引擎：`{supported}`\n\n"
             "点击下方按钮即可切换；切换后会继续引导你选择最近目录与会话。\n"
             "也可手动输入：`/engine codex` 或 `/engine claude`"
         )

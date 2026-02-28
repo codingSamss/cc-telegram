@@ -137,7 +137,9 @@ class Settings(BaseSettings):
     )
     enable_git_integration: bool = Field(True, description="Enable git commands")
     enable_file_uploads: bool = Field(True, description="Enable file upload handling")
-    enable_quick_actions: bool = Field(True, description="Enable quick action buttons")
+    enable_quick_actions: bool = Field(
+        False, description="Enable quick action buttons"
+    )
     image_cleanup_max_age_hours: int = Field(
         24, description="Max age in hours for uploaded images before cleanup"
     )

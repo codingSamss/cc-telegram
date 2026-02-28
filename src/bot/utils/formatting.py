@@ -73,8 +73,14 @@ class ResponseFormatter:
             text = self._format_code_blocks(text)
             messages = self._split_message(text)
 
-        # Add context-aware quick actions to the last message
-        if messages and self.settings.enable_quick_actions:
+        # Keep chat replies clean by default. Quick-action keyboards are shown
+        # only when the caller explicitly asks for them.
+        if (
+            messages
+            and self.settings.enable_quick_actions
+            and isinstance(context, dict)
+            and bool(context.get("show_quick_actions"))
+        ):
             messages[-1].reply_markup = self._get_contextual_keyboard(context)
 
         return messages if messages else [FormattedMessage("_(No content to display)_")]

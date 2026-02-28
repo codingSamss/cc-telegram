@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Optional
 
 import structlog
 from telegram import Update
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -723,22 +724,44 @@ class ClaudeCodeBot:
             SecurityError,
         )
 
-        error_messages = {
-            AuthenticationError: "🔒 Authentication required. Please contact the administrator.",
-            SecurityError: "🛡️ Security violation detected. This incident has been logged.",
-            RateLimitExceeded: "⏱️ Rate limit exceeded. Please wait before sending more messages.",
-            ConfigurationError: "⚙️ Configuration error. Please contact the administrator.",
-            asyncio.TimeoutError: "⏰ Operation timed out. Please try again with a simpler request.",
-        }
+        error_messages: list[tuple[type[BaseException], str]] = [
+            (
+                AuthenticationError,
+                "🔒 Authentication required. Please contact the administrator.",
+            ),
+            (
+                SecurityError,
+                "🛡️ Security violation detected. This incident has been logged.",
+            ),
+            (
+                RateLimitExceeded,
+                "⏱️ Rate limit exceeded. Please wait before sending more messages.",
+            ),
+            (
+                ConfigurationError,
+                "⚙️ Configuration error. Please contact the administrator.",
+            ),
+            (
+                asyncio.TimeoutError,
+                "⏰ Operation timed out. Please try again with a simpler request.",
+            ),
+            (
+                Conflict,
+                "⚠️ 检测到同一 Bot Token 存在并发实例，请仅保留一个运行中的实例后重试。",
+            ),
+        ]
 
         error_type: type[Exception]
         if isinstance(error, Exception):
             error_type = type(error)
         else:
             error_type = Exception
-        user_message = error_messages.get(
-            error_type, "❌ An unexpected error occurred. Please try again."
-        )
+        user_message = "❌ An unexpected error occurred. Please try again."
+        if isinstance(error, BaseException):
+            for match_type, message in error_messages:
+                if isinstance(error, match_type):
+                    user_message = message
+                    break
 
         # Try to notify user
         if update_obj and update_obj.effective_message:
