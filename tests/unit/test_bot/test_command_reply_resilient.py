@@ -77,6 +77,31 @@ async def test_reply_update_message_resilient_falls_back_to_threadless_retry():
 
 
 @pytest.mark.asyncio
+async def test_reply_update_message_resilient_private_chat_drops_reply_quote():
+    """Private chat direct reply should not carry reply_to_message_id."""
+    message = SimpleNamespace(
+        reply_text=AsyncMock(return_value=object()),
+        message_thread_id=None,
+    )
+    update = SimpleNamespace(
+        message=message,
+        effective_chat=SimpleNamespace(id=12345, type="private"),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+
+    await _reply_update_message_resilient(
+        update,
+        context,
+        "no quote",
+        reply_to_message_id=99,
+    )
+
+    kwargs = message.reply_text.await_args.kwargs
+    assert "reply_to_message_id" not in kwargs
+
+
+@pytest.mark.asyncio
 async def test_edit_message_resilient_retries_without_markdown():
     """Edit helper should fallback to plain text when markdown parsing fails."""
     message = SimpleNamespace(

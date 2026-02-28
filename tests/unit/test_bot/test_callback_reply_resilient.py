@@ -73,6 +73,29 @@ async def test_reply_query_message_resilient_falls_back_to_threadless_retry():
 
 
 @pytest.mark.asyncio
+async def test_reply_query_message_resilient_private_chat_drops_reply_quote():
+    """Private chat callback reply should not carry reply_to_message_id."""
+    message = SimpleNamespace(
+        reply_text=AsyncMock(return_value=object()),
+        chat_id=12345,
+        chat=SimpleNamespace(id=12345, type="private"),
+        message_thread_id=None,
+    )
+    query = SimpleNamespace(message=message)
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+
+    await _reply_query_message_resilient(
+        query,
+        context,
+        "no quote",
+        reply_to_message_id=88,
+    )
+
+    kwargs = message.reply_text.await_args.kwargs
+    assert "reply_to_message_id" not in kwargs
+
+
+@pytest.mark.asyncio
 async def test_edit_query_message_resilient_retries_without_markdown():
     """Edit helper should fallback to plain text when markdown parsing fails."""
     query = SimpleNamespace(

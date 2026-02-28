@@ -8,6 +8,11 @@ _TELEGRAM_MESSAGE_LIMIT = 4096
 _TELEGRAM_SAFE_SPLIT_LIMIT = 3800
 
 
+def is_private_chat_type(chat_type: Optional[str]) -> bool:
+    """Whether chat type is private dialog."""
+    return str(chat_type or "").strip().lower() == "private"
+
+
 def is_markdown_parse_error(error: Exception) -> bool:
     """Whether Telegram send failure is caused by entity parsing."""
     error_text = str(error).lower()
@@ -98,6 +103,7 @@ async def send_message_resilient(
     chat_type: Optional[str] = None,
 ) -> Any:
     """Send message with parse fallback, threadless retry and long-text split."""
+    private_chat = is_private_chat_type(chat_type)
     normalized_thread_id = normalize_message_thread_id(
         message_thread_id, chat_type=chat_type
     )
@@ -107,7 +113,11 @@ async def send_message_resilient(
         send_kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
         send_kwargs["reply_markup"] = reply_markup
-    if isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
+    if (
+        not private_chat
+        and isinstance(reply_to_message_id, int)
+        and reply_to_message_id > 0
+    ):
         send_kwargs["reply_to_message_id"] = reply_to_message_id
     if normalized_thread_id is not None:
         send_kwargs["message_thread_id"] = normalized_thread_id

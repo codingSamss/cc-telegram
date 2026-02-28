@@ -670,6 +670,7 @@ async def _reply_text_resilient(
     resolved_chat_type = chat_type
     if resolved_chat_type is None:
         resolved_chat_type = getattr(message_chat, "type", None)
+    should_quote_reply = str(resolved_chat_type or "").strip().lower() != "private"
 
     if resolved_bot is not None and isinstance(message_chat_id, int):
         return await send_message_resilient(
@@ -688,7 +689,7 @@ async def _reply_text_resilient(
         send_kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
         send_kwargs["reply_markup"] = reply_markup
-    if reply_to_message_id is not None:
+    if should_quote_reply and reply_to_message_id is not None:
         send_kwargs["reply_to_message_id"] = reply_to_message_id
 
     try:
@@ -712,7 +713,7 @@ async def _reply_text_resilient(
             chunk_kwargs: dict[str, Any] = {}
             if idx == 0 and reply_markup is not None:
                 chunk_kwargs["reply_markup"] = reply_markup
-            if idx == 0 and reply_to_message_id is not None:
+            if idx == 0 and should_quote_reply and reply_to_message_id is not None:
                 chunk_kwargs["reply_to_message_id"] = reply_to_message_id
             last_message = await telegram_message.reply_text(chunk, **chunk_kwargs)
         return last_message

@@ -75,11 +75,17 @@ async def _reply_update_message_resilient(
         return None
 
     send_kwargs: dict[str, Any] = {}
+    chat_type = getattr(update.effective_chat, "type", None)
+    should_quote_reply = str(chat_type or "").strip().lower() != "private"
     if parse_mode is not None:
         send_kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
         send_kwargs["reply_markup"] = reply_markup
-    if isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
+    if (
+        should_quote_reply
+        and isinstance(reply_to_message_id, int)
+        and reply_to_message_id > 0
+    ):
         send_kwargs["reply_to_message_id"] = reply_to_message_id
 
     try:
@@ -101,7 +107,7 @@ async def _reply_update_message_resilient(
             message_thread_id=getattr(
                 update.effective_message, "message_thread_id", None
             ),
-            chat_type=getattr(chat, "type", None),
+            chat_type=chat_type,
         )
 
 
