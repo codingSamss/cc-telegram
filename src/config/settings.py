@@ -152,6 +152,28 @@ class Settings(BaseSettings):
         ge=0,
         le=10000,
     )
+    status_reactions_enabled: bool = Field(
+        True,
+        description="Enable multi-stage Telegram status reactions for text messages",
+    )
+    status_reaction_debounce_ms: int = Field(
+        700,
+        description="Debounce interval for non-terminal status reaction updates",
+        ge=0,
+        le=5000,
+    )
+    status_reaction_stall_soft_ms: int = Field(
+        10000,
+        description="Inactivity timeout for soft-stall reaction update",
+        ge=0,
+        le=120000,
+    )
+    status_reaction_stall_hard_ms: int = Field(
+        30000,
+        description="Inactivity timeout for hard-stall reaction update",
+        ge=0,
+        le=300000,
+    )
     status_context_probe_ttl_seconds: int = Field(
         0,
         description="TTL for /context precise /context probe cache (0 disables cache)",

@@ -1,5 +1,6 @@
 """Tests for Telegram message reaction handling."""
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -7,7 +8,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.bot.handlers.message import (
+    _MessageStatusReactionController,
     _compose_prompt_with_reaction_feedback,
+    _resolve_status_reaction_tool_emoji,
     _set_message_reaction_safe,
     handle_message_reaction,
     handle_reaction_update_fallback,
@@ -233,6 +236,65 @@ async def test_set_message_reaction_safe_returns_false_on_api_error():
     )
 
     assert ok is False
+
+
+def test_resolve_status_reaction_tool_emoji_with_known_categories():
+    """Tool reaction should map web/coding/unknown names to different emojis."""
+    assert _resolve_status_reaction_tool_emoji("WebFetch") == "⚡"
+    assert _resolve_status_reaction_tool_emoji("Bash") == "👨‍💻"
+    assert _resolve_status_reaction_tool_emoji("SomeCustomTool") == "🔥"
+
+
+@pytest.mark.asyncio
+async def test_status_reaction_controller_progression():
+    """Controller should advance queued -> tool -> done with debounced middle stage."""
+    bot = SimpleNamespace(set_message_reaction=AsyncMock(return_value=True))
+    controller = _MessageStatusReactionController(
+        enabled=True,
+        bot=bot,
+        chat_id=-1001,
+        message_id=101,
+        debounce_ms=5,
+        stall_soft_ms=1000,
+        stall_hard_ms=2000,
+    )
+
+    await controller.set_queued()
+    await controller.set_thinking()
+    await controller.set_tool("WebFetch")
+    await asyncio.sleep(0.03)
+    await controller.set_done()
+    await controller.shutdown()
+
+    reactions = [call.kwargs["reaction"] for call in bot.set_message_reaction.await_args_list]
+    assert reactions[0] == ["👀"]
+    assert ["⚡"] in reactions
+    assert reactions[-1] == ["👍"]
+
+
+@pytest.mark.asyncio
+async def test_status_reaction_controller_emits_stall_reactions():
+    """Controller should emit soft/hard stall emojis after inactivity."""
+    bot = SimpleNamespace(set_message_reaction=AsyncMock(return_value=True))
+    controller = _MessageStatusReactionController(
+        enabled=True,
+        bot=bot,
+        chat_id=-1001,
+        message_id=102,
+        debounce_ms=0,
+        stall_soft_ms=20,
+        stall_hard_ms=40,
+    )
+
+    await controller.set_queued()
+    await controller.set_thinking()
+    await asyncio.sleep(0.08)
+    await controller.set_done()
+    await controller.shutdown()
+
+    reactions = [call.kwargs["reaction"] for call in bot.set_message_reaction.await_args_list]
+    assert ["🥱"] in reactions
+    assert ["😨"] in reactions
 
 
 @pytest.mark.asyncio

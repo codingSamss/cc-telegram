@@ -96,6 +96,41 @@ _NEGATIVE_REACTION_TOKENS = {
 _BOT_REACTION_PROCESSING = "👀"
 _BOT_REACTION_SUCCESS = "👍"
 _BOT_REACTION_FAILED = "👎"
+_BOT_REACTION_THINKING = "🤔"
+_BOT_REACTION_TOOL = "🔥"
+_BOT_REACTION_TOOL_CODING = "👨‍💻"
+_BOT_REACTION_TOOL_WEB = "⚡"
+_BOT_REACTION_STALL_SOFT = "🥱"
+_BOT_REACTION_STALL_HARD = "😨"
+_BOT_REACTION_EMOJIS = {
+    "queued": _BOT_REACTION_PROCESSING,
+    "thinking": _BOT_REACTION_THINKING,
+    "tool": _BOT_REACTION_TOOL,
+    "coding": _BOT_REACTION_TOOL_CODING,
+    "web": _BOT_REACTION_TOOL_WEB,
+    "done": _BOT_REACTION_SUCCESS,
+    "error": _BOT_REACTION_FAILED,
+    "stall_soft": _BOT_REACTION_STALL_SOFT,
+    "stall_hard": _BOT_REACTION_STALL_HARD,
+}
+_STATUS_REACTION_CODING_TOOL_TOKENS = (
+    "exec",
+    "process",
+    "read",
+    "write",
+    "edit",
+    "session_status",
+    "bash",
+)
+_STATUS_REACTION_WEB_TOOL_TOKENS = (
+    "webfetch",
+    "websearch",
+    "web_search",
+    "web-search",
+    "web_fetch",
+    "web-fetch",
+    "browser",
+)
 
 
 def _escape_md(text: str) -> str:
@@ -722,6 +757,217 @@ async def _set_message_reaction_safe(
             error=str(e),
         )
         return False
+
+
+def _resolve_status_reaction_tool_emoji(tool_name: Optional[str]) -> str:
+    """Resolve reaction emoji based on tool name hints."""
+    normalized = str(tool_name or "").strip().lower()
+    if not normalized:
+        return _BOT_REACTION_EMOJIS["tool"]
+    if any(token in normalized for token in _STATUS_REACTION_WEB_TOOL_TOKENS):
+        return _BOT_REACTION_EMOJIS["web"]
+    if any(token in normalized for token in _STATUS_REACTION_CODING_TOOL_TOKENS):
+        return _BOT_REACTION_EMOJIS["coding"]
+    return _BOT_REACTION_EMOJIS["tool"]
+
+
+class _MessageStatusReactionController:
+    """Handle staged Telegram reactions for one inbound user message."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        bot: Any,
+        chat_id: Optional[int],
+        message_id: Optional[int],
+        debounce_ms: int,
+        stall_soft_ms: int,
+        stall_hard_ms: int,
+    ) -> None:
+        self._enabled = bool(enabled)
+        self._bot = bot
+        self._chat_id = chat_id
+        self._message_id = message_id
+        self._debounce_seconds = max(float(debounce_ms), 0.0) / 1000.0
+        self._stall_soft_seconds = max(float(stall_soft_ms), 0.0) / 1000.0
+        self._stall_hard_seconds = max(float(stall_hard_ms), 0.0) / 1000.0
+
+        self._current_emoji = ""
+        self._pending_emoji: Optional[str] = None
+        self._finished = False
+        self._debounce_task: Optional[asyncio.Task] = None
+        self._stall_soft_task: Optional[asyncio.Task] = None
+        self._stall_hard_task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _cancel_task(task: Optional[asyncio.Task]) -> None:
+        if task and not task.done():
+            task.cancel()
+
+    def _cancel_scheduled_tasks(self) -> None:
+        self._cancel_task(self._debounce_task)
+        self._cancel_task(self._stall_soft_task)
+        self._cancel_task(self._stall_hard_task)
+        self._debounce_task = None
+        self._stall_soft_task = None
+        self._stall_hard_task = None
+
+    async def _set_emoji(
+        self,
+        emoji: Optional[str],
+        *,
+        force: bool = False,
+        reset_stall: bool = True,
+    ) -> None:
+        if not self._enabled:
+            return
+        if self._finished and not force:
+            return
+
+        normalized = str(emoji or "").strip()
+        self._pending_emoji = None
+        if normalized and normalized == self._current_emoji:
+            if reset_stall:
+                self._reset_stall_timers()
+            return
+
+        ok = await _set_message_reaction_safe(
+            self._bot,
+            chat_id=self._chat_id,
+            message_id=self._message_id,
+            emoji=normalized or None,
+        )
+        if ok:
+            self._current_emoji = normalized
+        if reset_stall:
+            self._reset_stall_timers()
+
+    async def _emit_stall(self, stage: str) -> None:
+        delay = (
+            self._stall_soft_seconds if stage == "soft" else self._stall_hard_seconds
+        )
+        if delay <= 0:
+            return
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        if self._finished:
+            return
+        stall_emoji = (
+            _BOT_REACTION_EMOJIS["stall_soft"]
+            if stage == "soft"
+            else _BOT_REACTION_EMOJIS["stall_hard"]
+        )
+        await self._set_emoji(stall_emoji, reset_stall=False)
+
+    def _reset_stall_timers(self) -> None:
+        if not self._enabled or self._finished:
+            return
+        self._cancel_task(self._stall_soft_task)
+        self._cancel_task(self._stall_hard_task)
+        self._stall_soft_task = None
+        self._stall_hard_task = None
+        if self._stall_soft_seconds > 0:
+            self._stall_soft_task = asyncio.create_task(self._emit_stall("soft"))
+        if self._stall_hard_seconds > 0:
+            self._stall_hard_task = asyncio.create_task(self._emit_stall("hard"))
+
+    async def _flush_pending_emoji(self, expected_emoji: str) -> None:
+        try:
+            if self._debounce_seconds > 0:
+                await asyncio.sleep(self._debounce_seconds)
+        except asyncio.CancelledError:
+            return
+        if self._finished:
+            return
+        if self._pending_emoji != expected_emoji:
+            return
+        await self._set_emoji(expected_emoji, reset_stall=False)
+
+    def _schedule_debounced_emoji(self, emoji: Optional[str]) -> None:
+        if not self._enabled or self._finished:
+            return
+        normalized = str(emoji or "").strip()
+        if not normalized:
+            return
+        if normalized == self._current_emoji:
+            self._pending_emoji = None
+            self._reset_stall_timers()
+            return
+
+        self._pending_emoji = normalized
+        self._cancel_task(self._debounce_task)
+        self._debounce_task = asyncio.create_task(self._flush_pending_emoji(normalized))
+        self._reset_stall_timers()
+
+    async def set_queued(self) -> None:
+        await self._set_emoji(_BOT_REACTION_EMOJIS["queued"])
+
+    async def set_thinking(self) -> None:
+        self._schedule_debounced_emoji(_BOT_REACTION_EMOJIS["thinking"])
+
+    async def set_tool(self, tool_name: Optional[str] = None) -> None:
+        self._schedule_debounced_emoji(_resolve_status_reaction_tool_emoji(tool_name))
+
+    async def set_done(self) -> None:
+        if not self._enabled:
+            return
+        self._finished = True
+        self._cancel_scheduled_tasks()
+        await self._set_emoji(_BOT_REACTION_EMOJIS["done"], force=True, reset_stall=False)
+
+    async def set_error(self) -> None:
+        if not self._enabled:
+            return
+        self._finished = True
+        self._cancel_scheduled_tasks()
+        await self._set_emoji(
+            _BOT_REACTION_EMOJIS["error"], force=True, reset_stall=False
+        )
+
+    async def clear(self) -> None:
+        if not self._enabled:
+            return
+        self._finished = True
+        self._cancel_scheduled_tasks()
+        await self._set_emoji(None, force=True, reset_stall=False)
+
+    async def shutdown(self) -> None:
+        """Cancel background timers/tasks without changing current reaction."""
+        self._cancel_scheduled_tasks()
+
+
+async def _update_stream_reaction_status(
+    controller: Optional[_MessageStatusReactionController],
+    update_obj: Any,
+) -> None:
+    """Translate stream events to reaction state transitions."""
+    if controller is None:
+        return
+
+    if update_obj.type == "error":
+        await controller.set_error()
+        return
+
+    if update_obj.type == "assistant" and update_obj.tool_calls:
+        first_tool_name = None
+        first_tool = update_obj.tool_calls[0] if update_obj.tool_calls else None
+        if isinstance(first_tool, dict):
+            first_tool_name = str(first_tool.get("name") or "").strip() or None
+        await controller.set_tool(first_tool_name)
+        return
+
+    if update_obj.type == "progress":
+        metadata = update_obj.metadata or {}
+        if metadata.get("item_type") == "command_execution":
+            command_name = str(metadata.get("command") or "").strip() or "bash"
+            await controller.set_tool(command_name)
+            return
+
+    if update_obj.type in {"assistant", "progress", "tool_result", "system"}:
+        await controller.set_thinking()
 
 
 def _integration_supports_image_analysis(cli_integration: Any) -> bool:
@@ -1854,6 +2100,7 @@ async def handle_text_message(
 
     typing_stop_event = asyncio.Event()
     typing_heartbeat_task: Optional[asyncio.Task] = None
+    reaction_controller: Optional[_MessageStatusReactionController] = None
 
     try:
         # Check if user already has an active task
@@ -1907,12 +2154,16 @@ async def handle_text_message(
             reply_to_message_id=input_message_id,
             reply_markup=cancel_keyboard,
         )
-        await _set_message_reaction_safe(
-            context.bot,
+        reaction_controller = _MessageStatusReactionController(
+            enabled=getattr(settings, "status_reactions_enabled", True),
+            bot=context.bot,
             chat_id=input_chat_id,
             message_id=input_message_id,
-            emoji=_BOT_REACTION_PROCESSING,
+            debounce_ms=getattr(settings, "status_reaction_debounce_ms", 700),
+            stall_soft_ms=getattr(settings, "status_reaction_stall_soft_ms", 10000),
+            stall_hard_ms=getattr(settings, "status_reaction_stall_hard_ms", 30000),
         )
+        await reaction_controller.set_queued()
 
         # Get current directory
         current_dir = scope_state.get("current_directory", settings.approved_directory)
@@ -2044,6 +2295,7 @@ async def handle_text_message(
             nonlocal progress_msg, last_progress_text, pending_progress_text
             nonlocal last_progress_edit_ts
             try:
+                await _update_stream_reaction_status(reaction_controller, update_obj)
                 progress_text = await _format_progress_update(update_obj)
                 if not progress_text:
                     return
@@ -2278,12 +2530,15 @@ async def handle_text_message(
                     await frozen_msg.delete()
                 except Exception:
                     pass
-            await _set_message_reaction_safe(
-                context.bot,
-                chat_id=input_chat_id,
-                message_id=input_message_id,
-                emoji=None,
-            )
+            if reaction_controller:
+                await reaction_controller.clear()
+            else:
+                await _set_message_reaction_safe(
+                    context.bot,
+                    chat_id=input_chat_id,
+                    message_id=input_message_id,
+                    emoji=None,
+                )
             return
         except ClaudeToolValidationError as e:
             # Tool validation error with detailed instructions
@@ -2399,12 +2654,11 @@ async def handle_text_message(
             except Exception:
                 pass
 
-        await _set_message_reaction_safe(
-            context.bot,
-            chat_id=input_chat_id,
-            message_id=input_message_id,
-            emoji=_BOT_REACTION_SUCCESS if command_succeeded else _BOT_REACTION_FAILED,
-        )
+        if reaction_controller:
+            if command_succeeded:
+                await reaction_controller.set_done()
+            else:
+                await reaction_controller.set_error()
 
         # Send formatted responses (may be multiple messages)
         for i, message in enumerate(formatted_messages):
@@ -2547,12 +2801,15 @@ async def handle_text_message(
             _with_engine_badge(error_msg, locals().get("active_engine", ENGINE_CLAUDE)),
             parse_mode="Markdown",
         )
-        await _set_message_reaction_safe(
-            context.bot,
-            chat_id=input_chat_id,
-            message_id=input_message_id,
-            emoji=_BOT_REACTION_FAILED,
-        )
+        if reaction_controller:
+            await reaction_controller.set_error()
+        else:
+            await _set_message_reaction_safe(
+                context.bot,
+                chat_id=input_chat_id,
+                message_id=input_message_id,
+                emoji=_BOT_REACTION_FAILED,
+            )
 
         # Log failed processing
         if audit_logger:
@@ -2565,6 +2822,8 @@ async def handle_text_message(
 
         logger.error("Error processing text message", error=str(e), user_id=user_id)
     finally:
+        if reaction_controller:
+            await reaction_controller.shutdown()
         typing_stop_event.set()
         if typing_heartbeat_task and not typing_heartbeat_task.done():
             typing_heartbeat_task.cancel()

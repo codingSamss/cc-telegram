@@ -159,6 +159,7 @@ poetry run claude-telegram-bot --debug
   - `CODEX_ENABLE_MCP`：是否允许 Codex 读取 MCP 配置
 - 存储与功能
   - `DATABASE_URL`（默认 `sqlite:///data/bot.db`）
+  - `STATUS_REACTIONS_ENABLED` / `STATUS_REACTION_*`：文本请求的多阶段 reaction（queued/thinking/tool/done/error + stall）
   - `ENABLE_MCP` / `MCP_CONFIG_PATH`：仅用于应用侧显式注入 MCP
   - `ENABLE_GIT_INTEGRATION` / `ENABLE_FILE_UPLOADS` / `ENABLE_QUICK_ACTIONS`
 
