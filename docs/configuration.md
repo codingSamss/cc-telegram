@@ -40,12 +40,12 @@ CLAUDE_DISALLOWED_TOOLS=git commit,git push
 ```bash
 ENABLE_CODEX_CLI=false
 CODEX_CLI_PATH=
-CODEX_ENABLE_MCP=false
+CODEX_ENABLE_MCP=true
 ```
 
 说明：
 - 启用 Codex 后，可通过 `/engine codex` 切换。
-- `CODEX_ENABLE_MCP=false` 是默认推荐，避免启动或会话初始化变慢。
+- `CODEX_ENABLE_MCP=true` 为默认值，更接近本机 Codex CLI 行为；如需严格禁用 MCP，再显式设为 `false`。
 - `CLAUDE_BINARY_PATH` 为兼容字段，通常与 `CLAUDE_CLI_PATH` 保持一致或留空。
 - `CLAUDE_ALLOWED_TOOLS` 为空时，不向 CLI 传 `--allowedTools`，可继承本机 Claude 配置。
 - `CLAUDE_SETTING_SOURCES` 默认推荐 `user,project,local`；若你的网关拒绝显式 sources，再临时留空排障。

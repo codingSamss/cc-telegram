@@ -79,7 +79,7 @@ class Settings(BaseSettings):
         description="Enable Codex CLI adapter (subprocess mode)",
     )
     codex_enable_mcp: bool = Field(
-        False,
+        True,
         description="Enable MCP servers for Codex CLI sessions",
     )
     codex_cli_path: Optional[str] = Field(

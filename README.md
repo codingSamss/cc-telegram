@@ -122,7 +122,7 @@ CLAUDE_ALLOWED_TOOLS=
 # 可选：启用 Codex CLI 适配
 ENABLE_CODEX_CLI=false
 CODEX_CLI_PATH=
-CODEX_ENABLE_MCP=false
+CODEX_ENABLE_MCP=true
 ```
 
 说明：
@@ -153,10 +153,11 @@ poetry run claude-telegram-bot --debug
   - `CLAUDE_MODEL` / `CLAUDE_MAX_TURNS` / `CLAUDE_TIMEOUT_SECONDS`
   - `CLAUDE_SETTING_SOURCES`：推荐 `user,project,local`；网关不兼容时可临时留空
   - `CLAUDE_ALLOWED_TOOLS`：推荐留空（不下发 `--allowedTools`，继承本机 Claude 配置）
+  - `ENABLE_MCP=false` 时，仅是不注入项目侧 `--mcp-config`；通常不影响 Claude 读取本机配置源能力
 - Codex 引擎
   - `ENABLE_CODEX_CLI`：启用 Codex 适配
   - `CODEX_CLI_PATH`：Codex 二进制路径（留空时尝试 PATH）
-  - `CODEX_ENABLE_MCP`：是否允许 Codex 读取 MCP 配置
+  - `CODEX_ENABLE_MCP`：是否允许 Codex 读取 MCP 配置（默认 `true`，更接近本地 Codex CLI）
 - 存储与功能
   - `DATABASE_URL`（默认 `sqlite:///data/bot.db`）
   - `STATUS_REACTIONS_ENABLED` / `STATUS_REACTION_*`：文本请求的多阶段 reaction（queued/thinking/tool/done/error + stall）
@@ -198,7 +199,8 @@ poetry run claude-telegram-bot --debug
   - 支持 `/model <name>` 透传为 `--model`
   - `/status` 是主状态命令（`/context` 为兼容别名）
   - 支持 `/codexdiag`
-  - 默认通过 `-c mcp_servers={}` 禁用 MCP（除非 `CODEX_ENABLE_MCP=true`）
+  - 当 `CODEX_ENABLE_MCP=false` 时，会通过 `-c mcp_servers={}` 显式禁用 MCP
+  - `ENABLE_MCP` 与 `CODEX_ENABLE_MCP` 独立：前者是 Claude 项目侧注入，后者是 Codex 是否读取本机 MCP
 
 ## 文件与图片处理
 

@@ -60,7 +60,7 @@ async def test_init_progress_text_does_not_show_stale_model_name():
         },
     )
     text = await _format_progress_update(update)
-    assert text == "🚀 *Starting Claude* with 2 tools available"
+    assert text == "🚀 *Starting Claude*"
 
 
 @pytest.mark.asyncio
@@ -482,7 +482,7 @@ def test_build_collapsed_thinking_summary_keeps_model_and_context():
     """Collapsed thinking summary should keep model line and append context info."""
     collapsed = _build_collapsed_thinking_summary(
         all_progress_lines=[
-            "🚀 *Starting Codex* with 15 tools available",
+            "🚀 *Starting Codex*",
             "🧠 *Using model:* o4-mini",
             "🔧 Read: `src/main.py`",
         ],

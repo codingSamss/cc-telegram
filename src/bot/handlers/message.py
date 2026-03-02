@@ -1452,11 +1452,10 @@ async def _format_progress_update(update_obj: Any) -> Optional[str]:
     elif update_obj.type == "system":
         # System initialization or other system messages
         if update_obj.metadata and update_obj.metadata.get("subtype") == "init":
-            tools_count = len(update_obj.metadata.get("tools", []))
             # Avoid showing potentially stale requested/default model names here.
             # Actual model should be shown only after resolution.
             engine_label = _stream_engine_label(update_obj)
-            return f"🚀 *Starting {engine_label}* with {tools_count} tools available"
+            return f"🚀 *Starting {engine_label}*"
         if (
             update_obj.metadata
             and update_obj.metadata.get("subtype") == "model_resolved"

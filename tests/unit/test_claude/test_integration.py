@@ -67,7 +67,7 @@ def test_extract_local_command_output_ignores_plain_user_text(tmp_path):
 
 def test_build_command_for_codex_exec_uses_codex_flags(tmp_path, monkeypatch):
     """Codex CLI should use exec/json flags instead of Claude-only options."""
-    manager = _build_manager(tmp_path)
+    manager = _build_manager(tmp_path, codex_enable_mcp=False)
     monkeypatch.setattr(
         "src.claude.sdk_integration.find_claude_cli",
         lambda _: "/usr/local/bin/codex",
@@ -111,7 +111,7 @@ def test_build_command_for_codex_exec_keeps_mcp_when_enabled(tmp_path, monkeypat
 
 def test_build_command_for_codex_exec_includes_image_flags(tmp_path, monkeypatch):
     """Codex CLI should map images[*].file_path to repeated --image options."""
-    manager = _build_manager(tmp_path)
+    manager = _build_manager(tmp_path, codex_enable_mcp=False)
     monkeypatch.setattr(
         "src.claude.sdk_integration.find_claude_cli",
         lambda _: "/usr/local/bin/codex",
@@ -144,7 +144,7 @@ def test_build_command_for_codex_exec_includes_image_flags(tmp_path, monkeypatch
 
 def test_build_command_for_codex_resume_uses_resume_subcommand(tmp_path, monkeypatch):
     """Codex continuation should use exec resume with session ID and prompt."""
-    manager = _build_manager(tmp_path)
+    manager = _build_manager(tmp_path, codex_enable_mcp=False)
     monkeypatch.setattr(
         "src.claude.sdk_integration.find_claude_cli",
         lambda _: "/usr/local/bin/codex",
@@ -176,7 +176,7 @@ def test_build_command_for_codex_resume_with_images_places_flags_after_resume(
     tmp_path, monkeypatch
 ):
     """Codex resume with images should scope --image flags to resume subcommand."""
-    manager = _build_manager(tmp_path)
+    manager = _build_manager(tmp_path, codex_enable_mcp=False)
     monkeypatch.setattr(
         "src.claude.sdk_integration.find_claude_cli",
         lambda _: "/usr/local/bin/codex",
@@ -208,7 +208,7 @@ def test_build_command_for_codex_resume_without_prompt_uses_default(
     tmp_path, monkeypatch
 ):
     """Codex resume should always carry a non-empty prompt to satisfy CLI contract."""
-    manager = _build_manager(tmp_path)
+    manager = _build_manager(tmp_path, codex_enable_mcp=False)
     monkeypatch.setattr(
         "src.claude.sdk_integration.find_claude_cli",
         lambda _: "/usr/local/bin/codex",
